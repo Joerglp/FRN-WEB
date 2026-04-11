@@ -919,38 +919,53 @@ async function startRxStream(mount) {
   if (!mount) return;
   const audio = document.getElementById("rx-audio");
   const url   = `http://${iceHost}:${icePort}/${mount}.mp3`;
+
+  // crossOrigin must be set before src, before any load
   audio.crossOrigin = "anonymous";
 
-  // If graph already exists just swap the src
-  if (rxSource) {
-    audio.pause();
-    audio.src = url;
-    audio.load();
-    try { await audio.play(); } catch {}
-    setRxLed(true);
-    return;
-  }
-
+  // Swap source (works whether first call or room change)
+  audio.pause();
   audio.src = url;
   audio.load();
 
-  // Build Web Audio graph (only once per page load)
-  try {
-    rxAudioCtx = new AudioContext();
-    rxSource   = rxAudioCtx.createMediaElementSource(audio);
-    rxAnalyser = rxAudioCtx.createAnalyser();
-    rxAnalyser.fftSize = 256;
-    rxSource.connect(rxAnalyser);
-    rxAnalyser.connect(rxAudioCtx.destination);
-    clearInterval(rxLevelTimer);
-    rxLevelTimer = setInterval(updateRxLevel, 50);
-  } catch (e) {
-    console.warn("RX Web Audio:", e);
-    // play anyway without VU
+  // Build Web Audio graph once per page load
+  if (!rxSource) {
+    try {
+      rxAudioCtx = new AudioContext();
+      rxSource   = rxAudioCtx.createMediaElementSource(audio);
+      rxAnalyser = rxAudioCtx.createAnalyser();
+      rxAnalyser.fftSize = 256;
+      rxSource.connect(rxAnalyser);
+      rxAnalyser.connect(rxAudioCtx.destination);
+      clearInterval(rxLevelTimer);
+      rxLevelTimer = setInterval(updateRxLevel, 50);
+    } catch (e) {
+      console.warn("RX Web Audio:", e);
+    }
   }
 
-  try { await audio.play(); } catch {}
-  setRxLed(true);
+  // Resume AudioContext — browsers suspend it until a user gesture
+  try {
+    if (rxAudioCtx && rxAudioCtx.state === "suspended")
+      await rxAudioCtx.resume();
+  } catch {}
+
+  try {
+    await audio.play();
+    setRxLed(true);
+  } catch (e) {
+    // Autoplay blocked — will start on first user interaction
+    console.info("RX autoplay blocked, waiting for gesture:", e.message);
+    setRxLed(false);
+    // Retry on first click/touch anywhere
+    const retry = async () => {
+      document.removeEventListener("pointerdown", retry);
+      if (rxAudioCtx && rxAudioCtx.state === "suspended")
+        await rxAudioCtx.resume().catch(() => {});
+      audio.play().then(() => setRxLed(true)).catch(() => {});
+    };
+    document.addEventListener("pointerdown", retry, { once: true });
+  }
 }
 
 function stopRxStream() {
