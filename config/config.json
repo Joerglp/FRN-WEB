@@ -25,11 +25,6 @@
 
   "ui": {
     "title":    "FRN Webstreams",
-    "subtitle": "Free Radio Network",
-    "streams": [
-      { "name": "Quasel-Ecke",        "mount": "quasel",     "channel": "CH-01" },
-      { "name": "Steinheim-Freenet5", "mount": "steinheim",  "channel": "CH-02" },
-      { "name": "Eickelborn-Freenet", "mount": "eickelborn", "channel": "CH-03" }
-    ]
+    "subtitle": "Free Radio Network"
   }
 }

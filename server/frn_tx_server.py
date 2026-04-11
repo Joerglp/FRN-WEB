@@ -542,12 +542,17 @@ class TXServer:
 
     async def handle_config(self, request):
         """Return non-sensitive config for the frontend."""
-        ui = self.cfg.get("ui", {})
+        ui      = self.cfg.get("ui", {})
         icecast = self.cfg.get("icecast", {})
+        # ui.streams in config.json ist optional — Fallback auf tx_rooms.json
+        streams = ui.get("streams") or [
+            {"name": r.name, "mount": mount, "channel": f"CH-{i+1:02d}"}
+            for i, (mount, r) in enumerate(self.rooms.items())
+        ]
         return web.json_response({
-            "title":    ui.get("title",    "FRN Webstreams"),
-            "subtitle": ui.get("subtitle", "Free Radio Network"),
-            "streams":  ui.get("streams",  []),
+            "title":        ui.get("title",    "FRN Webstreams"),
+            "subtitle":     ui.get("subtitle", "Free Radio Network"),
+            "streams":      streams,
             "icecast_host": icecast.get("host", "localhost"),
             "icecast_port": icecast.get("port", 8000),
         })
