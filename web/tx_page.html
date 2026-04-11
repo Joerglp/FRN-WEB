@@ -1176,6 +1176,7 @@ async function pttStart(e) {
     }
   }
   if (txActive) return;
+  muteStreams(true);   // sofort stumm — nicht erst nach TX-Freigabe
   setStatus("Verbinde...", "");
 
   let stream;
@@ -1241,6 +1242,7 @@ async function pttStart(e) {
 
 function pttStop(e) {
   if (e) e.preventDefault();
+  muteStreams(false);   // sofort wieder hörbar — Parrot kommt gleich
   if (!txActive) { stopAudio(); return; }
   if (ws && ws.readyState === WebSocket.OPEN)
     ws.send(JSON.stringify({ cmd: "PTT_STOP" }));
