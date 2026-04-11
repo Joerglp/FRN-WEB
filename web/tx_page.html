@@ -827,10 +827,10 @@ function updateCallsignHint() {
 async function doLogin() {
   const user     = document.getElementById("username").value.trim();
   const pass     = document.getElementById("password").value;
-  const callsign = document.getElementById("callsign").value.trim();
+  const inputCallsign = document.getElementById("callsign")?.value.trim() || "";
   document.getElementById("login-error").textContent = "";
   const payload = { username: user, password: pass };
-  if (callsign) payload.callsign = callsign;
+  if (inputCallsign) payload.callsign = inputCallsign;
   try {
     const resp = await fetch(`${TX_BASE}/api/login`, {
       method: "POST",
