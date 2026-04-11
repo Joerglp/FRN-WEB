@@ -367,6 +367,32 @@ audio {
 }
 @keyframes blink { 50% { opacity: 0.3; } }
 
+/* RX stream bar */
+.rx-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; margin-bottom: 14px;
+  background: var(--inset); border: 1px solid var(--border); border-radius: 8px;
+}
+.rx-bar-left {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+}
+.rx-bar-label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.6em; letter-spacing: 0.14em; color: var(--muted);
+  text-transform: uppercase; width: 2.8em;
+}
+.rx-vu-segs {
+  flex: 1; display: flex; gap: 2px; height: 14px; align-items: stretch;
+}
+.rx-mute-btn {
+  background: none; border: 1px solid var(--dim); border-radius: 4px;
+  color: var(--muted); font-size: 0.9em; padding: 2px 7px;
+  cursor: pointer; flex-shrink: 0; transition: border-color 0.15s, color 0.15s;
+  line-height: 1.6;
+}
+.rx-mute-btn:hover { border-color: var(--accent); color: var(--accent); }
+.rx-mute-btn.muted { border-color: var(--red); color: var(--red); }
+
 /* ── Footer ── */
 .site-footer {
   padding: 20px 20px 0;
@@ -593,6 +619,16 @@ audio {
       <div class="room-selector-label">Raum</div>
       <select id="room-select" onchange="onRoomChange()"></select>
     </div>
+    <!-- RX Stream Auto-Play + VU -->
+    <div class="rx-bar">
+      <div class="rx-bar-left">
+        <span class="led" id="led-rx"></span>
+        <span class="rx-bar-label" id="rx-label">RX</span>
+      </div>
+      <div class="rx-vu-segs" id="rx-vu-segments"></div>
+      <button class="rx-mute-btn" id="rx-mute-btn" onclick="toggleRxMute()" title="Stummschalten">🔇</button>
+    </div>
+    <audio id="rx-audio" preload="none" style="display:none"></audio>
     <div class="user-list-header">Verbundene Benutzer</div>
     <div id="user-list"><div class="user-loading">· · ·</div></div>
   </div>
@@ -793,11 +829,19 @@ audio {
 <script>
 // ── VU Meter setup ──────────────────────────────────────────────────────────
 const VU_COUNT = 16;
+// Build TX VU segments
 const vuWrap = document.getElementById("vu-segments");
 for (let i = 0; i < VU_COUNT; i++) {
   const s = document.createElement("div");
   s.className = "vu-seg"; s.id = "vu-" + i;
   vuWrap.appendChild(s);
+}
+// Build RX VU segments
+const rxVuWrap = document.getElementById("rx-vu-segments");
+for (let i = 0; i < VU_COUNT; i++) {
+  const s = document.createElement("div");
+  s.className = "vu-seg"; s.id = "rxvu-" + i;
+  rxVuWrap.appendChild(s);
 }
 
 function setLed(id, on) {
@@ -862,10 +906,99 @@ let workletNode = null, analyser = null;
 let txActive = false, levelTimer = null;
 let clientPollTimer = null;
 
+// ── RX Stream + VU ──────────────────────────────────────────────────────────
+let rxAudioCtx  = null;
+let rxAnalyser  = null;
+let rxSource    = null;   // MediaElementSource (can only be created once per element)
+let rxLevelTimer = null;
+let rxMuted      = false;
+
+async function startRxStream(mount) {
+  if (!mount) return;
+  const audio = document.getElementById("rx-audio");
+  const url   = `/stream/${mount}.mp3`;
+
+  // If graph already exists just swap the src
+  if (rxSource) {
+    audio.pause();
+    audio.src = url;
+    audio.load();
+    try { await audio.play(); } catch {}
+    setRxLed(true);
+    return;
+  }
+
+  audio.src = url;
+  audio.load();
+
+  // Build Web Audio graph (only once per page load)
+  try {
+    rxAudioCtx = new AudioContext();
+    rxSource   = rxAudioCtx.createMediaElementSource(audio);
+    rxAnalyser = rxAudioCtx.createAnalyser();
+    rxAnalyser.fftSize = 256;
+    rxSource.connect(rxAnalyser);
+    rxAnalyser.connect(rxAudioCtx.destination);
+    clearInterval(rxLevelTimer);
+    rxLevelTimer = setInterval(updateRxLevel, 50);
+  } catch (e) {
+    console.warn("RX Web Audio:", e);
+    // play anyway without VU
+  }
+
+  try { await audio.play(); } catch {}
+  setRxLed(true);
+}
+
+function stopRxStream() {
+  const audio = document.getElementById("rx-audio");
+  audio.pause();
+  clearInterval(rxLevelTimer); rxLevelTimer = null;
+  setRxLed(false);
+  clearRxVu();
+}
+
+function toggleRxMute() {
+  const audio = document.getElementById("rx-audio");
+  rxMuted = !rxMuted;
+  audio.muted = rxMuted;
+  const btn = document.getElementById("rx-mute-btn");
+  btn.textContent = rxMuted ? "🔈" : "🔇";
+  btn.classList.toggle("muted", rxMuted);
+}
+
+function setRxLed(on) {
+  document.getElementById("led-rx").className   = on ? "led active" : "led";
+  document.getElementById("rx-label").textContent = on ? "LIVE" : "RX";
+}
+
+function updateRxLevel() {
+  if (!rxAnalyser) return;
+  const data = new Uint8Array(rxAnalyser.frequencyBinCount);
+  rxAnalyser.getByteFrequencyData(data);
+  const avg = data.reduce((a, b) => a + b, 0) / data.length;
+  const lit = Math.round(Math.min(1, avg / 40) * VU_COUNT);
+  for (let i = 0; i < VU_COUNT; i++) {
+    const s = document.getElementById("rxvu-" + i);
+    if (!s) continue;
+    s.className = "vu-seg" + (i < lit
+      ? " " + (i < 10 ? "lit-green" : i < 13 ? "lit-yellow" : "lit-red")
+      : "");
+  }
+}
+
+function clearRxVu() {
+  for (let i = 0; i < VU_COUNT; i++) {
+    const s = document.getElementById("rxvu-" + i);
+    if (s) s.className = "vu-seg";
+  }
+}
+
 // ── Room client list ─────────────────────────────────────────────────────────
 function onRoomChange() {
   const mount = document.getElementById("room-select").value;
   clearTimeout(clientPollTimer);
+  startRxStream(mount);
   loadRoomClients(mount);
 }
 
@@ -981,6 +1114,9 @@ function doLogout() {
   localStorage.removeItem("frn_is_admin");
   if (ws) ws.close();
   clearTimeout(clientPollTimer); clientPollTimer = null;
+  stopRxStream();
+  if (rxAudioCtx) { rxAudioCtx.close(); rxAudioCtx = null; }
+  rxSource = null; rxAnalyser = null;
   closeAdmin();
   document.getElementById("login-section").style.display      = "block";
   document.getElementById("tx-section").style.display         = "none";
@@ -1004,7 +1140,10 @@ function showTxPanel(rooms) {
     opt.value = r.mount; opt.textContent = r.name;
     sel.appendChild(opt);
   }
-  if (rooms.length) loadRoomClients(rooms[0].mount);
+  if (rooms.length) {
+    loadRoomClients(rooms[0].mount);
+    startRxStream(rooms[0].mount);
+  }
 }
 
 // ── PTT ─────────────────────────────────────────────────────────────────────
@@ -1130,7 +1269,18 @@ function setStatus(text, cls) {
   el.textContent = text; el.className = cls;
 }
 function muteStreams(mute) {
-  document.querySelectorAll("audio").forEach(a => a.muted = mute);
+  document.querySelectorAll("audio").forEach(a => {
+    // Don't override user's own mute choice for rx-audio
+    if (a.id === "rx-audio") { a.muted = mute || rxMuted; }
+    else { a.muted = mute; }
+  });
+  // Pause/resume RX VU during TX to avoid confusing display
+  if (mute) {
+    clearInterval(rxLevelTimer); rxLevelTimer = null;
+    clearRxVu();
+  } else if (rxAudioCtx && !rxLevelTimer) {
+    rxLevelTimer = setInterval(updateRxLevel, 50);
+  }
 }
 function updateLevel() {
   if (!analyser) return;
