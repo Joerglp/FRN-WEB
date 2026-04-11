@@ -913,24 +913,31 @@ let icePort = 8000;
 // ── RX Stream + VU ──────────────────────────────────────────────────────────
 let rxAudioCtx  = null;
 let rxAnalyser  = null;
-let rxSource    = null;   // MediaElementSource (can only be created once per element)
+let rxSource    = null;   // MediaElementSource (einmal pro Audio-Element)
 let rxLevelTimer = null;
 let rxMuted      = false;
+
+// AudioContext beim allerersten Pointer-Event anlegen — Browserpolitik erlaubt
+// Erstellung nur in Gestenskontext, async-Ketten verlieren diesen Kontext.
+document.addEventListener("pointerdown", function createRxCtx() {
+  if (!rxAudioCtx) {
+    try { rxAudioCtx = new AudioContext(); } catch {}
+  }
+  if (rxAudioCtx && rxAudioCtx.state === "suspended") {
+    rxAudioCtx.resume().catch(() => {});
+  }
+}, { passive: true });
 
 async function startRxStream(mount) {
   if (!mount) return;
   const audio = document.getElementById("rx-audio");
-  const url = `/stream/${mount}.mp3`;
 
-  // Swap source (works whether first call or room change)
   audio.pause();
-  audio.src = url;
-  audio.load();
+  audio.src = `/stream/${mount}.mp3`;
 
-  // Build Web Audio graph once per page load
-  if (!rxSource) {
+  // Web-Audio-Graph aufbauen — einmalig, sobald rxAudioCtx vorhanden
+  if (!rxSource && rxAudioCtx) {
     try {
-      rxAudioCtx = new AudioContext();
       rxSource   = rxAudioCtx.createMediaElementSource(audio);
       rxAnalyser = rxAudioCtx.createAnalyser();
       rxAnalyser.fftSize = 256;
@@ -939,32 +946,26 @@ async function startRxStream(mount) {
       clearInterval(rxLevelTimer);
       rxLevelTimer = setInterval(updateRxLevel, 50);
     } catch (e) {
-      console.warn("RX Web Audio:", e);
+      console.warn("RX VU:", e);
     }
   }
 
-  // Resume AudioContext — browsers suspend it until a user gesture
-  try {
-    if (rxAudioCtx && rxAudioCtx.state === "suspended")
-      await rxAudioCtx.resume();
-  } catch {}
+  audio.muted = rxMuted;
+  audio.load();
 
-  try {
-    await audio.play();
-    setRxLed(true);
-  } catch (e) {
-    // Autoplay blocked — will start on first user interaction
-    console.info("RX autoplay blocked, waiting for gesture:", e.message);
+  if (rxAudioCtx && rxAudioCtx.state === "suspended")
+    await rxAudioCtx.resume().catch(() => {});
+
+  audio.play().then(() => setRxLed(true)).catch(() => {
+    // Autoplay gesperrt — beim nächsten Pointer-Event wiederholen
     setRxLed(false);
-    // Retry on first click/touch anywhere
-    const retry = async () => {
+    document.addEventListener("pointerdown", async function retry() {
       document.removeEventListener("pointerdown", retry);
       if (rxAudioCtx && rxAudioCtx.state === "suspended")
         await rxAudioCtx.resume().catch(() => {});
       audio.play().then(() => setRxLed(true)).catch(() => {});
-    };
-    document.addEventListener("pointerdown", retry, { once: true });
-  }
+    }, { once: true });
+  });
 }
 
 function stopRxStream() {
@@ -1242,10 +1243,14 @@ async function pttStart(e) {
 
 function pttStop(e) {
   if (e) e.preventDefault();
-  muteStreams(false);   // sofort wieder hörbar — Parrot kommt gleich
   if (!txActive) { stopAudio(); return; }
   if (ws && ws.readyState === WebSocket.OPEN)
     ws.send(JSON.stringify({ cmd: "PTT_STOP" }));
+  // Stream neu verbinden → springt auf Live-Position, Icecast-Puffer (Echo) übersprungen
+  const mount = document.getElementById("room-select")?.value;
+  if (mount) startRxStream(mount);
+  // Andere Audio-Elemente (Stream-Karten) wieder freigeben
+  document.querySelectorAll("audio:not(#rx-audio)").forEach(a => a.muted = false);
 }
 
 function stopAudio() {
@@ -1293,17 +1298,11 @@ function setStatus(text, cls) {
 }
 function muteStreams(mute) {
   document.querySelectorAll("audio").forEach(a => {
-    // Don't override user's own mute choice for rx-audio
-    if (a.id === "rx-audio") { a.muted = mute || rxMuted; }
-    else { a.muted = mute; }
+    if (a.id === "rx-audio") a.muted = mute || rxMuted;
+    else a.muted = mute;
   });
-  // Pause/resume RX VU during TX to avoid confusing display
-  if (mute) {
-    clearInterval(rxLevelTimer); rxLevelTimer = null;
-    clearRxVu();
-  } else if (rxAudioCtx && !rxLevelTimer) {
-    rxLevelTimer = setInterval(updateRxLevel, 50);
-  }
+  if (mute) { clearInterval(rxLevelTimer); rxLevelTimer = null; clearRxVu(); }
+  else if (rxAudioCtx && !rxLevelTimer) rxLevelTimer = setInterval(updateRxLevel, 50);
 }
 function updateLevel() {
   if (!analyser) return;
