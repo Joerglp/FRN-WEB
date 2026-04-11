@@ -216,22 +216,6 @@ audio {
 }
 #admin-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-.room-row {
-  display: flex; align-items: center; gap: 10px; margin-bottom: 20px;
-}
-.room-label {
-  font-family: 'Share Tech Mono', monospace;
-  font-size: 0.65em; letter-spacing: 0.1em;
-  color: var(--muted); text-transform: uppercase; white-space: nowrap;
-}
-#room-select {
-  flex: 1; background: var(--inset); border: 1px solid var(--border);
-  border-radius: 6px; color: var(--text);
-  font-family: 'Rajdhani', sans-serif;
-  font-size: 0.95em; font-weight: 600; padding: 8px 10px; outline: none;
-  cursor: pointer; transition: border-color 0.15s;
-}
-#room-select:focus { border-color: var(--accent); }
 
 /* ── PTT Button ── */
 .ptt-wrap {
@@ -315,6 +299,73 @@ audio {
 
 #level-bar-wrap { display: none; }
 #level-bar { height: 100%; width: 0%; }
+
+/* ── Room Panel ── */
+#room-panel { display: none; }
+#room-select {
+  flex: 1; background: var(--inset); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text);
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 1em; font-weight: 600; padding: 9px 10px; outline: none;
+  cursor: pointer; transition: border-color 0.15s;
+}
+#room-select:focus { border-color: var(--accent); }
+
+.room-selector-row {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+}
+.room-selector-label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.65em; letter-spacing: 0.1em;
+  color: var(--muted); text-transform: uppercase; white-space: nowrap;
+}
+
+/* user list */
+.user-list-header {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.58em; letter-spacing: 0.16em; color: var(--muted);
+  text-transform: uppercase; margin-bottom: 8px;
+  display: flex; align-items: center; gap: 8px;
+}
+.user-list-header::after {
+  content: ''; flex: 1; height: 1px; background: var(--border);
+}
+#user-list {
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 180px; overflow-y: auto;
+}
+.user-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: 5px;
+  background: var(--inset); border: 1px solid var(--border);
+  font-family: 'Share Tech Mono', monospace; font-size: 0.8em;
+}
+.user-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--green2);
+  box-shadow: 0 0 5px rgba(105,240,174,0.6);
+}
+.user-callsign {
+  color: var(--accent2); font-weight: 600; letter-spacing: 0.06em; flex-shrink: 0;
+}
+.user-desc {
+  color: var(--muted); font-size: 0.88em; flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.user-type {
+  color: var(--dim); font-size: 0.9em; flex-shrink: 0;
+}
+.user-empty {
+  font-family: 'Share Tech Mono', monospace; font-size: 0.75em;
+  color: var(--muted); letter-spacing: 0.06em;
+  text-align: center; padding: 10px 0;
+}
+.user-loading {
+  font-family: 'Share Tech Mono', monospace; font-size: 0.75em;
+  color: var(--muted); letter-spacing: 0.06em;
+  text-align: center; padding: 10px 0; animation: blink 1s step-end infinite;
+}
+@keyframes blink { 50% { opacity: 0.3; } }
 
 /* ── Footer ── */
 .site-footer {
@@ -529,6 +580,24 @@ audio {
   </div>
 </header>
 
+<!-- ── Room Selector ── -->
+<div class="section-label" id="room-section-label" style="display:none">RAUM — Auswahl</div>
+<div class="panel" id="room-panel">
+  <div class="panel-header">
+    <div class="led" id="led-room"></div>
+    <div class="panel-title">NETZWERK</div>
+    <div id="room-user-count" style="font-family:'Share Tech Mono',monospace;font-size:0.65em;color:var(--muted);letter-spacing:0.08em;"></div>
+  </div>
+  <div class="panel-body">
+    <div class="room-selector-row">
+      <div class="room-selector-label">Raum</div>
+      <select id="room-select" onchange="onRoomChange()"></select>
+    </div>
+    <div class="user-list-header">Verbundene Benutzer</div>
+    <div id="user-list"><div class="user-loading">· · ·</div></div>
+  </div>
+</div>
+
 <!-- ── RX ── -->
 <div class="section-label">RX — Mithören</div>
 <div id="stream-cards">
@@ -578,10 +647,6 @@ audio {
         <button id="admin-btn" onclick="openAdmin()">⚙ ADMIN</button>
         <button id="logout-btn" onclick="doLogout()">ABMELDEN</button>
       </div>
-    </div>
-    <div class="room-row">
-      <div class="room-label">Raum</div>
-      <select id="room-select"></select>
     </div>
     <div class="ptt-wrap">
       <button id="ptt-btn"
@@ -795,6 +860,51 @@ let isAdmin   = localStorage.getItem("frn_is_admin") === "true";
 let ws = null, audioCtx = null, micSource = null;
 let workletNode = null, analyser = null;
 let txActive = false, levelTimer = null;
+let clientPollTimer = null;
+
+// ── Room client list ─────────────────────────────────────────────────────────
+function onRoomChange() {
+  const mount = document.getElementById("room-select").value;
+  clearTimeout(clientPollTimer);
+  loadRoomClients(mount);
+}
+
+async function loadRoomClients(mount) {
+  if (!authToken || !mount) return;
+  const ul = document.getElementById("user-list");
+  try {
+    const resp = await fetch(`${TX_BASE}/api/rooms/${mount}/clients?token=${authToken}`);
+    if (!resp.ok) { renderUserList([]); return; }
+    const data = await resp.json();
+    renderUserList(data.clients || []);
+    const cnt = (data.clients || []).length;
+    document.getElementById("room-user-count").textContent =
+      cnt ? `${cnt} QRV` : "";
+    document.getElementById("led-room").className = cnt ? "led active" : "led";
+  } catch {
+    renderUserList([]);
+  }
+  clientPollTimer = setTimeout(
+    () => loadRoomClients(document.getElementById("room-select")?.value),
+    15000
+  );
+}
+
+function renderUserList(clients) {
+  const ul = document.getElementById("user-list");
+  if (!clients.length) {
+    ul.innerHTML = '<div class="user-empty">— keine Benutzer verbunden —</div>';
+    return;
+  }
+  const typeLabel = { "0": "⇄ XL", "1": "⊕ GW", "2": "▶ PC" };
+  ul.innerHTML = clients.map(c => `
+    <div class="user-item">
+      <span class="user-dot"></span>
+      <span class="user-callsign">${esc(c.callsign)}</span>
+      <span class="user-desc">${esc(c.desc)}</span>
+      <span class="user-type">${typeLabel[c.type] || "▶"}</span>
+    </div>`).join("");
+}
 
 // ── Boot ────────────────────────────────────────────────────────────────────
 window.addEventListener("DOMContentLoaded", () => {
@@ -870,15 +980,20 @@ function doLogout() {
   localStorage.removeItem("frn_callsign");
   localStorage.removeItem("frn_is_admin");
   if (ws) ws.close();
+  clearTimeout(clientPollTimer); clientPollTimer = null;
   closeAdmin();
-  document.getElementById("login-section").style.display = "block";
-  document.getElementById("tx-section").style.display    = "none";
+  document.getElementById("login-section").style.display      = "block";
+  document.getElementById("tx-section").style.display         = "none";
+  document.getElementById("room-panel").style.display         = "none";
+  document.getElementById("room-section-label").style.display = "none";
   document.getElementById("password").value = "";
 }
 
 function showTxPanel(rooms) {
-  document.getElementById("login-section").style.display = "none";
-  document.getElementById("tx-section").style.display    = "block";
+  document.getElementById("login-section").style.display    = "none";
+  document.getElementById("tx-section").style.display       = "block";
+  document.getElementById("room-panel").style.display       = "block";
+  document.getElementById("room-section-label").style.display = "flex";
   document.getElementById("tx-info").textContent = callsign;
   document.getElementById("admin-btn").style.display = isAdmin ? "block" : "none";
 
@@ -889,6 +1004,7 @@ function showTxPanel(rooms) {
     opt.value = r.mount; opt.textContent = r.name;
     sel.appendChild(opt);
   }
+  if (rooms.length) loadRoomClients(rooms[0].mount);
 }
 
 // ── PTT ─────────────────────────────────────────────────────────────────────

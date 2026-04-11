@@ -136,6 +136,7 @@ class FRNTXRoom:
         self._tx_approved     = asyncio.Event()
         self._encoder         = GSMEncoder()
         self._pcm_buf         = b""
+        self._clients: list   = []   # last received MARKER_CLIENTS list
 
     async def ensure_connected(self):
         if self._connected:
@@ -208,7 +209,48 @@ class FRNTXRoom:
             log.warning("[%s] Keepalive: %s", self.name, e)
             self._connected = False
 
+    @staticmethod
+    def _parse_xml_tags(text: str) -> dict:
+        result = {}
+        for m in re.finditer(r"<(\w+)>(.*?)(?:</\1>)?(?=<\w+>|$)", text):
+            result[m.group(1)] = m.group(2)
+        return result
+
+    def _try_parse_clients(self, buf: bytes):
+        """Try to parse a MARKER_CLIENTS (0x03) block from buf.
+
+        Returns (clients_list, remaining_buf) on success,
+        or       (None,         original_buf) if more data is needed.
+        """
+        orig = buf
+        if not buf or buf[0] != MARKER_CLIENTS:
+            return None, orig
+        buf = buf[1:]
+        if len(buf) < 2:
+            return None, orig
+        buf = buf[2:]               # 2 extra bytes after marker
+        idx = buf.find(b"\r\n")
+        if idx < 0:
+            return None, orig
+        try:
+            count = int(buf[:idx].decode(errors="replace").strip())
+        except ValueError:
+            return None, orig
+        buf = buf[idx + 2:]
+        clients = []
+        for _ in range(count):
+            idx = buf.find(b"\r\n")
+            if idx < 0:
+                return None, orig   # incomplete — wait for more data
+            line = buf[:idx].decode(errors="replace")
+            buf  = buf[idx + 2:]
+            parsed = self._parse_xml_tags(line)
+            if parsed:
+                clients.append(parsed)
+        return clients, buf
+
     async def _reader_loop(self):
+        buf = b""
         try:
             while self._connected and self._reader:
                 data = await self._reader.read(4096)
@@ -216,8 +258,44 @@ class FRNTXRoom:
                     log.warning("[%s] FRN server closed connection", self.name)
                     self._connected = False
                     break
-                if MARKER_TX_APPROVE in data:
-                    self._tx_approved.set()
+                buf += data
+
+                # Consume as much of the buffer as possible
+                progress = True
+                while progress and buf:
+                    progress = False
+                    marker = buf[0]
+
+                    if marker == MARKER_KEEPALIVE:          # 0x00 — single byte
+                        buf = buf[1:]
+                        progress = True
+
+                    elif marker == MARKER_TX_APPROVE:       # 0x01 — 3 bytes total
+                        if len(buf) < 3:
+                            break
+                        buf = buf[3:]
+                        self._tx_approved.set()
+                        progress = True
+
+                    elif marker == MARKER_SOUND:            # 0x02 — 1+2+325 = 328 bytes
+                        if len(buf) < 328:
+                            break
+                        buf = buf[328:]
+                        progress = True
+
+                    elif marker == MARKER_CLIENTS:          # 0x03 — variable length
+                        clients, new_buf = self._try_parse_clients(buf)
+                        if clients is not None:
+                            self._clients = clients
+                            buf = new_buf
+                            progress = True
+                        else:
+                            break                           # need more data
+
+                    else:
+                        buf = buf[1:]                       # skip unknown byte
+                        progress = True
+
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -938,6 +1016,45 @@ class TXServer:
 
         return web.json_response({"networks": networks})
 
+    async def handle_room_clients(self, request):
+        """Return list of clients currently in a room (requires valid token).
+
+        Triggers a FRN connection for the room if it is not yet connected,
+        so the client list arrives as soon as possible.
+        """
+        token = request.rel_url.query.get("token", "")
+        if not self._validate_token(token):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        mount = request.match_info["mount"]
+        room  = self.rooms.get(mount)
+        if not room:
+            return web.json_response({"error": "not found"}, status=404)
+
+        # Ensure we have a live connection so MARKER_CLIENTS updates flow in
+        if not room._connected:
+            try:
+                await asyncio.wait_for(room.ensure_connected(), timeout=5.0)
+                # Wait briefly for the initial client-list packet
+                for _ in range(15):
+                    if room._clients:
+                        break
+                    await asyncio.sleep(0.2)
+            except Exception as e:
+                log.debug("room clients connect error [%s]: %s", mount, e)
+
+        return web.json_response({
+            "mount":   mount,
+            "name":    room.name,
+            "clients": [
+                {
+                    "callsign": c.get("ON", "?"),
+                    "desc":     c.get("DS", ""),
+                    "type":     c.get("CL", "2"),  # 0=crosslink 1=gateway 2=PC
+                }
+                for c in room._clients
+            ],
+        })
+
     # ── WebSocket ──────────────────────────────────────────────────────────
 
     async def handle_ws(self, request):
@@ -1062,8 +1179,9 @@ class TXServer:
         app.router.add_post("/api/login",           self.handle_login)
         app.router.add_get ("/api/rooms",           self.handle_rooms)
         app.router.add_get ("/api/config",          self.handle_config)
-        app.router.add_get ("/api/frn-networks",    self.handle_frn_networks)
-        app.router.add_get ("/ws",                  self.handle_ws)
+        app.router.add_get ("/api/frn-networks",              self.handle_frn_networks)
+        app.router.add_get ("/api/rooms/{mount}/clients",    self.handle_room_clients)
+        app.router.add_get ("/ws",                           self.handle_ws)
 
         # Admin (require token + is_admin)
         app.router.add_get   ("/api/admin/users",           self.handle_admin_users_list)
