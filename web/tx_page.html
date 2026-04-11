@@ -885,10 +885,10 @@ async function loadUIConfig() {
   <div class="panel-body">
     <audio controls preload="none"
       onplay="setLed('${id}',true)" onpause="setLed('${id}',false)" onended="setLed('${id}',false)">
-      <source src="http://${iceHost}:${icePort}/${s.mount}.mp3" type="audio/mpeg">
+      <source src="/stream/${s.mount}.mp3" type="audio/mpeg">
     </audio>
     <div class="stream-links">
-      <a href="http://${iceHost}:${icePort}/${s.mount}.mp3">&#x25B6; Direkt-Link</a>
+      <a href="/stream/${s.mount}.mp3">&#x25B6; Direkt-Link</a>
     </div>
   </div>
 </div>`;
@@ -920,10 +920,7 @@ let rxMuted      = false;
 async function startRxStream(mount) {
   if (!mount) return;
   const audio = document.getElementById("rx-audio");
-  const url   = `http://${iceHost}:${icePort}/${mount}.mp3`;
-
-  // crossOrigin must be set before src, before any load
-  audio.crossOrigin = "anonymous";
+  const url = `/stream/${mount}.mp3`;
 
   // Swap source (works whether first call or room change)
   audio.pause();

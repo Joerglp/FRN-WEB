@@ -25,6 +25,7 @@ import secrets
 import time
 from pathlib import Path
 
+import aiohttp
 import numpy as np
 from aiohttp import web
 from scipy.signal import resample as sp_resample
@@ -1016,6 +1017,33 @@ class TXServer:
 
         return web.json_response({"networks": networks})
 
+    async def handle_stream_proxy(self, request):
+        """Proxy Icecast stream → same-origin for Web Audio API (local/direct access)."""
+        mount   = request.match_info["mount"]
+        icecast = self.cfg.get("icecast", {})
+        url     = f"http://{icecast.get('host','localhost')}:{icecast.get('port',8000)}/{mount}.mp3"
+        try:
+            async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(connect=5, total=None)) as s:
+                async with s.get(url) as ice:
+                    if ice.status != 200:
+                        return web.Response(status=ice.status)
+                    resp = web.StreamResponse(headers={
+                        "Content-Type": "audio/mpeg",
+                        "Cache-Control": "no-cache",
+                        "Access-Control-Allow-Origin": "*",
+                    })
+                    await resp.prepare(request)
+                    try:
+                        async for chunk in ice.content.iter_chunked(8192):
+                            await resp.write(chunk)
+                    except (asyncio.CancelledError, ConnectionResetError):
+                        pass
+                    return resp
+        except Exception as e:
+            log.debug("Stream proxy [%s]: %s", mount, e)
+            return web.Response(status=502, text="Stream unavailable")
+
     async def handle_room_clients(self, request):
         """Return list of clients currently in a room (requires valid token).
 
@@ -1179,6 +1207,7 @@ class TXServer:
         app.router.add_post("/api/login",           self.handle_login)
         app.router.add_get ("/api/rooms",           self.handle_rooms)
         app.router.add_get ("/api/config",          self.handle_config)
+        app.router.add_get ("/stream/{mount}.mp3",            self.handle_stream_proxy)
         app.router.add_get ("/api/frn-networks",              self.handle_frn_networks)
         app.router.add_get ("/api/rooms/{mount}/clients",    self.handle_room_clients)
         app.router.add_get ("/ws",                           self.handle_ws)
