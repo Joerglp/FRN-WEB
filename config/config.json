@@ -23,6 +23,13 @@
     "mode": "both"
   },
 
+  "_comment_frn_stream_account": "Optional: Wenn tx_rooms.json leer/fehlt, werden Räume automatisch vom FRN-Server gelesen. callsign_prefix optional (Standard: WEB).",
+  "frn_stream_account": {
+    "email":           "",
+    "password":        "",
+    "callsign_prefix": "WEB"
+  },
+
   "ui": {
     "title":    "FRN Webstreams",
     "subtitle": "Free Radio Network"

@@ -403,6 +403,205 @@ class TXServer:
 
     # ── FRN authentication ─────────────────────────────────────────────────
 
+    async def _fetch_frn_networks(self, email: str, password: str) -> list:
+        """Connect to FRN server and return list of available room names.
+
+        After the text-mode CT/AL handshake the server sends a binary stream.
+        We watch for MARKER_NETWORKS (0x05) and parse the count + N name lines.
+        """
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.args.frn_server, self.args.frn_port),
+                timeout=5.0,
+            )
+        except Exception as e:
+            log.warning("FRN discover: connection failed: %s", e)
+            return []
+
+        inbuf: bytes = b""
+
+        async def read_more(timeout=1.0):
+            nonlocal inbuf
+            try:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=timeout)
+                if chunk:
+                    inbuf += chunk
+                    return True
+            except asyncio.TimeoutError:
+                pass
+            return False
+
+        async def get_line(timeout=3.0):
+            nonlocal inbuf
+            loop     = asyncio.get_event_loop()
+            deadline = loop.time() + timeout
+            while True:
+                idx = inbuf.find(b"\r\n")
+                if idx >= 0:
+                    line = inbuf[:idx].decode(errors="replace")
+                    inbuf = inbuf[idx + 2:]
+                    return line
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return None
+                await read_more(timeout=min(remaining, 0.5))
+
+        try:
+            ct = (
+                f"CT:"
+                f"<VX>{FRN_PROTO_VERSION}</VX>"
+                f"<EA>{email}</EA>"
+                f"<PW>{password}</PW>"
+                f"<ON>{email.split('@')[0][:8].upper()}</ON>"
+                f"<CL>{FRN_TYPE_PC_ONLY}</CL>"
+                f"<BC>0</BC>"
+                f"<DS>NetDiscover</DS>"
+                f"<NN>DE</NN>"
+                f"<CT>Stream</CT>"
+                f"<NT></NT>"
+                f"\r\n"
+            )
+            writer.write(ct.encode())
+            await writer.drain()
+
+            await get_line(timeout=5)           # version line
+            al_line = await get_line(timeout=5) # AL result line
+            if not al_line:
+                return []
+            m  = re.search(r"<AL>(.*?)</AL>", al_line)
+            al = m.group(1) if m else "?"
+            if al not in ("OK", "ADMIN", "OWNER", "NETOWNER"):
+                log.warning("FRN discover: auth failed AL=%s", al)
+                return []
+
+            writer.write(b"RX0\r\n")
+            await writer.drain()
+
+            # Process binary marker stream until we get MARKER_NETWORKS
+            loop     = asyncio.get_event_loop()
+            deadline = loop.time() + 8.0
+            networks: list = []
+
+            while loop.time() < deadline:
+                if not inbuf:
+                    if not await read_more(timeout=0.5):
+                        break
+
+                if not inbuf:
+                    continue
+
+                marker = inbuf[0]
+                inbuf  = inbuf[1:]
+
+                if marker == 0x00:  # MARKER_KEEPALIVE
+                    pass
+
+                elif marker == 0x03:  # MARKER_CLIENTS — 2 extra bytes + count + N lines
+                    while len(inbuf) < 2:
+                        if not await read_more(timeout=1.0):
+                            return networks
+                    inbuf = inbuf[2:]
+                    cs = await get_line(timeout=2)
+                    if cs is None:
+                        return networks
+                    try:
+                        for _ in range(int(cs.strip())):
+                            await get_line(timeout=2)
+                    except ValueError:
+                        pass
+
+                elif marker == 0x05:  # MARKER_NETWORKS — count + N name lines
+                    cs = await get_line(timeout=2)
+                    if cs is None:
+                        return networks
+                    try:
+                        count = int(cs.strip())
+                    except ValueError:
+                        return networks
+                    for _ in range(count):
+                        line = await get_line(timeout=2)
+                        if line is None:
+                            break
+                        # Network name is in <NT>…</NT>; fall back to raw text
+                        nm = re.search(r"<NT>(.*?)</NT>", line)
+                        if not nm:
+                            nm = re.search(r"<\w+>(.*?)<", line)
+                        name = nm.group(1) if nm else line.strip()
+                        if name:
+                            networks.append(name)
+                    log.info("FRN networks discovered: %s", networks)
+                    return networks
+
+                elif marker in (0x01, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0A):
+                    # Other line-list markers — skip count + N lines
+                    cs = await get_line(timeout=1)
+                    if cs is None:
+                        break
+                    try:
+                        for _ in range(int(cs.strip())):
+                            await get_line(timeout=1)
+                    except ValueError:
+                        pass
+
+                # Unknown / binary-only markers: just continue consuming
+
+            return networks
+
+        except Exception as e:
+            log.warning("FRN discover error: %s", e)
+            return []
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def _discover_rooms(self):
+        """Auto-populate rooms from FRN server if no rooms loaded from tx_rooms.json.
+
+        Reads ``frn_stream_account`` from config.json:
+          {
+            "frn_stream_account": {
+              "email":            "stream@example.de",
+              "password":         "secret",
+              "callsign_prefix":  "WEB"   // optional, default "WEB"
+            }
+          }
+        Each discovered network gets a mount name derived from the FRN room name.
+        """
+        if self.rooms:
+            return  # rooms already configured — nothing to do
+
+        acct = self.cfg.get("frn_stream_account", {})
+        email    = acct.get("email",    "").strip()
+        password = acct.get("password", "").strip()
+        if not email or not password:
+            log.info("No rooms configured and no frn_stream_account — starting empty")
+            return
+
+        prefix   = acct.get("callsign_prefix", "WEB")
+        log.info("Auto-discovering FRN networks via %s …", email)
+        networks = await self._fetch_frn_networks(email, password)
+        if not networks:
+            log.warning("FRN network discovery returned no rooms")
+            return
+
+        for i, name in enumerate(networks):
+            # derive a safe mount name (lowercase alphanum, max 20 chars)
+            mount = re.sub(r"[^a-z0-9]+", "", name.lower())[:20] or f"room{i + 1}"
+            if mount in self.rooms:
+                mount = f"{mount}{i + 1}"
+            self.rooms[mount] = FRNTXRoom(
+                name       = name,
+                frn_server = self.args.frn_server,
+                frn_port   = self.args.frn_port,
+                email      = email,
+                password   = password,
+                callsign   = f"{prefix}-{i + 1:02d}",
+            )
+        log.info("Auto-configured %d rooms: %s", len(self.rooms), list(self.rooms))
+
     async def _try_frn_auth(self, email: str, password: str, callsign: str) -> bool:
         """Validate credentials by making a test connection to the FRN server.
         Returns True if the server responds with AL=OK (or ADMIN/OWNER/NETOWNER)."""
@@ -717,6 +916,28 @@ class TXServer:
             "users":         len(self.users),
         })
 
+    async def handle_frn_networks(self, request):
+        """Return list of available FRN room names (requires valid token).
+
+        Uses the configured ``frn_stream_account`` credentials to query the FRN
+        server, or falls back to the names of already-loaded rooms.
+        """
+        token = request.rel_url.query.get("token", "")
+        if not self._validate_token(token):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        acct     = self.cfg.get("frn_stream_account", {})
+        email    = acct.get("email",    "").strip()
+        password = acct.get("password", "").strip()
+
+        if email and password:
+            networks = await self._fetch_frn_networks(email, password)
+        else:
+            # Fall back to currently loaded rooms
+            networks = [r.name for r in self.rooms.values()]
+
+        return web.json_response({"networks": networks})
+
     # ── WebSocket ──────────────────────────────────────────────────────────
 
     async def handle_ws(self, request):
@@ -827,17 +1048,22 @@ class TXServer:
 
     # ── App ────────────────────────────────────────────────────────────────
 
+    async def _on_startup(self, _app):
+        await self._discover_rooms()
+
     def build_app(self) -> web.Application:
         app = web.Application(middlewares=[self.cors_middleware])
         app.router.add_route("OPTIONS", "/{path:.*}", lambda r: web.Response())
+        app.on_startup.append(self._on_startup)
 
         # Public
-        app.router.add_get ("/",                self.handle_root)
-        app.router.add_get ("/tx_processor.js", self.handle_worklet)
-        app.router.add_post("/api/login",        self.handle_login)
-        app.router.add_get ("/api/rooms",        self.handle_rooms)
-        app.router.add_get ("/api/config",       self.handle_config)
-        app.router.add_get ("/ws",               self.handle_ws)
+        app.router.add_get ("/",                   self.handle_root)
+        app.router.add_get ("/tx_processor.js",    self.handle_worklet)
+        app.router.add_post("/api/login",           self.handle_login)
+        app.router.add_get ("/api/rooms",           self.handle_rooms)
+        app.router.add_get ("/api/config",          self.handle_config)
+        app.router.add_get ("/api/frn-networks",    self.handle_frn_networks)
+        app.router.add_get ("/ws",                  self.handle_ws)
 
         # Admin (require token + is_admin)
         app.router.add_get   ("/api/admin/users",           self.handle_admin_users_list)
