@@ -1267,7 +1267,7 @@ function onWsMessage(evt) {
   try { msg = JSON.parse(evt.data); } catch { return; }
 
   if (msg.type === "tx_active") {
-    txActive = true; muteStreams(true);
+    txActive = true;
     document.getElementById("ptt-btn").classList.add("active");
     document.getElementById("led-tx").className = "led tx";
     setStatus("● SENDE: " +
