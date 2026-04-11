@@ -1,0 +1,51 @@
+<icecast>
+  <location>Germany</location>
+  <admin>icemaster@localhost</admin>
+
+  <limits>
+    <clients>100</clients>
+    <sources>10</sources>
+    <queue-size>524288</queue-size>
+    <client-timeout>30</client-timeout>
+    <header-timeout>15</header-timeout>
+    <source-timeout>10</source-timeout>
+  </limits>
+
+  <authentication>
+    <!-- Source password (used by ffmpeg / frn_stream.py) -->
+    <source-password>ICECAST_SOURCE_PW</source-password>
+    <!-- Relay password -->
+    <relay-password>ICECAST_RELAY_PW</relay-password>
+    <!-- Admin password -->
+    <admin-user>admin</admin-user>
+    <admin-password>ICECAST_ADMIN_PW</admin-password>
+  </authentication>
+
+  <hostname>localhost</hostname>
+
+  <listen-socket>
+    <port>8000</port>
+  </listen-socket>
+
+  <http-headers>
+    <header name="Access-Control-Allow-Origin" value="*"/>
+  </http-headers>
+
+  <paths>
+    <basedir>/usr/share/icecast2</basedir>
+    <logdir>/var/log/icecast2</logdir>
+    <webroot>/usr/share/icecast2/web</webroot>
+    <adminroot>/usr/share/icecast2/admin</adminroot>
+    <pidfile>/var/run/icecast2/icecast.pid</pidfile>
+  </paths>
+
+  <logging>
+    <accesslog>access.log</accesslog>
+    <errorlog>error.log</errorlog>
+    <loglevel>3</loglevel>
+  </logging>
+
+  <security>
+    <chroot>0</chroot>
+  </security>
+</icecast>

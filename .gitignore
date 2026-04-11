@@ -1,0 +1,18 @@
+# Secrets / lokale Konfiguration
+.env
+config/tx_users.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

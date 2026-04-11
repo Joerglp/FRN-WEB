@@ -1,0 +1,10 @@
+{
+  "users": [
+    {
+      "username":      "admin",
+      "password_hash": "<SHA-256 des Passworts — generieren mit: python3 server/tx_add_user.py>",
+      "callsign":      "WebTX-Admin",
+      "is_admin":      true
+    }
+  ]
+}

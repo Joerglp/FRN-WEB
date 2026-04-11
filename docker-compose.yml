@@ -1,0 +1,56 @@
+services:
+
+  # ── Icecast2 Audio Server ──────────────────────────────────────────────────
+  icecast:
+    image: libretime/icecast:2.4.4
+    restart: unless-stopped
+    ports:
+      - "${ICECAST_PORT:-8000}:8000"
+    volumes:
+      - ./config/icecast.xml:/etc/icecast2/icecast.xml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FRN Web TX Server ──────────────────────────────────────────────────────
+  frn-web:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${TX_PORT:-8765}:8765"
+    volumes:
+      - ./config:/app/config   # live-editierbare Konfiguration
+    environment:
+      - PYTHONUNBUFFERED=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Zugriff auf Host (FRN_Server.jar)
+    depends_on:
+      icecast:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8765/api/config')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ── FRN → Icecast Stream Relay (ein Container, alle Räume) ────────────────
+  frn-streams:
+    build: .
+    restart: unless-stopped
+    entrypoint: ["python3", "server/frn_stream_runner.py"]
+    volumes:
+      - ./config:/app/config
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ICECAST_HOST=icecast
+      - ICECAST_PORT=8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      icecast:
+        condition: service_healthy
+      frn-web:
+        condition: service_healthy

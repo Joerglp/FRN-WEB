@@ -1,0 +1,30 @@
+{
+  "_comment": "FRN-WEB Hauptkonfiguration — hier alle Verbindungseinstellungen anpassen",
+
+  "tx_server": {
+    "host": "0.0.0.0",
+    "port": 8765
+  },
+
+  "frn": {
+    "server": "localhost",
+    "port": 10024
+  },
+
+  "icecast": {
+    "host": "localhost",
+    "port": 8000,
+    "source_password": "ICECAST_SOURCE_PW",
+    "admin_password":  "ICECAST_ADMIN_PW"
+  },
+
+  "ui": {
+    "title":    "FRN Webstreams",
+    "subtitle": "Free Radio Network",
+    "streams": [
+      { "name": "Quasel-Ecke",        "mount": "quasel",     "channel": "CH-01" },
+      { "name": "Steinheim-Freenet5", "mount": "steinheim",  "channel": "CH-02" },
+      { "name": "Eickelborn-Freenet", "mount": "eickelborn", "channel": "CH-03" }
+    ]
+  }
+}
