@@ -635,7 +635,7 @@ audio {
 </div>
 
 <!-- ── RX ── -->
-<div class="section-label">RX — Mithören</div>
+<div class="section-label" id="rx-section-label">RX — Mithören</div>
 <div id="stream-cards">
   <!-- dynamically populated from /api/config -->
 </div>
@@ -1122,6 +1122,8 @@ function doLogout() {
   document.getElementById("tx-section").style.display         = "none";
   document.getElementById("room-panel").style.display         = "none";
   document.getElementById("room-section-label").style.display = "none";
+  document.getElementById("stream-cards").style.display       = "";
+  document.getElementById("rx-section-label").style.display  = "";
   document.getElementById("password").value = "";
 }
 
@@ -1130,6 +1132,8 @@ function showTxPanel(rooms) {
   document.getElementById("tx-section").style.display       = "block";
   document.getElementById("room-panel").style.display       = "block";
   document.getElementById("room-section-label").style.display = "flex";
+  document.getElementById("stream-cards").style.display     = "none";
+  document.getElementById("rx-section-label").style.display = "none";
   document.getElementById("tx-info").textContent = callsign;
   document.getElementById("admin-btn").style.display = isAdmin ? "block" : "none";
 
