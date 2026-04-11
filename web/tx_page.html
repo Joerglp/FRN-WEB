@@ -867,7 +867,9 @@ async function loadUIConfig() {
         cfg.subtitle.toUpperCase() + " \u00B7 DE";
 
     // Stream cards
-    iceHost = cfg.icecast_host || location.hostname;
+    const cfgHost = cfg.icecast_host || "localhost";
+    iceHost = (cfgHost === "localhost" || cfgHost === "127.0.0.1")
+              ? location.hostname : cfgHost;
     icePort = cfg.icecast_port || 8000;
     const cards = document.getElementById("stream-cards");
     cards.innerHTML = "";
