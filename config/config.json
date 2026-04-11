@@ -18,6 +18,11 @@
     "admin_password":  "ICECAST_ADMIN_PW"
   },
 
+  "auth": {
+    "_comment": "mode: local=nur tx_users.json | frn=nur FRN-Server | both=lokal zuerst, dann FRN",
+    "mode": "both"
+  },
+
   "ui": {
     "title":    "FRN Webstreams",
     "subtitle": "Free Radio Network",

@@ -544,8 +544,13 @@ audio {
   </div>
   <div class="panel-body">
     <div class="input-group">
-      <label>Rufzeichen / Benutzer</label>
-      <input type="text" id="username" placeholder="Benutzername" autocomplete="username">
+      <label>Benutzername oder FRN-E-Mail</label>
+      <input type="text" id="username" placeholder="benutzername oder email@frn.de"
+             autocomplete="username" oninput="updateCallsignHint()">
+    </div>
+    <div class="input-group" id="callsign-row" style="display:none">
+      <label>Rufzeichen (optional, sonst aus E-Mail)</label>
+      <input type="text" id="callsign" placeholder="DL0XYZ" autocomplete="off">
     </div>
     <div class="input-group">
       <label>Passwort</label>
@@ -812,15 +817,25 @@ window.addEventListener("DOMContentLoaded", () => {
 });
 
 // ── Login ───────────────────────────────────────────────────────────────────
+function updateCallsignHint() {
+  const val = document.getElementById("username").value;
+  // E-Mail erkannt → Callsign-Feld anzeigen
+  document.getElementById("callsign-row").style.display =
+    val.includes("@") ? "flex" : "none";
+}
+
 async function doLogin() {
-  const user = document.getElementById("username").value.trim();
-  const pass = document.getElementById("password").value;
+  const user     = document.getElementById("username").value.trim();
+  const pass     = document.getElementById("password").value;
+  const callsign = document.getElementById("callsign").value.trim();
   document.getElementById("login-error").textContent = "";
+  const payload = { username: user, password: pass };
+  if (callsign) payload.callsign = callsign;
   try {
     const resp = await fetch(`${TX_BASE}/api/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: user, password: pass }),
+      body: JSON.stringify(payload),
     });
     const data = await resp.json();
     if (!resp.ok) {

@@ -401,6 +401,54 @@ class TXServer:
             return None
         return info
 
+    # ── FRN authentication ─────────────────────────────────────────────────
+
+    async def _try_frn_auth(self, email: str, password: str, callsign: str) -> bool:
+        """Validate credentials by making a test connection to the FRN server.
+        Returns True if the server responds with AL=OK (or ADMIN/OWNER/NETOWNER)."""
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.args.frn_server, self.args.frn_port),
+                timeout=5.0,
+            )
+        except Exception as e:
+            log.warning("FRN auth: connection failed: %s", e)
+            return False
+
+        try:
+            ct = (
+                f"CT:"
+                f"<VX>{FRN_PROTO_VERSION}</VX>"
+                f"<EA>{email}</EA>"
+                f"<PW>{password}</PW>"
+                f"<ON>{callsign}</ON>"
+                f"<CL>{FRN_TYPE_PC_ONLY}</CL>"
+                f"<BC>0</BC>"
+                f"<DS>WebAuth</DS>"
+                f"<NN>DE</NN>"
+                f"<CT>Stream</CT>"
+                f"<NT></NT>"
+                f"\r\n"
+            )
+            writer.write(ct.encode())
+            await writer.drain()
+            await asyncio.wait_for(reader.readline(), timeout=5)  # version line
+            result_raw = await asyncio.wait_for(reader.readline(), timeout=5)
+            result = result_raw.decode(errors="replace")
+            m  = re.search(r"<AL>(.*?)</AL>", result)
+            al = m.group(1) if m else "?"
+            log.info("FRN auth for %s: AL=%s", email, al)
+            return al in ("OK", "ADMIN", "OWNER", "NETOWNER")
+        except Exception as e:
+            log.warning("FRN auth error: %s", e)
+            return False
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
     async def _require_admin(self, request) -> tuple[dict | None, web.Response | None]:
         token = request.rel_url.query.get("token", "")
         info  = self._validate_token(token)
@@ -437,23 +485,53 @@ class TXServer:
         except Exception:
             return web.json_response({"error": "bad request"}, status=400)
 
-        username = body.get("username", "")
+        username = body.get("username", "").strip()
         password = body.get("password", "")
-        user = self.users.get(username)
+        # auth_mode: "local" | "frn" | "both" (default: "both")
+        auth_mode = self.cfg.get("auth", {}).get("mode", "both")
 
-        if not user or not hmac_compare(hash_password(password), user["password_hash"]):
-            await asyncio.sleep(1)
-            return web.json_response(
-                {"error": "Ungültiger Benutzername oder Passwort"}, status=401)
+        # ── 1. Lokale Authentifizierung ──────────────────────────────────
+        if auth_mode in ("local", "both"):
+            user = self.users.get(username)
+            if user and hmac_compare(hash_password(password), user["password_hash"]):
+                token = self._token_for(username)
+                rooms = [{"mount": m, "name": r.name} for m, r in self.rooms.items()]
+                return web.json_response({
+                    "token":    token,
+                    "callsign": user["callsign"],
+                    "is_admin": user.get("is_admin", False),
+                    "rooms":    rooms,
+                })
 
-        token = self._token_for(username)
-        rooms = [{"mount": m, "name": r.name} for m, r in self.rooms.items()]
-        return web.json_response({
-            "token":    token,
-            "callsign": user["callsign"],
-            "is_admin": user.get("is_admin", False),
-            "rooms":    rooms,
-        })
+        # ── 2. FRN-Authentifizierung ──────────────────────────────────────
+        # Benutzername = FRN-E-Mail-Adresse, Callsign = Teil vor dem @
+        if auth_mode in ("frn", "both"):
+            # Callsign: aus optionalem Feld oder aus E-Mail ableiten
+            callsign = body.get("callsign", "").strip()
+            if not callsign:
+                callsign = username.split("@")[0].upper()
+            ok = await self._try_frn_auth(username, password, callsign)
+            if ok:
+                # Ephemeres Token — kein Eintrag in tx_users.json nötig
+                token = secrets.token_hex(24)
+                self.tokens[token] = {
+                    "user":     username,
+                    "callsign": callsign,
+                    "is_admin": False,   # FRN-User bekommen keinen Admin-Zugang
+                    "expires":  time.time() + 3600,
+                }
+                rooms = [{"mount": m, "name": r.name} for m, r in self.rooms.items()]
+                log.info("FRN login: %s (%s)", username, callsign)
+                return web.json_response({
+                    "token":    token,
+                    "callsign": callsign,
+                    "is_admin": False,
+                    "rooms":    rooms,
+                })
+
+        await asyncio.sleep(1)
+        return web.json_response(
+            {"error": "Ungültiger Benutzername oder Passwort"}, status=401)
 
     async def handle_rooms(self, request):
         token = request.rel_url.query.get("token", "")
