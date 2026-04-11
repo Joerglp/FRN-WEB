@@ -867,8 +867,8 @@ async function loadUIConfig() {
         cfg.subtitle.toUpperCase() + " \u00B7 DE";
 
     // Stream cards
-    const iceHost = cfg.icecast_host || location.hostname;
-    const icePort = cfg.icecast_port || 8000;
+    iceHost = cfg.icecast_host || location.hostname;
+    icePort = cfg.icecast_port || 8000;
     const cards = document.getElementById("stream-cards");
     cards.innerHTML = "";
     (cfg.streams || []).forEach((s, idx) => {
@@ -883,10 +883,10 @@ async function loadUIConfig() {
   <div class="panel-body">
     <audio controls preload="none"
       onplay="setLed('${id}',true)" onpause="setLed('${id}',false)" onended="setLed('${id}',false)">
-      <source src="/stream/${s.mount}.mp3" type="audio/mpeg">
+      <source src="http://${iceHost}:${icePort}/${s.mount}.mp3" type="audio/mpeg">
     </audio>
     <div class="stream-links">
-      <a href="/stream/${s.mount}.mp3">&#x25B6; Direkt-Link</a>
+      <a href="http://${iceHost}:${icePort}/${s.mount}.mp3">&#x25B6; Direkt-Link</a>
     </div>
   </div>
 </div>`;
@@ -905,6 +905,8 @@ let ws = null, audioCtx = null, micSource = null;
 let workletNode = null, analyser = null;
 let txActive = false, levelTimer = null;
 let clientPollTimer = null;
+let iceHost = location.hostname;
+let icePort = 8000;
 
 // ── RX Stream + VU ──────────────────────────────────────────────────────────
 let rxAudioCtx  = null;
@@ -916,7 +918,8 @@ let rxMuted      = false;
 async function startRxStream(mount) {
   if (!mount) return;
   const audio = document.getElementById("rx-audio");
-  const url   = `/stream/${mount}.mp3`;
+  const url   = `http://${iceHost}:${icePort}/${mount}.mp3`;
+  audio.crossOrigin = "anonymous";
 
   // If graph already exists just swap the src
   if (rxSource) {
