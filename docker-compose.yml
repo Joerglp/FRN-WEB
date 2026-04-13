@@ -16,16 +16,22 @@ services:
 
   # ── FRN Web TX Server ──────────────────────────────────────────────────────
   frn-web:
-    build: .
+    build:
+      context: .
+      args:
+        WITH_WHISPER: ${WITH_WHISPER:-false}
     restart: unless-stopped
     ports:
       - "${TX_PORT:-8765}:8765"
     volumes:
-      - ./config:/app/config   # live-editierbare Konfiguration
+      - ./config:/app/config                      # live-editierbare Konfiguration
+      - frn-recordings:/opt/FRN/recordings        # WAV-Aufnahmen
+      - frn-archive:/opt/FRN/archive              # SQLite DB + Opus-Dateien
+      - whisper-cache:/root/.cache/huggingface    # Whisper-Modell (wird 1x geladen)
     environment:
       - PYTHONUNBUFFERED=1
     extra_hosts:
-      - "host.docker.internal:host-gateway"   # Zugriff auf Host (FRN_Server.jar)
+      - "host.docker.internal:host-gateway"       # Zugriff auf Host (FRN_Server.jar)
     depends_on:
       icecast:
         condition: service_healthy
@@ -38,7 +44,10 @@ services:
 
   # ── FRN → Icecast Stream Relay (ein Container, alle Räume) ────────────────
   frn-streams:
-    build: .
+    build:
+      context: .
+      args:
+        WITH_WHISPER: "false"    # Streams brauchen kein Whisper
     restart: unless-stopped
     entrypoint: ["python3", "server/frn_stream_runner.py"]
     volumes:
@@ -54,3 +63,8 @@ services:
         condition: service_healthy
       frn-web:
         condition: service_healthy
+
+volumes:
+  frn-recordings:    # WAV-Aufnahmen (temporär, werden nach Transkription behalten)
+  frn-archive:       # SQLite-Datenbank + Opus-Audiodateien (persistent!)
+  whisper-cache:     # Whisper-Modell-Cache (einmaliger Download ~1.5 GB für medium)

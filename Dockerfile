@@ -3,26 +3,38 @@ FROM python:3.11-slim-bookworm
 LABEL org.opencontainers.image.title="FRN-WEB TX Server"
 LABEL org.opencontainers.image.description="Browser-based PTT for Free Radio Network"
 
-# System dependencies: libgsm for codec, ffmpeg for stream relay
+# WITH_WHISPER=true  → faster-whisper (CPU) + scipy werden installiert
+# WITH_WHISPER=false → schlankes Image ohne ML-Abhängigkeiten (default)
+ARG WITH_WHISPER=false
+
+# System-Pakete
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgsm1 \
     libgsm-dev \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Python dependencies
+# Basis Python-Abhängigkeiten
 RUN pip install --no-cache-dir \
     aiohttp==3.9.* \
     numpy==1.26.* \
     scipy==1.12.*
 
+# Optional: faster-whisper (Sprachtranskription, ~500 MB + Modell)
+RUN if [ "$WITH_WHISPER" = "true" ]; then \
+      pip install --no-cache-dir \
+          faster-whisper==1.* \
+          paho-mqtt==1.*; \
+    fi
+
 WORKDIR /app
 
 COPY server/ ./server/
 COPY web/    ./web/
-
-# Default config location (override via volume mount)
 COPY config/ ./config/
+
+# Verzeichnisse für Laufzeit-Daten
+RUN mkdir -p /opt/FRN/recordings /opt/FRN/archive/audio
 
 EXPOSE 8765
 
