@@ -30,6 +30,19 @@ import numpy as np
 from aiohttp import web
 from scipy.signal import resample as sp_resample
 
+try:
+    from frn_transcription import SessionRecorder, TranscriptionPipeline
+    _TRANSCRIPTION_AVAILABLE = True
+except ImportError:
+    _TRANSCRIPTION_AVAILABLE = False
+
+try:
+    import frn_archive as _archive
+    _archive.init_db()
+    _ARCHIVE_AVAILABLE = True
+except Exception:
+    _ARCHIVE_AVAILABLE = False
+
 log = logging.getLogger("frn_tx")
 
 # ── FRN protocol constants ──────────────────────────────────────────────────
@@ -114,6 +127,84 @@ class GSMEncoder:
             self.handle = None
 
 
+# ── GSM Decoder ─────────────────────────────────────────────────────────────
+
+class GSMDecoder:
+    """Decode WAV49 GSM → PCM s16le using libgsm.
+
+    WAV49 packs two GSM frames into 65 bytes:
+      even half: 32 bytes  → 160 samples (320 bytes PCM)
+      odd  half: 33 bytes  → 160 samples (320 bytes PCM)
+    One 325-byte FRN packet = 5 pairs = 3200 bytes PCM @ 8 kHz mono.
+    """
+
+    def __init__(self):
+        lib_path = ctypes.util.find_library("gsm")
+        if not lib_path:
+            for p in ("/usr/lib/aarch64-linux-gnu/libgsm.so.1",
+                      "/usr/lib/x86_64-linux-gnu/libgsm.so.1",
+                      "/usr/lib/libgsm.so.1"):
+                if os.path.exists(p):
+                    lib_path = p
+                    break
+        if not lib_path:
+            raise RuntimeError("libgsm not found — install libgsm1")
+
+        lib = ctypes.CDLL(lib_path)
+        lib.gsm_create.restype  = ctypes.c_void_p
+        lib.gsm_create.argtypes = []
+        lib.gsm_decode.restype  = ctypes.c_int
+        lib.gsm_decode.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        lib.gsm_option.restype  = ctypes.c_int
+        lib.gsm_option.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                   ctypes.POINTER(ctypes.c_int)]
+        lib.gsm_destroy.restype  = None
+        lib.gsm_destroy.argtypes = [ctypes.c_void_p]
+        self.lib    = lib
+        self.handle = lib.gsm_create()
+        if not self.handle:
+            raise RuntimeError("gsm_create() failed")
+        val = ctypes.c_int(1)
+        lib.gsm_option(self.handle, GSM_OPT_WAV49, ctypes.byref(val))
+
+    def decode_packet(self, wav49: bytes) -> bytes:
+        """Decode 325 bytes WAV49 → 3200 bytes PCM s16le.
+
+        WAV49 per-pair layout (65 bytes total):
+          bytes [base   : base+33]  → even frame (33 bytes for gsm_decode)
+          bytes [base+33 : base+65] → odd  frame (32 bytes, padded to 33 for gsm_decode)
+
+        Note: the encoder stores 32 bytes for the even half and 33 for the odd half,
+        but the first byte of the odd region is the 33rd byte consumed by the even decode.
+        """
+        if len(wav49) < 325:
+            wav49 = bytes(wav49) + b"\x00" * (325 - len(wav49))
+        out = bytearray(3200)
+        for pair in range(5):
+            base = pair * 65
+            # even decode reads 33 bytes starting at base
+            src1 = ctypes.create_string_buffer(bytes(wav49[base:base + 33]), 33)
+            dst1 = ctypes.create_string_buffer(320)
+            self.lib.gsm_decode(self.handle,
+                                ctypes.cast(src1, ctypes.c_void_p),
+                                ctypes.cast(dst1, ctypes.c_void_p))
+            # odd decode reads 32 bytes starting at base+33 (pad to 33 for safety)
+            src2 = ctypes.create_string_buffer(
+                bytes(wav49[base + 33:base + 65]) + b"\x00", 33)
+            dst2 = ctypes.create_string_buffer(320)
+            self.lib.gsm_decode(self.handle,
+                                ctypes.cast(src2, ctypes.c_void_p),
+                                ctypes.cast(dst2, ctypes.c_void_p))
+            out[pair * 640:pair * 640 + 320]       = dst1.raw
+            out[pair * 640 + 320:pair * 640 + 640] = dst2.raw
+        return bytes(out)
+
+    def close(self):
+        if self.handle:
+            self.lib.gsm_destroy(self.handle)
+            self.handle = None
+
+
 # ── FRN TX Room ──────────────────────────────────────────────────────────────
 
 class FRNTXRoom:
@@ -138,6 +229,13 @@ class FRNTXRoom:
         self._encoder         = GSMEncoder()
         self._pcm_buf         = b""
         self._clients: list   = []   # last received MARKER_CLIENTS list
+        self._rx_clients: set = set()   # WebSocket connections for RX audio
+        self._recorder        = None    # SessionRecorder (gesetzt nach load_config)
+        try:
+            self._gsm_dec = GSMDecoder()
+        except RuntimeError as e:
+            log.warning("GSM decoder unavailable: %s — RX stream disabled", e)
+            self._gsm_dec = None
 
     async def ensure_connected(self):
         if self._connected:
@@ -196,6 +294,13 @@ class FRNTXRoom:
                 pass
         self._writer = None
         self._reader = None
+        # Close all RX WebSocket listeners
+        for ws in list(self._rx_clients):
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        self._rx_clients.clear()
 
     async def _keepalive_loop(self):
         try:
@@ -281,6 +386,21 @@ class FRNTXRoom:
                     elif marker == MARKER_SOUND:            # 0x02 — 1+2+325 = 328 bytes
                         if len(buf) < 328:
                             break
+                        if self._gsm_dec and (self._rx_clients or self._recorder):
+                            wav49 = buf[3:328]
+                            try:
+                                pcm = self._gsm_dec.decode_packet(bytes(wav49))
+                                if self._rx_clients:
+                                    asyncio.create_task(self._broadcast_rx(pcm))
+                                if self._recorder:
+                                    # Sprecher aus Client-Liste ermitteln (bester Versuch)
+                                    speaker = next(
+                                        (c.get("ON", "") for c in self._clients
+                                         if c.get("ON")), ""
+                                    )
+                                    self._recorder.feed(pcm, speaker)
+                            except Exception as e:
+                                log.debug("[%s] GSM decode error: %s", self.name, e)
                         buf = buf[328:]
                         progress = True
 
@@ -302,6 +422,16 @@ class FRNTXRoom:
         except Exception as e:
             log.debug("[%s] Reader: %s", self.name, e)
             self._connected = False
+
+    async def _broadcast_rx(self, pcm: bytes):
+        """Send decoded PCM bytes to all connected RX WebSocket listeners."""
+        dead = set()
+        for ws in list(self._rx_clients):
+            try:
+                await ws.send_bytes(pcm)
+            except Exception:
+                dead.add(ws)
+        self._rx_clients -= dead
 
     async def request_tx(self) -> bool:
         if not self._connected:
@@ -397,11 +527,15 @@ class TXServer:
         with open(path) as f:
             data = json.load(f)
         for u in data.get("users", []):
-            self.users[u["username"]] = {
-                "callsign":      u.get("callsign", u["username"].upper()),
-                "password_hash": u["password_hash"],
-                "is_admin":      u.get("is_admin", False),
+            entry = {
+                "callsign":     u.get("callsign", u["username"].upper()),
+                "is_admin":     u.get("is_admin", False),
+                "default_room": u.get("default_room", ""),
+                "frn_only":     u.get("frn_only", False),
             }
+            if not entry["frn_only"]:
+                entry["password_hash"] = u["password_hash"]
+            self.users[u["username"]] = entry
         log.info("Loaded %d users", len(self.users))
 
     def load_rooms(self):
@@ -426,15 +560,19 @@ class TXServer:
     def _save_users(self):
         if not self._users_path:
             return
-        data = {"users": [
-            {
-                "username":      uname,
-                "callsign":      info["callsign"],
-                "password_hash": info["password_hash"],
-                "is_admin":      info.get("is_admin", False),
+        rows = []
+        for uname, info in self.users.items():
+            row = {
+                "username":     uname,
+                "callsign":     info["callsign"],
+                "is_admin":     info.get("is_admin", False),
+                "default_room": info.get("default_room", ""),
+                "frn_only":     info.get("frn_only", False),
             }
-            for uname, info in self.users.items()
-        ]}
+            if not info.get("frn_only"):
+                row["password_hash"] = info["password_hash"]
+            rows.append(row)
+        data = {"users": rows}
         with open(self._users_path, "w") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
@@ -771,14 +909,15 @@ class TXServer:
         # ── 1. Lokale Authentifizierung ──────────────────────────────────
         if auth_mode in ("local", "both"):
             user = self.users.get(username)
-            if user and hmac_compare(hash_password(password), user["password_hash"]):
+            if user and user.get("password_hash") and hmac_compare(hash_password(password), user["password_hash"]):
                 token = self._token_for(username)
                 rooms = [{"mount": m, "name": r.name} for m, r in self.rooms.items()]
                 return web.json_response({
-                    "token":    token,
-                    "callsign": user["callsign"],
-                    "is_admin": user.get("is_admin", False),
-                    "rooms":    rooms,
+                    "token":        token,
+                    "callsign":     user["callsign"],
+                    "is_admin":     user.get("is_admin", False),
+                    "default_room": user.get("default_room", ""),
+                    "rooms":        rooms,
                 })
 
         # ── 2. FRN-Authentifizierung ──────────────────────────────────────
@@ -790,7 +929,21 @@ class TXServer:
                 callsign = username.split("@")[0].upper()
             ok = await self._try_frn_auth(username, password, callsign)
             if ok:
-                # Ephemeres Token — kein Eintrag in tx_users.json nötig
+                # Präferenzen aus gespeichertem FRN-Eintrag laden (falls vorhanden)
+                prefs = self.users.get(username, {})
+                if prefs.get("frn_only"):
+                    callsign = prefs.get("callsign") or callsign
+                elif username not in self.users:
+                    # Erster Login: Nutzer automatisch als frn_only anlegen
+                    self.users[username] = {
+                        "callsign":     callsign,
+                        "is_admin":     False,
+                        "default_room": "",
+                        "frn_only":     True,
+                    }
+                    self._save_users()
+                    log.info("FRN auto-created user '%s' (%s)", username, callsign)
+                    prefs = self.users[username]
                 token = secrets.token_hex(24)
                 self.tokens[token] = {
                     "user":     username,
@@ -801,10 +954,11 @@ class TXServer:
                 rooms = [{"mount": m, "name": r.name} for m, r in self.rooms.items()]
                 log.info("FRN login: %s (%s)", username, callsign)
                 return web.json_response({
-                    "token":    token,
-                    "callsign": callsign,
-                    "is_admin": False,
-                    "rooms":    rooms,
+                    "token":        token,
+                    "callsign":     callsign,
+                    "is_admin":     False,
+                    "default_room": prefs.get("default_room", ""),
+                    "rooms":        rooms,
                 })
 
         await asyncio.sleep(1)
@@ -842,8 +996,11 @@ class TXServer:
         if err:
             return err
         return web.json_response({"users": [
-            {"username": u, "callsign": d["callsign"],
-             "is_admin": d.get("is_admin", False)}
+            {"username":     u,
+             "callsign":     d["callsign"],
+             "is_admin":     d.get("is_admin", False),
+             "default_room": d.get("default_room", ""),
+             "frn_only":     d.get("frn_only", False)}
             for u, d in self.users.items()
         ]})
 
@@ -860,17 +1017,25 @@ class TXServer:
         callsign = body.get("callsign", "").strip()
         password = body.get("password", "")
         is_admin = bool(body.get("is_admin", False))
+        frn_only = bool(body.get("frn_only", False))
 
-        if not username or not password:
-            return web.json_response({"error": "username and password required"}, status=400)
-        if len(password) < 4:
-            return web.json_response({"error": "password too short (min 4)"}, status=400)
+        if not username:
+            return web.json_response({"error": "username required"}, status=400)
+        if not frn_only:
+            if not password:
+                return web.json_response({"error": "password required"}, status=400)
+            if len(password) < 4:
+                return web.json_response({"error": "password too short (min 4)"}, status=400)
 
-        self.users[username] = {
-            "callsign":      callsign or username.upper(),
-            "password_hash": hash_password(password),
-            "is_admin":      is_admin,
+        entry = {
+            "callsign":     callsign or username.split("@")[0].upper(),
+            "is_admin":     is_admin,
+            "default_room": body.get("default_room", ""),
+            "frn_only":     frn_only,
         }
+        if not frn_only:
+            entry["password_hash"] = hash_password(password)
+        self.users[username] = entry
         self._save_users()
         log.info("Admin: created user '%s'", username)
         return web.json_response({"ok": True})
@@ -896,6 +1061,10 @@ class TXServer:
             u["password_hash"] = hash_password(body["password"])
         if "is_admin" in body:
             u["is_admin"] = bool(body["is_admin"])
+        if "default_room" in body:
+            u["default_room"] = body["default_room"]
+        if "callsign" in body and body["callsign"]:
+            u["callsign"] = body["callsign"].strip()
 
         self._save_users()
         log.info("Admin: updated user '%s'", username)
@@ -1083,6 +1252,48 @@ class TXServer:
             ],
         })
 
+    async def handle_rx_ws(self, request):
+        """WebSocket endpoint that streams decoded PCM audio from an FRN room.
+
+        The client receives raw s16le PCM frames at 8 kHz mono (3200 bytes each,
+        200 ms per frame). Use Web Audio API on the browser side to schedule
+        and play the buffers.
+        """
+        token = request.rel_url.query.get("token", "")
+        if not self._validate_token(token):
+            return web.Response(status=401, text="Unauthorized")
+
+        mount = request.rel_url.query.get("room", "")
+        room  = self.rooms.get(mount)
+        if not room:
+            return web.Response(status=404, text=f"Room '{mount}' not found")
+
+        if room._gsm_dec is None:
+            return web.Response(status=503, text="GSM decoder not available")
+
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+
+        if not room._connected:
+            try:
+                await asyncio.wait_for(room.ensure_connected(), timeout=5.0)
+            except Exception as e:
+                await ws.close(message=f"FRN connect failed: {e}".encode())
+                return ws
+
+        room._rx_clients.add(ws)
+        log.info("RX WS connected: room=%s total_rx=%d", mount, len(room._rx_clients))
+        try:
+            async for _msg in ws:
+                pass   # keep connection alive; client sends nothing
+        except Exception:
+            pass
+        finally:
+            room._rx_clients.discard(ws)
+            log.info("RX WS closed: room=%s total_rx=%d", mount, len(room._rx_clients))
+
+        return ws
+
     # ── WebSocket ──────────────────────────────────────────────────────────
 
     async def handle_ws(self, request):
@@ -1177,6 +1388,43 @@ class TXServer:
 
         return ws
 
+    # ── Archiv-Handler ─────────────────────────────────────────────────────
+
+    async def handle_archive_page(self, request):
+        html_path = Path(__file__).parent / "archive_page.html"
+        if html_path.exists():
+            return web.FileResponse(html_path)
+        return web.Response(text="Archive page not found.", content_type="text/html")
+
+    async def handle_archive_api(self, request):
+        if not _ARCHIVE_AVAILABLE:
+            return web.json_response({"error": "archive not available"}, status=503)
+        q      = request.rel_url.query
+        limit  = min(int(q.get("limit",  100)), 500)
+        offset = int(q.get("offset", 0))
+        room   = q.get("room",   "")
+        search = q.get("search", "")
+        date_from = q.get("from", "")
+        date_to   = q.get("to",   "")
+        loop = asyncio.get_running_loop()
+        entries, total = await loop.run_in_executor(
+            None, _archive.query_entries, limit, offset, room, search, date_from, date_to
+        )
+        rooms = await loop.run_in_executor(None, _archive.get_rooms)
+        return web.json_response({"entries": entries, "total": total, "rooms": rooms})
+
+    async def handle_archive_audio(self, request):
+        if not _ARCHIVE_AVAILABLE:
+            return web.Response(status=503)
+        filename  = request.match_info["filename"]
+        # Sicherheit: kein Pfad-Traversal
+        if "/" in filename or "\\" in filename or ".." in filename:
+            return web.Response(status=400)
+        audio_path = _archive.AUDIO_DIR / filename
+        if not audio_path.exists():
+            return web.Response(status=404)
+        return web.FileResponse(audio_path, headers={"Content-Type": "audio/ogg"})
+
     # ── CORS middleware ────────────────────────────────────────────────────
 
     @web.middleware
@@ -1211,11 +1459,18 @@ class TXServer:
         app.router.add_get ("/api/frn-networks",              self.handle_frn_networks)
         app.router.add_get ("/api/rooms/{mount}/clients",    self.handle_room_clients)
         app.router.add_get ("/ws",                           self.handle_ws)
+        app.router.add_get ("/rx",                           self.handle_rx_ws)
+
+        # Archiv
+        app.router.add_get("/archive",                        self.handle_archive_page)
+        app.router.add_get("/api/archive",                    self.handle_archive_api)
+        app.router.add_get("/api/archive/audio/{filename}",   self.handle_archive_audio)
 
         # Admin (require token + is_admin)
         app.router.add_get   ("/api/admin/users",           self.handle_admin_users_list)
         app.router.add_post  ("/api/admin/users",           self.handle_admin_users_create)
         app.router.add_put   ("/api/admin/users/{username}", self.handle_admin_users_update)
+        app.router.add_patch ("/api/admin/users/{username}", self.handle_admin_users_update)
         app.router.add_delete("/api/admin/users/{username}", self.handle_admin_users_delete)
 
         app.router.add_get   ("/api/admin/rooms",         self.handle_admin_rooms_list)
@@ -1253,6 +1508,28 @@ def main():
     server.load_config()
     server.load_users()
     server.load_rooms()
+
+    # ── Transkriptions-Pipeline initialisieren ────────────────────────────────
+    if _TRANSCRIPTION_AVAILABLE:
+        transcfg = server.cfg.get("transcription", {})
+        # Fallback: config.ini einlesen falls kein JSON-Config
+        if not transcfg:
+            import configparser
+            ini = configparser.ConfigParser()
+            ini_path = Path(__file__).parent / "config.ini"
+            if ini_path.exists():
+                ini.read(ini_path)
+                if ini.has_section("transcription"):
+                    transcfg = dict(ini["transcription"])
+        if transcfg.get("enabled", "yes").lower() in ("yes", "true", "1"):
+            pipeline = TranscriptionPipeline(transcfg)
+            for mount, room in server.rooms.items():
+                room._recorder = SessionRecorder(room.name, transcfg, pipeline)
+            log.info("Transkription aktiviert für %d Räume", len(server.rooms))
+        else:
+            log.info("Transkription deaktiviert (enabled=no)")
+    else:
+        log.info("frn_transcription.py nicht gefunden — Transkription deaktiviert")
 
     app = server.build_app()
     web.run_app(app, host=args.host, port=args.port,

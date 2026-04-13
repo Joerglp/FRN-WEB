@@ -10,20 +10,20 @@
 <style>
 :root {
   --bg:      #0d1117;
-  --panel:   #111827;
-  --inset:   #0a0e16;
-  --border:  #1e2d45;
+  --panel:   #141c2b;
+  --inset:   #0e1520;
+  --border:  #2a3f5f;
   --accent:  #4fc3f7;
   --accent2: #81d4fa;
-  --text:    #cdd6e0;
-  --muted:   #4a5568;
-  --dim:     #2d3748;
+  --text:    #dce8f0;
+  --muted:   #8aabbf;
+  --dim:     #2d3f55;
   --red:     #ef5350;
   --green:   #4caf50;
   --green2:  #69f0ae;
   --orange:  #ffa726;
   --yellow:  #ffee58;
-  --chrome:  #607d8b;
+  --chrome:  #7a9ab0;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -488,7 +488,8 @@ audio {
   border-radius: 4px; text-transform: uppercase;
 }
 .badge-admin { background: rgba(79,195,247,0.15); color: var(--accent); }
-.badge-user  { background: rgba(74,85,104,0.3);  color: var(--muted); }
+.badge-user  { background: rgba(138,171,191,0.15); color: var(--muted); }
+.badge-frn   { background: rgba(255,167,38,0.15); color: var(--orange); }
 .badge-ok    { background: rgba(76,175,80,0.15); color: var(--green2); }
 
 .btn-icon {
@@ -628,7 +629,6 @@ audio {
       <div class="rx-vu-segs" id="rx-vu-segments"></div>
       <button class="rx-mute-btn" id="rx-mute-btn" onclick="toggleRxMute()" title="Stummschalten">🔇</button>
     </div>
-    <audio id="rx-audio" preload="none" style="display:none"></audio>
     <div class="user-list-header">Verbundene Benutzer</div>
     <div id="user-list"><div class="user-loading">· · ·</div></div>
   </div>
@@ -731,8 +731,7 @@ audio {
       <table class="admin-table">
         <thead>
           <tr>
-            <th>Benutzername</th><th>Callsign</th>
-            <th>Rolle</th><th></th>
+            <th>Benutzername / Callsign</th><th>Standard-Raum</th><th>Rolle</th><th></th>
           </tr>
         </thead>
         <tbody id="users-tbody"></tbody>
@@ -741,18 +740,27 @@ audio {
       <div class="admin-section-title">Neuer Benutzer</div>
       <div class="form-grid">
         <div class="form-field">
-          <label>Benutzername *</label>
-          <input type="text" id="nu-username" placeholder="benutzername">
+          <label>Benutzername / FRN-E-Mail *</label>
+          <input type="text" id="nu-username" placeholder="name oder frn@example.de">
         </div>
         <div class="form-field">
           <label>Callsign</label>
           <input type="text" id="nu-callsign" placeholder="DL0XYZ">
         </div>
-        <div class="form-field">
+        <div class="form-field" id="nu-pw-field">
           <label>Passwort *</label>
           <input type="password" id="nu-password" placeholder="min. 4 Zeichen">
         </div>
-        <div class="form-field" style="justify-content:flex-end;padding-bottom:4px">
+        <div class="form-field">
+          <label>Standard-Raum</label>
+          <select id="nu-default-room">
+            <option value="">— kein Standard —</option>
+          </select>
+        </div>
+        <div class="form-field" style="gap:6px">
+          <label class="checkbox-row">
+            <input type="checkbox" id="nu-frn-only" onchange="toggleFrnOnly()"> Nur FRN-Login (kein lokales Passwort)
+          </label>
           <label class="checkbox-row">
             <input type="checkbox" id="nu-admin"> Admin-Rechte
           </label>
@@ -910,79 +918,180 @@ let clientPollTimer = null;
 let iceHost = location.hostname;
 let icePort = 8000;
 
-// ── RX Stream + VU ──────────────────────────────────────────────────────────
-let rxAudioCtx  = null;
-let rxAnalyser  = null;
-let rxSource    = null;   // MediaElementSource (einmal pro Audio-Element)
-let rxLevelTimer = null;
-let rxMuted      = false;
+// ── RX WebSocket PCM Player ──────────────────────────────────────────────────
+// Empfängt s16le PCM @ 8 kHz mono direkt vom FRN-Server (kein Icecast-Puffer).
+// Kein Echo beim PTT-Senden: während txActive=true werden Pakete einfach verworfen.
 
-// AudioContext beim allerersten Pointer-Event anlegen — Browserpolitik erlaubt
-// Erstellung nur in Gestenskontext, async-Ketten verlieren diesen Kontext.
-document.addEventListener("pointerdown", function createRxCtx() {
-  if (!rxAudioCtx) {
-    try { rxAudioCtx = new AudioContext(); } catch {}
+const RX_SAMPLE_RATE = 8000;
+
+let rxAudioCtx    = null;
+let rxGainNode    = null;   // Lautstärke-Steuerung (TX-Mute + User-Mute)
+let rxAnalyser    = null;
+let rxMsdNode     = null;   // MediaStreamDestinationNode → iOS-Background-Audio
+let rxAudioEl     = null;   // unsichtbares <audio>-Element für iOS Lock-Screen
+let rxWs          = null;   // WebSocket zur /rx Endpoint
+let rxMuted       = false;  // User-Mute-Status
+let rxLevelTimer  = null;
+let rxScheduleTime = 0;     // Nächster Wiedergabe-Zeitpunkt im AudioContext
+
+function ensureRxAudioCtx() {
+  if (rxAudioCtx) {
+    if (rxAudioCtx.state === "suspended") rxAudioCtx.resume().catch(() => {});
+    return;
   }
-  if (rxAudioCtx && rxAudioCtx.state === "suspended") {
-    rxAudioCtx.resume().catch(() => {});
-  }
-}, { passive: true });
+  try {
+    // Keine feste Samplerate — Browser benutzt Hardware-Rate und resampelt die
+    // eingehenden 8-kHz-Buffer automatisch. Verhindert Konflikte mit dem TX-
+    // AudioContext (der 8 kHz für den GSM-Worklet braucht).
+    rxAudioCtx = new AudioContext();
+    rxGainNode = rxAudioCtx.createGain();
+    rxAnalyser = rxAudioCtx.createAnalyser();
+    rxAnalyser.fftSize = 256;
+    rxGainNode.connect(rxAnalyser);
+    rxAnalyser.connect(rxAudioCtx.destination);
 
-async function startRxStream(mount) {
-  if (!mount) return;
-  const audio = document.getElementById("rx-audio");
-
-  audio.pause();
-  audio.src = `/stream/${mount}.mp3`;
-
-  // Web-Audio-Graph aufbauen — einmalig, sobald rxAudioCtx vorhanden
-  if (!rxSource && rxAudioCtx) {
-    try {
-      rxSource   = rxAudioCtx.createMediaElementSource(audio);
-      rxAnalyser = rxAudioCtx.createAnalyser();
-      rxAnalyser.fftSize = 256;
-      rxSource.connect(rxAnalyser);
-      rxAnalyser.connect(rxAudioCtx.destination);
-      clearInterval(rxLevelTimer);
-      rxLevelTimer = setInterval(updateRxLevel, 50);
-    } catch (e) {
-      console.warn("RX VU:", e);
+    // iOS Background Audio: Web-Audio-Graph über MediaStreamDestinationNode an
+    // ein natives <audio>-Element koppeln. iOS registriert das als aktive
+    // Mediasession und lässt Audio + Netzwerk auch bei gesperrtem Bildschirm laufen.
+    if (typeof rxAudioCtx.createMediaStreamDestination === "function") {
+      rxMsdNode = rxAudioCtx.createMediaStreamDestination();
+      rxGainNode.connect(rxMsdNode);
+      rxAudioEl = document.createElement("audio");
+      rxAudioEl.srcObject = rxMsdNode.stream;
+      rxAudioEl.setAttribute("playsinline", "");
+      rxAudioEl.setAttribute("autoplay", "");
+      rxAudioEl.muted = false;
+      // Nicht in DOM hängen nötig, aber Safari braucht play()-Aufruf
+      rxAudioEl.play().catch(() => {});
     }
+
+    // Lock-Screen / Control-Center Anzeige (iOS 15+, Chrome Android)
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title:  "FRN Webstream",
+        artist: "Free Radio Network",
+      });
+      navigator.mediaSession.setActionHandler("play",  () => rxAudioCtx?.resume());
+      navigator.mediaSession.setActionHandler("pause", () => {});  // Pause blockieren
+    }
+
+    clearInterval(rxLevelTimer);
+    rxLevelTimer = setInterval(updateRxLevel, 100);
+  } catch (e) {
+    console.warn("RX AudioContext:", e);
   }
-
-  audio.muted = rxMuted;
-  audio.load();
-
-  if (rxAudioCtx && rxAudioCtx.state === "suspended")
-    await rxAudioCtx.resume().catch(() => {});
-
-  audio.play().then(() => setRxLed(true)).catch(() => {
-    // Autoplay gesperrt — beim nächsten Pointer-Event wiederholen
-    setRxLed(false);
-    document.addEventListener("pointerdown", async function retry() {
-      document.removeEventListener("pointerdown", retry);
-      if (rxAudioCtx && rxAudioCtx.state === "suspended")
-        await rxAudioCtx.resume().catch(() => {});
-      audio.play().then(() => setRxLed(true)).catch(() => {});
-    }, { once: true });
-  });
 }
 
-function stopRxStream() {
-  const audio = document.getElementById("rx-audio");
-  audio.pause();
-  clearInterval(rxLevelTimer); rxLevelTimer = null;
+// Timers pausieren wenn App im Hintergrund → Akku schonen
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    // VU-Meter und Client-Polling stoppen (Audio läuft weiter)
+    clearInterval(rxLevelTimer); rxLevelTimer = null;
+    clearTimeout(clientPollTimer); clientPollTimer = null;
+    clearRxVu();
+  } else {
+    // Wieder sichtbar: AudioContext aufwecken + Timers neu starten
+    if (rxAudioCtx?.state === "suspended") rxAudioCtx.resume().catch(() => {});
+    if (rxAnalyser && !rxLevelTimer)
+      rxLevelTimer = setInterval(updateRxLevel, 100);
+    const mount = document.getElementById("room-select")?.value;
+    if (mount && authToken && !clientPollTimer) loadRoomClients(mount);
+  }
+});
+
+// AudioContext beim allerersten Pointer-Event anlegen (Browser-Autoplay-Policy)
+document.addEventListener("pointerdown", () => ensureRxAudioCtx(), { once: true, passive: true });
+
+function connectRxWs(mount) {
+  disconnectRxWs();
+  if (!authToken || !mount) return;
+  ensureRxAudioCtx();
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  rxWs = new WebSocket(`${proto}://${location.host}/rx?token=${authToken}&room=${encodeURIComponent(mount)}`);
+  rxWs.binaryType = "arraybuffer";
+  rxScheduleTime  = 0;
+
+  rxWs.onopen = () => {
+    setRxLed(true);
+    // Lock-Screen-Anzeige mit aktuellem Raumnamen aktualisieren
+    if ("mediaSession" in navigator) {
+      const roomName = document.getElementById("room-select")?.selectedOptions[0]?.text || mount;
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title:  roomName,
+        artist: "FRN Webstream",
+      });
+      navigator.mediaSession.playbackState = "playing";
+    }
+    // iOS: sicherstellen dass <audio>-Element weiterläuft
+    rxAudioEl?.play().catch(() => {});
+  };
+
+  rxWs.onmessage = (evt) => {
+    if (!(evt.data instanceof ArrayBuffer)) return;
+    if (txActive) return;    // eigener TX — Pakete verwerfen (kein Echo)
+    if (!rxAudioCtx) return;
+    if (rxAudioCtx.state === "suspended") { rxAudioCtx.resume().catch(() => {}); return; }
+
+    const int16   = new Int16Array(evt.data);
+    const samples = int16.length;
+    const buf     = rxAudioCtx.createBuffer(1, samples, RX_SAMPLE_RATE);
+    const ch      = buf.getChannelData(0);
+    for (let i = 0; i < samples; i++) ch[i] = int16[i] / 32768.0;
+
+    const src = rxAudioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(rxGainNode);
+
+    const now = rxAudioCtx.currentTime;
+    // Lookahead: 250 ms — etwas mehr als ein Paket (200 ms).
+    // Liegt rxScheduleTime weniger als 50 ms vor der Gegenwart, springen wir
+    // 250 ms voraus statt nur 50 ms. Das füllt kurze Lücken (Sprechpausen,
+    // Netzwerkjitter) ohne hörbare Dopplungen zu erzeugen.
+    if (rxScheduleTime < now + 0.05) rxScheduleTime = now + 0.25;
+    src.start(rxScheduleTime);
+    rxScheduleTime += buf.duration;  // 200 ms pro FRN-Paket
+  };
+
+  rxWs.onclose = () => {
+    setRxLed(false);
+    clearRxVu();
+    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none";
+    // Automatisch neu verbinden, solange eingeloggt
+    if (authToken) {
+      setTimeout(() => {
+        const m = document.getElementById("room-select")?.value;
+        if (m && authToken) connectRxWs(m);
+      }, 3000);
+    }
+  };
+
+  rxWs.onerror = () => { setRxLed(false); };
+}
+
+function disconnectRxWs() {
+  if (rxWs) {
+    const old = rxWs;
+    rxWs = null;
+    old.onclose = null;   // kein automatischer Reconnect
+    old.close();
+  }
   setRxLed(false);
   clearRxVu();
 }
 
 function toggleRxMute() {
-  const audio = document.getElementById("rx-audio");
   rxMuted = !rxMuted;
-  audio.muted = rxMuted;
+  _applyRxGain();
   const btn = document.getElementById("rx-mute-btn");
   btn.textContent = rxMuted ? "🔈" : "🔇";
   btn.classList.toggle("muted", rxMuted);
+}
+
+function _applyRxGain() {
+  if (!rxGainNode) return;
+  const target = (rxMuted || txActive) ? 0.0 : 1.0;
+  rxGainNode.gain.setTargetAtTime(target, rxAudioCtx.currentTime, 0.01);
 }
 
 function setRxLed(on) {
@@ -990,12 +1099,15 @@ function setRxLed(on) {
   document.getElementById("rx-label").textContent = on ? "LIVE" : "RX";
 }
 
+let _lastRxLit = -1;
 function updateRxLevel() {
   if (!rxAnalyser) return;
   const data = new Uint8Array(rxAnalyser.frequencyBinCount);
   rxAnalyser.getByteFrequencyData(data);
   const avg = data.reduce((a, b) => a + b, 0) / data.length;
   const lit = Math.round(Math.min(1, avg / 40) * VU_COUNT);
+  if (lit === _lastRxLit) return;   // kein DOM-Update wenn sich nichts ändert
+  _lastRxLit = lit;
   for (let i = 0; i < VU_COUNT; i++) {
     const s = document.getElementById("rxvu-" + i);
     if (!s) continue;
@@ -1016,7 +1128,7 @@ function clearRxVu() {
 function onRoomChange() {
   const mount = document.getElementById("room-select").value;
   clearTimeout(clientPollTimer);
-  startRxStream(mount);
+  connectRxWs(mount);
   loadRoomClients(mount);
 }
 
@@ -1103,13 +1215,14 @@ async function doLogin() {
       document.getElementById("login-error").textContent = data.error || "Fehler";
       return;
     }
-    authToken = data.token;
-    callsign  = data.callsign;
-    isAdmin   = data.is_admin || false;
-    localStorage.setItem("frn_token",    authToken);
-    localStorage.setItem("frn_callsign", callsign);
-    localStorage.setItem("frn_is_admin", isAdmin);
-    showTxPanel(data.rooms);
+    authToken    = data.token;
+    callsign     = data.callsign;
+    isAdmin      = data.is_admin || false;
+    localStorage.setItem("frn_token",        authToken);
+    localStorage.setItem("frn_callsign",     callsign);
+    localStorage.setItem("frn_is_admin",     isAdmin);
+    localStorage.setItem("frn_default_room", data.default_room || "");
+    showTxPanel(data.rooms, data.default_room || "");
   } catch(err) {
     document.getElementById("login-error").textContent =
       "Verbindungsfehler: " + err.message;
@@ -1121,7 +1234,7 @@ async function fetchRoomsAndShow() {
     const resp = await fetch(`${TX_BASE}/api/rooms?token=${authToken}`);
     if (!resp.ok) { doLogout(); return; }
     const data = await resp.json();
-    showTxPanel(data.rooms);
+    showTxPanel(data.rooms, localStorage.getItem("frn_default_room") || "");
   } catch { doLogout(); }
 }
 
@@ -1132,9 +1245,10 @@ function doLogout() {
   localStorage.removeItem("frn_is_admin");
   if (ws) ws.close();
   clearTimeout(clientPollTimer); clientPollTimer = null;
-  stopRxStream();
+  disconnectRxWs();
+  clearInterval(rxLevelTimer); rxLevelTimer = null;
   if (rxAudioCtx) { rxAudioCtx.close(); rxAudioCtx = null; }
-  rxSource = null; rxAnalyser = null;
+  rxGainNode = null; rxAnalyser = null;
   closeAdmin();
   document.getElementById("login-section").style.display      = "block";
   document.getElementById("tx-section").style.display         = "none";
@@ -1145,7 +1259,9 @@ function doLogout() {
   document.getElementById("password").value = "";
 }
 
-function showTxPanel(rooms) {
+let adminRooms = {};  // mount → name, für Admin-Dropdowns
+
+function showTxPanel(rooms, defaultRoom = "") {
   document.getElementById("login-section").style.display    = "none";
   document.getElementById("tx-section").style.display       = "block";
   document.getElementById("room-panel").style.display       = "block";
@@ -1155,16 +1271,25 @@ function showTxPanel(rooms) {
   document.getElementById("tx-info").textContent = callsign;
   document.getElementById("admin-btn").style.display = isAdmin ? "block" : "none";
 
+  adminRooms = {};
   const sel = document.getElementById("room-select");
   sel.innerHTML = "";
   for (const r of rooms) {
+    adminRooms[r.mount] = r.name;
     const opt = document.createElement("option");
     opt.value = r.mount; opt.textContent = r.name;
     sel.appendChild(opt);
   }
-  if (rooms.length) {
-    loadRoomClients(rooms[0].mount);
-    startRxStream(rooms[0].mount);
+
+  // Standard-Raum vorwählen (falls gesetzt und vorhanden)
+  const startMount = (defaultRoom && adminRooms[defaultRoom])
+    ? defaultRoom
+    : (rooms[0]?.mount || "");
+  if (startMount) sel.value = startMount;
+
+  if (startMount) {
+    loadRoomClients(startMount);
+    connectRxWs(startMount);
   }
 }
 
@@ -1177,26 +1302,29 @@ async function pttStart(e) {
     }
   }
   if (txActive) return;
-  muteStreams(true);   // sofort stumm — nicht erst nach TX-Freigabe
+  txActive = true;
+  _applyRxGain();      // sofort stumm schalten (kein Echo durch eigene Stimme)
   setStatus("Verbinde...", "");
 
   let stream;
   try {
+    // sampleRate als "ideal" (nicht exakt) — viele Browser/ALSA ignorieren exact-Constraints
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 8000 }
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        sampleRate: { ideal: 8000 },
+      }
     });
   } catch(err) {
+    txActive = false; _applyRxGain();
     setStatus("Mikrofon-Fehler: " + err.message, "error"); return;
   }
 
-  let sampleRate = 8000;
-  try {
-    audioCtx = new AudioContext({ sampleRate: 8000 });
-    if (audioCtx.sampleRate !== 8000) sampleRate = audioCtx.sampleRate;
-  } catch {
-    audioCtx = new AudioContext();
-    sampleRate = audioCtx.sampleRate;
-  }
+  // AudioContext ohne feste Rate — der Server resampelt sowieso von beliebiger Rate auf 8 kHz.
+  // Kein sampleRate-Konflikt mit rxAudioCtx.
+  audioCtx = new AudioContext();
+  const sampleRate = audioCtx.sampleRate;
 
   const room = document.getElementById("room-select").value;
   ws = new WebSocket(
@@ -1208,21 +1336,25 @@ async function pttStart(e) {
     stopAudio();
     if (txActive) setStatus("Verbindung getrennt", "error");
     txActive = false;
+    _applyRxGain();
     document.getElementById("ptt-btn").classList.remove("active");
     document.getElementById("led-tx").className = "led";
   };
 
-  await new Promise((res, rej) => {
-    ws.onopen = res;
+  const wsReady = await new Promise((res, rej) => {
+    ws.onopen = () => res(true);
     setTimeout(() => rej(new Error("WS timeout")), 5000);
   }).catch(err => {
+    txActive = false; _applyRxGain();
     setStatus("Verbindungsfehler: " + err.message, "error");
-    stopAudio(); return;
+    stopAudio(); return false;
   });
+  if (!wsReady) return;   // abort — .catch-return oben verlässt nicht pttStart
 
   try {
     await audioCtx.audioWorklet.addModule(`${TX_BASE}/tx_processor.js`);
   } catch(err) {
+    txActive = false; _applyRxGain();
     setStatus("AudioWorklet-Fehler: " + err.message, "error");
     ws.close(); return;
   }
@@ -1238,19 +1370,21 @@ async function pttStart(e) {
     if (ws && ws.readyState === WebSocket.OPEN && txActive) ws.send(evt.data);
   };
   ws.send(JSON.stringify({ cmd: "PTT_START", sampleRate }));
-  levelTimer = setInterval(updateLevel, 50);
+  levelTimer = setInterval(updateLevel, 100);
 }
 
 function pttStop(e) {
   if (e) e.preventDefault();
   if (!txActive) { stopAudio(); return; }
-  if (ws && ws.readyState === WebSocket.OPEN)
+  if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ cmd: "PTT_STOP" }));
-  // Stream neu verbinden → springt auf Live-Position, Icecast-Puffer (Echo) übersprungen
-  const mount = document.getElementById("room-select")?.value;
-  if (mount) startRxStream(mount);
-  // Andere Audio-Elemente (Stream-Karten) wieder freigeben
-  document.querySelectorAll("audio:not(#rx-audio)").forEach(a => a.muted = false);
+  } else {
+    // WS noch nicht geöffnet oder bereits zu — sofort abbrechen
+    txActive = false;
+    _applyRxGain();
+    stopAudio();
+    if (ws) { const old = ws; ws = null; old.onclose = null; old.close(); }
+  }
 }
 
 function stopAudio() {
@@ -1273,17 +1407,20 @@ function onWsMessage(evt) {
 
   if (msg.type === "tx_active") {
     txActive = true;
+    _applyRxGain();   // sicherstellen dass RX stumm ist (war schon in pttStart gesetzt)
     document.getElementById("ptt-btn").classList.add("active");
     document.getElementById("led-tx").className = "led tx";
     setStatus("● SENDE: " +
       document.getElementById("room-select").selectedOptions[0]?.text, "ok");
   } else if (msg.type === "tx_stopped") {
-    txActive = false; muteStreams(false);
+    txActive = false;
+    _applyRxGain();   // RX wieder einschalten — parrot kommt sofort
     document.getElementById("ptt-btn").classList.remove("active");
     document.getElementById("led-tx").className = "led";
     setStatus("BEREIT", ""); stopAudio(); ws.close();
   } else if (msg.type === "error") {
-    txActive = false; muteStreams(false);
+    txActive = false;
+    _applyRxGain();
     document.getElementById("ptt-btn").classList.remove("active");
     document.getElementById("led-tx").className = "led";
     setStatus("FEHLER: " + msg.msg, "error"); stopAudio(); ws.close();
@@ -1297,21 +1434,20 @@ function setStatus(text, cls) {
   el.textContent = text; el.className = cls;
 }
 function muteStreams(mute) {
-  document.querySelectorAll("audio").forEach(a => {
-    if (a.id === "rx-audio") a.muted = mute || rxMuted;
-    else a.muted = mute;
-  });
-  if (mute) { clearInterval(rxLevelTimer); rxLevelTimer = null; clearRxVu(); }
-  else if (rxAudioCtx && !rxLevelTimer) rxLevelTimer = setInterval(updateRxLevel, 50);
+  // Icecast stream-card audio elements (sichtbar wenn ausgeloggt)
+  document.querySelectorAll("audio").forEach(a => { a.muted = mute; });
 }
+let _lastTxLit = -1;
 function updateLevel() {
   if (!analyser) return;
   const data = new Uint8Array(analyser.frequencyBinCount);
   analyser.getByteFrequencyData(data);
   const avg = data.reduce((a, b) => a + b, 0) / data.length;
   const pct = Math.min(100, avg * 2);
-  document.getElementById("level-bar").style.width = pct + "%";
   const lit = Math.round(pct / 100 * VU_COUNT);
+  if (lit === _lastTxLit) return;   // kein DOM-Update wenn sich nichts ändert
+  _lastTxLit = lit;
+  document.getElementById("level-bar").style.width = pct + "%";
   for (let i = 0; i < VU_COUNT; i++) {
     const s = document.getElementById("vu-" + i);
     if (!s) continue;
@@ -1358,40 +1494,123 @@ async function loadUsers() {
   const data = await r.json();
   const tbody = document.getElementById("users-tbody");
   tbody.innerHTML = "";
+
+  // Standard-Raum-Dropdown im Neu-Formular befüllen
+  const roomOpts = Object.entries(adminRooms || {})
+    .map(([m, n]) => `<option value="${esc(m)}">${esc(n)}</option>`).join("");
+  const sel = document.getElementById("nu-default-room");
+  if (sel) sel.innerHTML = `<option value="">— kein Standard —</option>${roomOpts}`;
+
   (data.users || []).forEach(u => {
+    const roleCls  = u.is_admin ? 'badge-admin' : (u.frn_only ? 'badge-frn' : 'badge-user');
+    const roleText = u.is_admin ? 'Admin'       : (u.frn_only ? 'FRN'       : 'User');
+    const roomName = adminRooms?.[u.default_room] || (u.default_room ? u.default_room : '—');
+
+    // Hauptzeile
     const tr = document.createElement("tr");
+    tr.dataset.username = u.username;
     tr.innerHTML = `
-      <td><b>${esc(u.username)}</b></td>
-      <td>${esc(u.callsign)}</td>
-      <td><span class="badge ${u.is_admin ? 'badge-admin' : 'badge-user'}">
-        ${u.is_admin ? 'Admin' : 'User'}</span></td>
-      <td><button class="btn-icon" onclick="deleteUser('${esc(u.username)}')">✕</button></td>`;
+      <td><b>${esc(u.username)}</b><br>
+          <small style="color:var(--muted);font-size:0.8em">${esc(u.callsign)}</small></td>
+      <td><span style="color:var(--muted);font-size:0.85em">${esc(roomName)}</span></td>
+      <td><span class="badge ${roleCls}">${roleText}</span></td>
+      <td style="white-space:nowrap">
+        <button class="btn-icon edit" style="margin-right:4px"
+          onclick="toggleUserEdit(this)">✎</button>
+        <button class="btn-icon"
+          onclick="deleteUser('${esc(u.username)}')">✕</button>
+      </td>`;
     tbody.appendChild(tr);
+
+    // Edit-Zeile (versteckt) — username nur als data-Attribut, keine IDs mit Sonderzeichen
+    const roomSelOpts = `<option value="">— kein Standard —</option>${
+      Object.entries(adminRooms || {}).map(([m, n]) =>
+        `<option value="${esc(m)}" ${u.default_room === m ? 'selected' : ''}>${esc(n)}</option>`
+      ).join("")}`;
+    const etr = document.createElement("tr");
+    etr.className = "user-edit-row";
+    etr.dataset.username = u.username;
+    etr.style.display = "none";
+    etr.innerHTML = `
+      <td colspan="4" style="padding:10px 10px 14px;background:var(--inset)">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+          <div class="form-field">
+            <label>Callsign</label>
+            <input class="ue-cs" value="${esc(u.callsign)}" style="background:var(--panel)">
+          </div>
+          <div class="form-field">
+            <label>Standard-Raum</label>
+            <select class="ue-room" style="background:var(--panel)">${roomSelOpts}</select>
+          </div>
+        </div>
+        <button class="btn-save" style="font-size:0.62em;padding:7px 16px"
+          onclick="saveUser(this)">SPEICHERN</button>
+        <span class="ue-msg" style="margin-left:10px;font-size:0.8em"></span>
+      </td>`;
+    tbody.appendChild(etr);
   });
+}
+
+function toggleUserEdit(btn) {
+  const etr = btn.closest("tr").nextElementSibling;
+  if (!etr || !etr.classList.contains("user-edit-row")) return;
+  etr.style.display = etr.style.display === "none" ? "" : "none";
+}
+
+async function saveUser(btn) {
+  const etr      = btn.closest("tr");
+  const username = etr.dataset.username;
+  const cs       = etr.querySelector(".ue-cs")?.value.trim();
+  const room     = etr.querySelector(".ue-room")?.value;
+  const msg      = etr.querySelector(".ue-msg");
+  const r = await adminFetch(`/api/admin/users/${encodeURIComponent(username)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ callsign: cs, default_room: room }),
+  });
+  if (r.ok) {
+    if (msg) { msg.style.color = "var(--green2)"; msg.textContent = "Gespeichert ✓"; }
+    setTimeout(() => loadUsers(), 800);
+  } else {
+    if (msg) { msg.style.color = "var(--red)"; msg.textContent = "Fehler"; }
+  }
+}
+
+function toggleFrnOnly() {
+  const frn = document.getElementById("nu-frn-only").checked;
+  const pwField = document.getElementById("nu-pw-field");
+  if (pwField) pwField.style.display = frn ? "none" : "";
 }
 
 async function addUser() {
   const msg   = document.getElementById("msg-users");
-  const uname = document.getElementById("nu-username").value.trim();
-  const cs    = document.getElementById("nu-callsign").value.trim();
-  const pw    = document.getElementById("nu-password").value;
-  const admin = document.getElementById("nu-admin").checked;
+  const uname    = document.getElementById("nu-username").value.trim();
+  const cs       = document.getElementById("nu-callsign").value.trim();
+  const pw       = document.getElementById("nu-password").value;
+  const admin    = document.getElementById("nu-admin").checked;
+  const frnOnly  = document.getElementById("nu-frn-only").checked;
+  const defRoom  = document.getElementById("nu-default-room")?.value || "";
 
   msg.textContent = ""; msg.className = "admin-msg";
-  if (!uname || !pw) { showMsg("msg-users", "Benutzername und Passwort erforderlich", "error"); return; }
+  if (!uname) { showMsg("msg-users", "Benutzername erforderlich", "error"); return; }
+  if (!frnOnly && !pw) { showMsg("msg-users", "Passwort erforderlich (oder FRN-Login aktivieren)", "error"); return; }
 
   const r = await adminFetch("/api/admin/users", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: uname, callsign: cs, password: pw, is_admin: admin })
+    body: JSON.stringify({ username: uname, callsign: cs, password: pw,
+                           is_admin: admin, frn_only: frnOnly, default_room: defRoom })
   });
   const data = await r.json();
   if (!r.ok) { showMsg("msg-users", data.error, "error"); return; }
   showMsg("msg-users", `Benutzer '${uname}' angelegt.`, "ok");
-  document.getElementById("nu-username").value = "";
-  document.getElementById("nu-callsign").value = "";
-  document.getElementById("nu-password").value = "";
-  document.getElementById("nu-admin").checked  = false;
+  document.getElementById("nu-username").value  = "";
+  document.getElementById("nu-callsign").value  = "";
+  document.getElementById("nu-password").value  = "";
+  document.getElementById("nu-admin").checked   = false;
+  document.getElementById("nu-frn-only").checked = false;
+  document.getElementById("nu-pw-field").style.display = "";
+  const dr = document.getElementById("nu-default-room"); if (dr) dr.value = "";
   loadUsers();
 }
 
