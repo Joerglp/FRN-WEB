@@ -929,7 +929,8 @@ let rxGainNode    = null;   // Lautstärke-Steuerung (TX-Mute + User-Mute)
 let rxAnalyser    = null;
 let rxMsdNode     = null;   // MediaStreamDestinationNode → iOS-Background-Audio
 let rxAudioEl     = null;   // unsichtbares <audio>-Element für iOS Lock-Screen
-let rxWs          = null;   // WebSocket zur /rx Endpoint
+let rxWs              = null;   // WebSocket zur /rx Endpoint
+let _rxReconnectDelay = 3000;   // Exponentieller Backoff (ms)
 let rxMuted       = false;  // User-Mute-Status
 let rxLevelTimer  = null;
 let rxScheduleTime = 0;     // Nächster Wiedergabe-Zeitpunkt im AudioContext
@@ -990,12 +991,21 @@ document.addEventListener("visibilitychange", () => {
     clearTimeout(clientPollTimer); clientPollTimer = null;
     clearRxVu();
   } else {
-    // Wieder sichtbar: AudioContext aufwecken + Timers neu starten
+    // Wieder sichtbar: AudioContext aufwecken
     if (rxAudioCtx?.state === "suspended") rxAudioCtx.resume().catch(() => {});
+    // VU-Meter neu starten
     if (rxAnalyser && !rxLevelTimer)
       rxLevelTimer = setInterval(updateRxLevel, 100);
     const mount = document.getElementById("room-select")?.value;
     if (mount && authToken && !clientPollTimer) loadRoomClients(mount);
+    // WebSocket prüfen — bei iOS oft tot nach Hintergrund
+    if (mount && authToken) {
+      const wsOk = rxWs && rxWs.readyState === WebSocket.OPEN;
+      if (!wsOk) {
+        console.log("Visibility: WS nicht offen — neu verbinden");
+        connectRxWs(mount);
+      }
+    }
   }
 });
 
@@ -1013,6 +1023,7 @@ function connectRxWs(mount) {
   rxScheduleTime  = 0;
 
   rxWs.onopen = () => {
+    _rxReconnectDelay = 3000;   // Backoff zurücksetzen
     setRxLed(true);
     // Lock-Screen-Anzeige mit aktuellem Raumnamen aktualisieren
     if ("mediaSession" in navigator) {
@@ -1053,17 +1064,33 @@ function connectRxWs(mount) {
     rxScheduleTime += buf.duration;  // 200 ms pro FRN-Paket
   };
 
-  rxWs.onclose = () => {
+  let _rxReconnectDelay = 3000;
+  rxWs.onclose = (evt) => {
     setRxLed(false);
     clearRxVu();
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none";
-    // Automatisch neu verbinden, solange eingeloggt
-    if (authToken) {
-      setTimeout(() => {
-        const m = document.getElementById("room-select")?.value;
-        if (m && authToken) connectRxWs(m);
-      }, 3000);
+
+    if (!authToken) return;
+
+    // Code 4001 = Token abgelaufen → neu einloggen
+    if (evt.code === 4001) {
+      console.warn("Token abgelaufen — logout");
+      authToken = null;
+      localStorage.removeItem("frn_token");
+      showLogin();
+      return;
     }
+
+    // Exponentieller Backoff: 3s → 6s → 12s → max 30s
+    const delay = _rxReconnectDelay;
+    _rxReconnectDelay = Math.min(_rxReconnectDelay * 2, 30000);
+    setTimeout(() => {
+      const m = document.getElementById("room-select")?.value;
+      if (m && authToken) {
+        _rxReconnectDelay = 3000;   // Reset nach erfolgreichem Reconnect
+        connectRxWs(m);
+      }
+    }, delay);
   };
 
   rxWs.onerror = () => { setRxLed(false); };

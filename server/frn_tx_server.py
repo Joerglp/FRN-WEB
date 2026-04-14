@@ -497,6 +497,33 @@ class TXServer:
         self.rooms: dict[str, FRNTXRoom] = {}
         self._users_path: Path | None = None
         self._rooms_path: Path | None = None
+        self._tokens_path: Path = Path(__file__).parent / "tx_tokens.json"
+        self._load_tokens()
+
+    # ── Token Persistenz ───────────────────────────────────────────────────
+
+    def _load_tokens(self):
+        """Lädt gespeicherte Tokens (überleben Server-Neustart)."""
+        try:
+            if self._tokens_path.exists():
+                data = json.loads(self._tokens_path.read_text())
+                now  = time.time()
+                self.tokens = {
+                    t: v for t, v in data.items()
+                    if v.get("expires", 0) > now
+                }
+                log.info("Tokens geladen: %d aktive", len(self.tokens))
+        except Exception as e:
+            log.warning("Token-Load fehlgeschlagen: %s", e)
+
+    def _save_tokens(self):
+        """Speichert aktive Tokens auf Disk."""
+        try:
+            self._tokens_path.write_text(
+                json.dumps(self.tokens, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            log.warning("Token-Save fehlgeschlagen: %s", e)
 
     # ── Config loading ─────────────────────────────────────────────────────
 
@@ -598,6 +625,8 @@ class TXServer:
 
     # ── Token management ───────────────────────────────────────────────────
 
+    TOKEN_LIFETIME = 86400   # 24 Stunden
+
     def _token_for(self, username: str) -> str:
         token = secrets.token_hex(24)
         u = self.users[username]
@@ -605,8 +634,9 @@ class TXServer:
             "user":     username,
             "callsign": u["callsign"],
             "is_admin": u.get("is_admin", False),
-            "expires":  time.time() + 3600,
+            "expires":  time.time() + self.TOKEN_LIFETIME,
         }
+        self._save_tokens()
         return token
 
     def _validate_token(self, token: str) -> dict | None:
@@ -615,7 +645,10 @@ class TXServer:
             return None
         if time.time() > info["expires"]:
             del self.tokens[token]
+            self._save_tokens()
             return None
+        # Sliding window — Token bei jeder Nutzung verlängern
+        info["expires"] = time.time() + self.TOKEN_LIFETIME
         return info
 
     # ── FRN authentication ─────────────────────────────────────────────────
