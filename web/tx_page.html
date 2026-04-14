@@ -935,6 +935,40 @@ let rxMuted       = false;  // User-Mute-Status
 let rxLevelTimer  = null;
 let rxScheduleTime = 0;     // Nächster Wiedergabe-Zeitpunkt im AudioContext
 
+// ── iOS Hintergrund-Audio via Icecast ────────────────────────────────────
+// iOS suspendiert Web Audio API wenn Display aus. Lösung: im Hintergrund
+// auf nativen <audio>-Stream (Icecast MP3) umschalten — das darf iOS
+// wie eine Musik-App im Hintergrund abspielen.
+let _bgAudioEl   = null;
+let _bgAudioMount = null;
+
+function _initBgAudio() {
+  if (_bgAudioEl) return;
+  _bgAudioEl = document.createElement("audio");
+  _bgAudioEl.setAttribute("playsinline", "");
+  _bgAudioEl.setAttribute("x-webkit-airplay", "allow");
+  _bgAudioEl.preload = "none";
+  _bgAudioEl.volume  = 1.0;
+  document.body.appendChild(_bgAudioEl);
+}
+
+function _startBgAudio(mount) {
+  _initBgAudio();
+  if (_bgAudioMount === mount && !_bgAudioEl.paused) return;
+  _bgAudioMount      = mount;
+  _bgAudioEl.src     = `/stream/${encodeURIComponent(mount)}.mp3`;
+  _bgAudioEl.play().catch(e => console.warn("BgAudio play:", e));
+  console.log("BgAudio: Icecast gestartet →", mount);
+}
+
+function _stopBgAudio() {
+  if (!_bgAudioEl || _bgAudioEl.paused) return;
+  _bgAudioEl.pause();
+  _bgAudioEl.src = "";
+  _bgAudioMount  = null;
+  console.log("BgAudio: gestoppt");
+}
+
 function ensureRxAudioCtx() {
   if (rxAudioCtx) {
     if (rxAudioCtx.state === "suspended") rxAudioCtx.resume().catch(() => {});
@@ -983,34 +1017,45 @@ function ensureRxAudioCtx() {
   }
 }
 
-// Timers pausieren wenn App im Hintergrund → Akku schonen
+// Hintergrund/Vordergrund-Wechsel
 document.addEventListener("visibilitychange", () => {
+  const mount = document.getElementById("room-select")?.value;
+
   if (document.visibilityState === "hidden") {
-    // VU-Meter und Client-Polling stoppen (Audio läuft weiter)
+    // Display aus / App im Hintergrund
     clearInterval(rxLevelTimer); rxLevelTimer = null;
     clearTimeout(clientPollTimer); clientPollTimer = null;
     clearRxVu();
+
+    // Auf Icecast-Stream umschalten — überlebt iOS Display-Aus
+    if (mount && authToken) {
+      _startBgAudio(mount);
+    }
   } else {
-    // Wieder sichtbar: AudioContext aufwecken
+    // Display an / App wieder sichtbar
+    _stopBgAudio();   // Icecast-Fallback stoppen
+
+    // AudioContext aufwecken
     if (rxAudioCtx?.state === "suspended") rxAudioCtx.resume().catch(() => {});
+
     // VU-Meter neu starten
     if (rxAnalyser && !rxLevelTimer)
       rxLevelTimer = setInterval(updateRxLevel, 100);
-    const mount = document.getElementById("room-select")?.value;
-    if (mount && authToken && !clientPollTimer) loadRoomClients(mount);
-    // WebSocket prüfen — bei iOS oft tot nach Hintergrund
+
     if (mount && authToken) {
+      if (!clientPollTimer) loadRoomClients(mount);
+      // WebSocket neu verbinden falls tot
       const wsOk = rxWs && rxWs.readyState === WebSocket.OPEN;
-      if (!wsOk) {
-        console.log("Visibility: WS nicht offen — neu verbinden");
-        connectRxWs(mount);
-      }
+      if (!wsOk) connectRxWs(mount);
     }
   }
 });
 
 // AudioContext beim allerersten Pointer-Event anlegen (Browser-Autoplay-Policy)
-document.addEventListener("pointerdown", () => ensureRxAudioCtx(), { once: true, passive: true });
+document.addEventListener("pointerdown", () => {
+  ensureRxAudioCtx();
+  _initBgAudio();   // iOS Audio-Session bereits bei erstem Touch öffnen
+}, { once: true, passive: true });
 
 function connectRxWs(mount) {
   disconnectRxWs();
