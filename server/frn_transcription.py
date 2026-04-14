@@ -162,12 +162,75 @@ class TranscriptionPipeline:
         self._setup_cleanup()
 
     def _setup_cleanup(self):
-        """Startet einen stündlichen Cleanup-Task für alte WAV-Dateien."""
+        """Startet stündlichen Cleanup + Meta-Datei-Watcher."""
         async def cleanup_loop():
             while True:
                 await asyncio.sleep(3600)
                 self._cleanup_old_wavs()
-        asyncio.ensure_future(cleanup_loop())
+
+        async def meta_watcher():
+            """Alle 10s nach neuen .meta-Dateien aus frn_stream.py suchen."""
+            while True:
+                await asyncio.sleep(10)
+                await self._process_meta_files()
+
+        loop = asyncio.get_event_loop()
+        loop.create_task(cleanup_loop())
+        loop.create_task(meta_watcher())
+
+    async def _process_meta_files(self):
+        """Verarbeitet .meta-Dateien die frn_stream.py abgelegt hat."""
+        for meta_path in sorted(self.wav_dir.glob("*.meta")):
+            try:
+                import json as _json
+                meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+                wav_path = meta.get("wav", "")
+                room     = meta.get("room", "")
+                callsign = meta.get("callsign", "")
+                ts       = float(meta.get("timestamp", 0))
+
+                if not wav_path or not Path(wav_path).exists():
+                    meta_path.rename(meta_path.with_suffix(".meta.done"))
+                    continue
+
+                # Als erledigt markieren BEVOR Verarbeitung (verhindert Doppelverarbeitung)
+                meta_path.rename(meta_path.with_suffix(".meta.done"))
+
+                log.info("[%s] Meta-Datei gefunden: %s (%s)", room, Path(wav_path).name, callsign)
+                asyncio.ensure_future(self.process_wav(wav_path, room, callsign, ts))
+
+            except Exception as e:
+                log.warning("Meta-Datei Fehler (%s): %s", meta_path.name, e)
+                try:
+                    meta_path.rename(meta_path.with_suffix(".meta.err"))
+                except Exception:
+                    pass
+
+    async def process_wav(self, wav_path: str, room: str, callsign: str, ts: float):
+        """Transkribiert eine fertige WAV-Datei (von frn_stream.py aufgezeichnet)."""
+        model_size = self.cfg.get("whisper_model", "medium")
+        language   = self.cfg.get("whisper_language", "de")
+        text = ""
+        try:
+            text = await asyncio.wait_for(
+                transcribe_wav(wav_path, model_size, language),
+                timeout=300.0
+            )
+        except asyncio.TimeoutError:
+            log.warning("[%s] Whisper-Timeout für %s", room, Path(wav_path).name)
+        except Exception as e:
+            log.warning("[%s] Whisper-Fehler für %s: %r", room, Path(wav_path).name, e)
+
+        if not text:
+            return
+
+        self._log(ts, room, callsign, text)
+
+        try:
+            from frn_archive import add_entry
+            await add_entry(wav_path, room, callsign, ts, text)
+        except Exception as e:
+            log.warning("[%s] Archiv-Fehler: %s", room, e)
 
     def _cleanup_old_wavs(self):
         max_age = int(self.cfg.get("max_age_days", 2))
@@ -215,10 +278,12 @@ class TranscriptionPipeline:
         try:
             text = await asyncio.wait_for(
                 transcribe_wav(str(wav_path), model_size, language),
-                timeout=120.0
+                timeout=300.0
             )
+        except asyncio.TimeoutError:
+            log.warning("[%s] Whisper-Timeout (>300s) — übersprungen", room)
         except Exception as e:
-            log.warning("[%s] Whisper-Fehler: %s", room, e)
+            log.warning("[%s] Whisper-Fehler: %r", room, e)
 
         if not text:
             log.debug("[%s] Kein Transkript erhalten", room)

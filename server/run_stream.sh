@@ -25,7 +25,14 @@ ICECAST_URL="icecast://source:${ICECAST_PASS}@${ICECAST_HOST}:${ICECAST_PORT}/${
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "[$(date)] Starting stream: room='${ROOM}' mount='/${MOUNT}.mp3'" >&2
+# Aufnahme aktivieren wenn Verzeichnis existiert (TX-Server transkribiert zentral)
+RECORD_FLAG=""
+WAV_DIR="${WAV_DIR:-/opt/FRN/recordings}"
+if [ "${ENABLE_RECORDING:-yes}" = "yes" ]; then
+    RECORD_FLAG="--record --wav-dir ${WAV_DIR}"
+fi
+
+echo "[$(date)] Starting stream: room='${ROOM}' mount='/${MOUNT}.mp3' record=${ENABLE_RECORDING:-yes}" >&2
 
 while true; do
     echo "[$(date)] Connecting FRN client to ${FRN_SERVER}:${FRN_PORT} room '${ROOM}'..." >&2
@@ -37,6 +44,7 @@ while true; do
         --email "${EMAIL}" \
         --password "${PASSWORD}" \
         --callsign "${CALLSIGN}" \
+        ${RECORD_FLAG} \
     | ffmpeg -hide_banner -loglevel warning \
         -f s16le -ar 8000 -ac 1 -i pipe:0 \
         -codec:a libmp3lame -b:a 64k -ar 22050 -ac 1 \

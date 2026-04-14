@@ -15,6 +15,7 @@ Protocol reference: frnprotocol.htm + Net::FRN Perl module (Client.pm)
 import argparse
 import ctypes
 import ctypes.util
+import json
 import logging
 import os
 import queue
@@ -26,6 +27,8 @@ import struct
 import sys
 import threading
 import time
+import wave
+from pathlib import Path
 
 # --- Constants ---
 
@@ -221,7 +224,7 @@ class FRNClient:
         self.rx_sent = False
 
     def run(self, pcm_callback, debug=False):
-        """Receive loop.  pcm_callback(pcm_640_bytes) called per decoded WAV49 pair."""
+        """Receive loop.  pcm_callback(pcm_640_bytes, callsign) called per decoded WAV49 pair."""
         gsm = GSMDecoder()
         try:
             while self.connected:
@@ -257,16 +260,21 @@ class FRNClient:
                         if not self._has_bytes(1 + RX_PACKET_SIZE):
                             break
                         self._consume(1)      # marker
-                        self._consume(2)      # client index
+                        idx_bytes = self._consume(2)
+                        client_idx = struct.unpack(">H", bytes(idx_bytes))[0]
                         gsm_data = self._consume(AUDIO_PACKET_SIZE)
+                        # Callsign aus Client-Liste
+                        callsign = ""
+                        if 0 <= client_idx < len(self.clients):
+                            callsign = self.clients[client_idx].get("ON", "")
                         if debug:
-                            log.debug("SOUND %d bytes", len(gsm_data))
+                            log.debug("SOUND idx=%d callsign=%s", client_idx, callsign)
                         # Decode each of the 5 WAV49 pairs individually
                         for i in range(WAV49_BLOCKS_PER_PACKET):
                             pair = gsm_data[i * WAV49_BLOCK_SIZE :
                                             (i + 1) * WAV49_BLOCK_SIZE]
                             pcm = gsm.decode_pair(pair)
-                            pcm_callback(pcm)
+                            pcm_callback(pcm, callsign)
 
                     elif marker == MARKER_TX_APPROVE:
                         if not self._has_bytes(3):
@@ -427,6 +435,118 @@ class FRNClient:
 
 
 # ---------------------------------------------------------------------------
+# RoomRecorder — erkennt TX-Sessions, speichert WAV + Metadaten
+# ---------------------------------------------------------------------------
+
+class RoomRecorder:
+    """
+    Puffert PCM-Audio, erkennt Sendepausen und speichert abgeschlossene
+    Übertragungen als WAV + .meta JSON.  Die Transkription übernimmt der
+    TX-Server (zentraler Whisper-Prozess).
+    """
+
+    SILENCE_TIMEOUT = 1.5    # Sekunden Stille → Session beendet
+    MIN_DURATION    = 1.0    # Sekunden Mindestlänge (kürzere werden verworfen)
+    SAMPLE_RATE     = 8000
+    SAMPLE_WIDTH    = 2      # int16
+
+    def __init__(self, room_name: str, wav_dir: str):
+        self.room_name = room_name
+        self.wav_dir   = Path(wav_dir)
+        self.wav_dir.mkdir(parents=True, exist_ok=True)
+        self._buf: list[bytes] = []
+        self._callsign  = ""
+        self._start_ts  = 0.0
+        self._last_ts   = 0.0
+        self._active    = False
+        self._lock      = threading.Lock()
+        self._timer: threading.Timer | None = None
+
+    def feed(self, pcm: bytes, callsign: str = ""):
+        """640-Byte PCM-Block einreichen."""
+        is_silence = (pcm == PCM_SILENCE or pcm == b"\x00" * len(pcm))
+
+        with self._lock:
+            if is_silence:
+                # Schweigen während aktiver Session → Timer läuft bereits
+                return
+            # Audio-Daten
+            if not self._active:
+                self._active   = True
+                self._start_ts = time.time()
+                self._buf      = []
+                self._callsign = callsign or ""
+                log.debug("[%s] TX-Session gestartet (%s)", self.room_name, callsign)
+            elif callsign:
+                self._callsign = callsign
+
+            self._buf.append(pcm)
+            self._last_ts = time.time()
+
+        # Silence-Timer zurücksetzen
+        if self._timer:
+            self._timer.cancel()
+        self._timer = threading.Timer(self.SILENCE_TIMEOUT, self._on_silence)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _on_silence(self):
+        with self._lock:
+            if not self._active:
+                return
+            self._active  = False
+            self._timer   = None
+            pcm_data      = b"".join(self._buf)
+            self._buf     = []
+            callsign      = self._callsign
+            start_ts      = self._start_ts
+
+        min_bytes = int(self.MIN_DURATION * self.SAMPLE_RATE) * self.SAMPLE_WIDTH
+        if len(pcm_data) < min_bytes:
+            log.debug("[%s] Session zu kurz — verworfen", self.room_name)
+            return
+
+        threading.Thread(
+            target=self._save,
+            args=(pcm_data, callsign, start_ts),
+            daemon=True,
+        ).start()
+
+    def _save(self, pcm_data: bytes, callsign: str, ts: float):
+        from datetime import datetime
+        dt   = datetime.fromtimestamp(ts)
+        name = dt.strftime("frn-%Y%m%d-%H%M%S")
+        wav_path  = self.wav_dir / f"{name}.wav"
+        meta_path = self.wav_dir / f"{name}.meta"
+
+        # WAV schreiben
+        try:
+            with wave.open(str(wav_path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(self.SAMPLE_WIDTH)
+                wf.setframerate(self.SAMPLE_RATE)
+                wf.writeframes(pcm_data)
+        except Exception as e:
+            log.warning("[%s] WAV-Schreibfehler: %s", self.room_name, e)
+            return
+
+        # Meta-Datei schreiben (wird vom TX-Server aufgegriffen)
+        meta = {
+            "room":      self.room_name,
+            "callsign":  callsign,
+            "timestamp": ts,
+            "wav":       str(wav_path),
+        }
+        try:
+            meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        except Exception as e:
+            log.warning("[%s] Meta-Schreibfehler: %s", self.room_name, e)
+            return
+
+        log.info("[%s] Aufnahme gespeichert: %s (%s)", self.room_name, wav_path.name, callsign)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -443,6 +563,10 @@ def main():
     parser.add_argument("--country",     default="DE")
     parser.add_argument("--city",        default="Stream")
     parser.add_argument("--debug",       action="store_true")
+    parser.add_argument("--record",      action="store_true",
+                        help="WAV-Aufnahmen + Meta für Transkription speichern")
+    parser.add_argument("--wav-dir",     default="/opt/FRN/recordings",
+                        help="Verzeichnis für WAV-Aufnahmen (default: /opt/FRN/recordings)")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -452,6 +576,12 @@ def main():
     )
 
     stdout_bin = os.fdopen(sys.stdout.fileno(), "wb", buffering=0)
+
+    # ---- Recorder (optional) ----
+    recorder = None
+    if args.record:
+        recorder = RoomRecorder(room_name=args.room, wav_dir=args.wav_dir)
+        log.info("Aufnahme aktiv: %s → %s", args.room, args.wav_dir)
 
     # ---- Timed output thread ----
     # Each slot = 640 bytes = 320 samples = 40 ms at 8 kHz 16-bit mono.
@@ -480,12 +610,14 @@ def main():
 
     threading.Thread(target=output_thread, daemon=True).start()
 
-    def pcm_callback(pcm_block):
+    def pcm_callback(pcm_block, callsign=""):
         """Receive one decoded 640-byte PCM block from FRNClient.run()."""
         try:
             audio_q.put_nowait(pcm_block)
         except queue.Full:
             log.debug("Audio queue full, dropping block")
+        if recorder:
+            recorder.feed(pcm_block, callsign)
 
     def signal_handler(signum, _frame):
         log.info("Signal %d, exiting", signum)
