@@ -517,10 +517,12 @@ class TXServer:
             log.warning("Token-Load fehlgeschlagen: %s", e)
 
     def _save_tokens(self):
-        """Speichert aktive Tokens auf Disk."""
+        """Speichert aktive Tokens auf Disk (FRN-Passwörter werden nicht gespeichert)."""
         try:
+            safe = {t: {k: v for k, v in d.items() if k != "frn_password"}
+                    for t, d in self.tokens.items()}
             self._tokens_path.write_text(
-                json.dumps(self.tokens, indent=2), encoding="utf-8"
+                json.dumps(safe, indent=2), encoding="utf-8"
             )
         except Exception as e:
             log.warning("Token-Save fehlgeschlagen: %s", e)
@@ -979,10 +981,12 @@ class TXServer:
                     prefs = self.users[username]
                 token = secrets.token_hex(24)
                 self.tokens[token] = {
-                    "user":     username,
-                    "callsign": callsign,
-                    "is_admin": False,   # FRN-User bekommen keinen Admin-Zugang
-                    "expires":  time.time() + 3600,
+                    "user":         username,
+                    "callsign":     callsign,
+                    "is_admin":     False,   # FRN-User bekommen keinen Admin-Zugang
+                    "expires":      time.time() + TOKEN_LIFETIME,
+                    "frn_email":    username,   # für eigene TX-Verbindung
+                    "frn_password": password,   # nur im RAM, nicht auf Disk
                 }
                 rooms = [{"mount": m, "name": r.name} for m, r in self.rooms.items()]
                 log.info("FRN login: %s (%s)", username, callsign)
@@ -1345,7 +1349,12 @@ class TXServer:
         callsign = info["callsign"]
         log.info("WS connected: user=%s room=%s", info["user"], mount)
 
+        # FRN-Credentials für eigene TX-Verbindung (nur wenn via FRN eingeloggt)
+        frn_email    = info.get("frn_email", "")
+        frn_password = info.get("frn_password", "")
+
         in_tx        = False
+        tx_conn      = None   # aktive TX-Verbindung (shared oder user-eigene)
         src_rate     = 48000
         native_buf   = np.array([], dtype=np.float32)
         native_block = 960
@@ -1373,33 +1382,58 @@ class TXServer:
                             await ws.send_json({"type": "error",
                                                 "msg": "Raum belegt (jemand sendet)"})
                             continue
+
                         async with room._tx_lock:
                             in_tx = True
                             try:
-                                ok = await room.request_tx()
+                                # Eigene FRN-Verbindung wenn User via FRN eingeloggt
+                                if frn_email and frn_password:
+                                    tx_conn = FRNTXRoom(
+                                        name=room.name,
+                                        frn_server=room.server,
+                                        frn_port=room.port,
+                                        email=frn_email,
+                                        password=frn_password,
+                                        callsign=callsign,
+                                    )
+                                    log.info("[%s] User-TX: %s (%s)",
+                                             room.name, info["user"], callsign)
+                                else:
+                                    tx_conn = room
+
+                                ok = await tx_conn.request_tx()
                                 if ok:
                                     await ws.send_json({"type": "tx_active"})
                                 else:
                                     await ws.send_json({"type": "error",
                                                         "msg": "TX nicht genehmigt"})
                                     in_tx = False
+                                    if tx_conn is not room:
+                                        await tx_conn.disconnect()
+                                    tx_conn = None
                             except Exception as e:
                                 log.error("TX request error: %s", e)
                                 await ws.send_json({"type": "error", "msg": str(e)})
                                 in_tx = False
+                                if tx_conn and tx_conn is not room:
+                                    await tx_conn.disconnect()
+                                tx_conn = None
 
                     elif cmd == "PTT_STOP":
-                        if in_tx:
-                            await room.end_tx()
+                        if in_tx and tx_conn:
+                            await tx_conn.end_tx()
+                            if tx_conn is not room:
+                                await tx_conn.disconnect()
+                            tx_conn = None
                             in_tx = False
                             await ws.send_json({"type": "tx_stopped"})
 
                 elif msg.type == web.WSMsgType.BINARY:
-                    if not in_tx:
+                    if not in_tx or not tx_conn:
                         continue
                     pcm_in = np.frombuffer(msg.data, dtype="<i2").astype(np.float32)
                     if src_rate == 8000:
-                        await room.send_pcm(pcm_in.astype("<i2").tobytes())
+                        await tx_conn.send_pcm(pcm_in.astype("<i2").tobytes())
                     else:
                         native_buf = np.append(native_buf, pcm_in)
                         while len(native_buf) >= native_block:
@@ -1407,7 +1441,7 @@ class TXServer:
                             native_buf = native_buf[native_block:]
                             resampled  = sp_resample(chunk, block_8k)
                             pcm_bytes  = np.clip(resampled, -32768, 32767).astype("<i2").tobytes()
-                            await room.send_pcm(pcm_bytes)
+                            await tx_conn.send_pcm(pcm_bytes)
 
                 elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
                     break
@@ -1415,8 +1449,10 @@ class TXServer:
         except Exception as e:
             log.error("WS error: %s", e)
         finally:
-            if in_tx:
-                await room.end_tx()
+            if in_tx and tx_conn:
+                await tx_conn.end_tx()
+                if tx_conn is not room:
+                    await tx_conn.disconnect()
             log.info("WS closed: user=%s", info["user"])
 
         return ws
