@@ -25,7 +25,11 @@ _whisper_lock = asyncio.Lock()
 
 
 def _get_whisper_remote_url() -> str:
-    """Liest remote_url aus config.json. Gibt '' zurück wenn nicht konfiguriert."""
+    """Liest remote_url: zuerst Umgebungsvariable, dann config.json."""
+    import os
+    env_url = os.environ.get("WHISPER_REMOTE_URL", "").strip()
+    if env_url:
+        return env_url
     try:
         cfg_path = Path(__file__).parent / "config.json"
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -73,8 +77,13 @@ _local_model = None
 
 def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
     """Lokales faster-whisper (CPU, medium) als Fallback."""
-    from scipy.signal import resample_poly
-    from faster_whisper import WhisperModel
+    try:
+        from scipy.signal import resample_poly
+        from faster_whisper import WhisperModel
+    except ImportError:
+        log.error("faster-whisper nicht installiert und kein remote_url konfiguriert — "
+                  "bitte WITH_WHISPER=true beim Docker-Build oder remote_url in config.json setzen")
+        return ""
 
     global _local_model
     if _local_model is None:

@@ -30,6 +30,9 @@ services:
       - whisper-cache:/root/.cache/huggingface    # Whisper-Modell (wird 1x geladen)
     environment:
       - PYTHONUNBUFFERED=1
+      # Externer Whisper-Server (optional, überschreibt config.json whisper.remote_url)
+      # Beispiel: WHISPER_REMOTE_URL=http://ki-rechner:9001/transcribe
+      - WHISPER_REMOTE_URL=${WHISPER_REMOTE_URL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"       # Zugriff auf Host (FRN_Server.jar)
     depends_on:
