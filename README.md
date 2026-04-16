@@ -54,7 +54,14 @@ Danach erreichbar unter:
 
 Alle Übertragungen werden automatisch transkribiert und im **Funkarchiv** gespeichert.
 
-### Aktivieren
+Es gibt zwei Betriebsmodi:
+
+| Modus | Vorteil | Nachteil |
+|-------|---------|----------|
+| **Lokal** (Pi/Server) | Kein externes Gerät nötig | Langsam auf ARM, nur `medium` |
+| **Extern** (GPU-Rechner) | `large-v3` auf CUDA, ~10× schneller, bessere Qualität | Separater Rechner nötig |
+
+### Option A: Lokal (CPU)
 
 ```bash
 # In .env setzen:
@@ -64,20 +71,42 @@ WITH_WHISPER=true
 docker compose up -d --build
 ```
 
-Beim ersten Start lädt der Server das Whisper-Modell herunter (~1,5 GB für `medium`) und speichert es im `whisper-cache` Docker-Volume. Danach bleibt es erhalten.
+Beim ersten Start lädt der Server das Whisper-Modell herunter (~1,5 GB für `medium`) und speichert es im `whisper-cache` Docker-Volume.
+
+### Option B: Externer GPU-Rechner (empfohlen)
+
+Auf einem Rechner mit NVIDIA-GPU den Whisper-API-Server starten:
+
+```bash
+pip install faster-whisper flask
+python3 server/whisper_server.py
+# Oder mit anderem Modell/Port:
+WHISPER_MODEL=large-v3 WHISPER_DEVICE=cuda WHISPER_PORT=9001 python3 server/whisper_server.py
+```
+
+Dann in `config/config.json` eintragen:
+
+```json
+"whisper": {
+  "remote_url": "http://192.168.x.x:9001/transcribe"
+}
+```
+
+Oder per Umgebungsvariable (Docker):
+```bash
+WHISPER_REMOTE_URL=http://192.168.x.x:9001/transcribe docker compose up -d
+```
+
+Ist `remote_url` gesetzt, braucht der Pi/Docker-Container **kein** `WITH_WHISPER=true` — die Rechenarbeit liegt komplett auf dem GPU-Rechner. Bei Ausfall des externen Servers fällt das System automatisch auf das lokale `medium`-Modell zurück (sofern installiert).
 
 ### Konfiguration (`config/config.json`)
 
 ```json
-"transcription": {
-  "enabled": "yes",
-  "whisper_model": "medium",
-  "whisper_language": "de",
-  "wav_dir": "/opt/FRN/recordings",
-  "max_age_days": 2,
-  "mqtt_broker": "localhost",
-  "mqtt_port": 1883,
-  "mqtt_topic_prefix": "Home/FRN"
+"whisper": {
+  "remote_url":     "",
+  "model":          "medium",
+  "language":       "de",
+  "initial_prompt": "CB-Funk, Kanal 74, ..."
 }
 ```
 
@@ -87,8 +116,10 @@ Beim ersten Start lädt der Server das Whisper-Modell herunter (~1,5 GB für `me
 | `base` | 145 MB | mittel | ~600 MB |
 | `small` | 480 MB | gut | ~1 GB |
 | `medium` | 1,5 GB | sehr gut | ~2,5 GB |
+| `large-v3` | 3 GB | exzellent | ~5 GB / 3 GB VRAM |
 
-> **Raspberry Pi 5:** `medium` mit `int8` läuft stabil, benötigt aber ~3 GB RAM + Swap.
+> **Raspberry Pi 5:** `medium` mit `int8` läuft stabil, benötigt aber ~3 GB RAM + Swap.  
+> **Empfehlung:** Externen GPU-Rechner mit `large-v3` nutzen für deutlich bessere Erkennungsqualität.
 
 ### Funkarchiv
 

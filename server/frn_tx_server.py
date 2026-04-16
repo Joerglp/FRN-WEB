@@ -1555,16 +1555,29 @@ def main():
                 if ini.has_section("transcription"):
                     transcfg = dict(ini["transcription"])
         if transcfg.get("enabled", "yes").lower() in ("yes", "true", "1"):
-            pipeline = TranscriptionPipeline(transcfg)
+            pipeline = TranscriptionPipeline.__new__(TranscriptionPipeline)
+            pipeline.cfg      = transcfg
+            pipeline.wav_dir  = Path(transcfg.get("wav_dir", "/opt/FRN/recordings"))
+            pipeline.wav_dir.mkdir(parents=True, exist_ok=True)
+            pipeline.log_file = Path(transcfg.get("log_file",
+                                                    "/opt/FRN/stream/transcription.log"))
             for mount, room in server.rooms.items():
                 room._recorder = SessionRecorder(room.name, transcfg, pipeline)
             log.info("Transkription aktiviert für %d Räume", len(server.rooms))
+
+            # Tasks erst im laufenden Loop starten (on_startup)
+            async def _start_pipeline(app):
+                pipeline._setup_cleanup()
+
+            app = server.build_app()
+            app.on_startup.append(_start_pipeline)
         else:
             log.info("Transkription deaktiviert (enabled=no)")
+            app = server.build_app()
     else:
         log.info("frn_transcription.py nicht gefunden — Transkription deaktiviert")
+        app = server.build_app()
 
-    app = server.build_app()
     web.run_app(app, host=args.host, port=args.port,
                 access_log=log if args.debug else None)
 

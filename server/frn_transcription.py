@@ -234,13 +234,42 @@ class TranscriptionPipeline:
 
         async def meta_watcher():
             """Alle 10s nach neuen .meta-Dateien aus frn_stream.py suchen."""
+            # Beim Start: .meta.done ohne DB-Eintrag zurücksetzen
+            await self._recover_lost_meta()
             while True:
                 await asyncio.sleep(10)
                 await self._process_meta_files()
 
         loop = asyncio.get_event_loop()
-        loop.create_task(cleanup_loop())
-        loop.create_task(meta_watcher())
+        # Referenzen halten damit Tasks nicht garbage-collected werden
+        self._task_cleanup = loop.create_task(cleanup_loop())
+        self._task_meta    = loop.create_task(meta_watcher())
+
+    async def _recover_lost_meta(self):
+        """Beim Start: .meta.done Dateien ohne DB-Eintrag zurück zu .meta setzen."""
+        try:
+            from frn_archive import _get_conn
+            with _get_conn() as conn:
+                sources = {r[0] for r in conn.execute(
+                    "SELECT wav_source FROM transmissions WHERE wav_source != ''"
+                ).fetchall()}
+        except Exception as e:
+            log.warning("_recover_lost_meta: DB-Fehler: %s", e)
+            return
+
+        recovered = 0
+        for done_path in self.wav_dir.glob("*.meta.done"):
+            try:
+                meta = json.loads(done_path.read_text(encoding="utf-8"))
+                wav = meta.get("wav", "")
+                if wav and wav not in sources and Path(wav).exists():
+                    meta_path = done_path.with_suffix("")  # .meta.done → .meta
+                    done_path.rename(meta_path)
+                    recovered += 1
+            except Exception:
+                pass
+        if recovered:
+            log.info("_recover_lost_meta: %d Dateien zurückgesetzt", recovered)
 
     async def _process_meta_files(self):
         """Verarbeitet .meta-Dateien die frn_stream.py abgelegt hat."""
@@ -261,7 +290,8 @@ class TranscriptionPipeline:
                 meta_path.rename(meta_path.with_suffix(".meta.done"))
 
                 log.info("[%s] Meta-Datei gefunden: %s (%s)", room, Path(wav_path).name, callsign)
-                asyncio.ensure_future(self.process_wav(wav_path, room, callsign, ts))
+                # Sequenziell abarbeiten — verhindert Timeout wenn viele Dateien warten
+                await self.process_wav(wav_path, room, callsign, ts)
 
             except Exception as e:
                 log.warning("Meta-Datei Fehler (%s): %s", meta_path.name, e)
