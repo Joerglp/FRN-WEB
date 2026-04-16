@@ -30,6 +30,14 @@
     "callsign_prefix": "WEB"
   },
 
+  "whisper": {
+    "_comment": "remote_url: URL des externen Whisper-Servers (z.B. http://ki-rechner:9001/transcribe). Leer lassen für lokales medium-Modell auf dem Pi.",
+    "remote_url":       "",
+    "model":            "medium",
+    "language":         "de",
+    "initial_prompt":   "CB-Funk, Kanal 74, Eickelborn, Lippstadt, Hamm, Soest, NRW. Gespräch zwischen CB-Funkern. Kein Rufzeichen. Gängige Ausdrücke: Roger, Over, QRV, so kommt vor, so kommt rüber, Kanal frei, Basis, Mobile, Standort, Signalstärke, Rapport, QRM, Guten Morgen, Guten Abend, bis später, 77, tschüss."
+  },
+
   "ui": {
     "title":    "FRN Webstreams",
     "subtitle": "Free Radio Network"

@@ -2,12 +2,13 @@
 FRN Transcription Pipeline
 --------------------------
 Puffert PCM-Audio einer TX-Session, speichert WAV, transkribiert via
-faster-whisper (CPU) und veröffentlicht das Transkript per MQTT und Logfile.
+Remote-Whisper-API (KI-Rechner) oder lokal als Fallback.
 """
 
 import asyncio
 import json
 import logging
+import re as _re
 import time
 import wave
 import numpy as np
@@ -16,53 +17,107 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# ── Whisper-Modell (wird beim ersten Aufruf geladen) ─────────────────────────
+# ── Remote Whisper API ────────────────────────────────────────────────────────
+# URL wird zur Laufzeit aus config.json gelesen (whisper.remote_url).
+# Leer lassen → lokales medium-Modell auf dem Pi als Fallback.
 
-_whisper_model = None
-_whisper_lock  = asyncio.Lock()
-
-def _get_model(model_size: str):
-    global _whisper_model
-    if _whisper_model is None:
-        from faster_whisper import WhisperModel
-        log.info("Lade faster-whisper Modell '%s' ...", model_size)
-        _whisper_model = WhisperModel(
-            model_size,
-            device="cpu",
-            compute_type="int8",        # schnell + wenig RAM auf ARM
-        )
-        log.info("Modell geladen.")
-    return _whisper_model
+_whisper_lock = asyncio.Lock()
 
 
-def _transcribe_sync(wav_path: str, model_size: str, language: str) -> str:
-    """Läuft im ThreadPool — blockiert den Event-Loop nicht."""
+def _get_whisper_remote_url() -> str:
+    """Liest remote_url aus config.json. Gibt '' zurück wenn nicht konfiguriert."""
+    try:
+        cfg_path = Path(__file__).parent / "config.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        return cfg.get("whisper", {}).get("remote_url", "").strip()
+    except Exception:
+        return ""
+
+
+def _remove_repetitions(text: str) -> str:
+    """Entfernt Whisper-typische Halluzinations-Wiederholungen wie 'ja, ja, ja'."""
+    text = _re.sub(r'\b(\w+)(?:[,.]?\s+\1){2,}\b', r'\1', text, flags=_re.IGNORECASE)
+    text = _re.sub(r'(.{3,}?)\s+\1(\s+\1)+', r'\1', text)
+    return text.strip()
+
+
+def _transcribe_remote(wav_path: str, url: str, language: str) -> str:
+    """Schickt WAV per multipart/form-data an den Remote-Whisper-Server."""
+    import urllib.request
+    boundary = "----FRNWhisperBoundary"
+    with open(wav_path, "rb") as f:
+        wav_data = f.read()
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+        f"Content-Type: audio/wav\r\n\r\n"
+    ).encode() + wav_data + (
+        f"\r\n--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="language"\r\n\r\n'
+        f"{language}\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        result = json.loads(resp.read())
+    text = _remove_repetitions(result.get("text", "").strip())
+    log.debug("Remote-Transkript (%.1fs): %s", result.get("duration_s", 0), text[:80])
+    return text
+
+
+_local_model = None
+
+def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
+    """Lokales faster-whisper (CPU, medium) als Fallback."""
     from scipy.signal import resample_poly
+    from faster_whisper import WhisperModel
 
-    # WAV lesen und auf 16 kHz hochsampeln (FRN liefert 8 kHz)
+    global _local_model
+    if _local_model is None:
+        log.info("Lade lokales Fallback-Modell '%s' ...", model_size)
+        _local_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+
     with wave.open(wav_path, "rb") as wf:
         src_rate = wf.getframerate()
         pcm = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
-
     audio = pcm.astype(np.float32) / 32768.0
     if src_rate != 16000:
         audio = resample_poly(audio, 16000, src_rate)
+    rms = np.sqrt(np.mean(audio ** 2))
+    if rms > 0:
+        audio = audio * min(0.1 / rms, 10.0)
+        peak = np.max(np.abs(audio))
+        if peak > 1.0:
+            audio = audio / peak
 
-    # Normalisieren
-    peak = np.max(np.abs(audio))
-    if peak > 0:
-        audio = audio / peak
-
-    model = _get_model(model_size)
-    segments, _ = model.transcribe(
-        audio,
-        language=language,
-        beam_size=5,
+    HALLUCINATIONS = {"", ".", "...", "vielen dank.", "danke.", "tschüss.",
+                      "untertitel", "♪", "musik", "[musik]", "[applaus]"}
+    segments, _ = _local_model.transcribe(
+        audio, language=language, beam_size=5,
+        condition_on_previous_text=False,
         vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 200},
+        vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 200},
+        no_speech_threshold=0.8,
     )
-    text = " ".join(seg.text.strip() for seg in segments).strip()
-    return text
+    parts = [s.text.strip() for s in segments
+             if getattr(s, "no_speech_prob", 0.0) <= 0.8
+             and s.text.strip().lower() not in HALLUCINATIONS]
+    return _remove_repetitions(" ".join(parts).strip())
+
+
+def _transcribe_sync(wav_path: str, model_size: str, language: str) -> str:
+    """Remote-API wenn konfiguriert, sonst lokales Modell."""
+    remote_url = _get_whisper_remote_url()
+    if remote_url:
+        try:
+            return _transcribe_remote(wav_path, remote_url, language)
+        except Exception as e:
+            log.warning("Remote-Whisper nicht erreichbar (%s) — lokaler Fallback", e)
+    return _transcribe_local(wav_path, model_size, language)
 
 
 async def transcribe_wav(wav_path: str, model_size: str = "medium",

@@ -1,5 +1,6 @@
 # Secrets & lokale Configs
 config.ini
+config.json
 *.log
 *.db
 *.opus
