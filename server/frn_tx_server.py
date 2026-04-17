@@ -31,7 +31,7 @@ from aiohttp import web
 from scipy.signal import resample as sp_resample
 
 try:
-    from frn_transcription import SessionRecorder, TranscriptionPipeline
+    from frn_transcription import TranscriptionPipeline
     _TRANSCRIPTION_AVAILABLE = True
 except ImportError:
     _TRANSCRIPTION_AVAILABLE = False
@@ -1592,9 +1592,7 @@ def main():
             pipeline.wav_dir.mkdir(parents=True, exist_ok=True)
             pipeline.log_file = Path(transcfg.get("log_file",
                                                     "/opt/FRN/stream/transcription.log"))
-            for mount, room in server.rooms.items():
-                room._recorder = SessionRecorder(room.name, transcfg, pipeline)
-            log.info("Transkription aktiviert für %d Räume", len(server.rooms))
+            log.info("Transkription aktiviert (Aufnahmen via frn_stream.py)")
 
             # Tasks erst im laufenden Loop starten (on_startup)
             async def _start_pipeline(app):
