@@ -326,6 +326,23 @@ class TranscriptionPipeline:
         except Exception as e:
             log.warning("[%s] Archiv-Fehler: %s", room, e)
 
+        # ── MQTT ──
+        broker   = self.cfg.get("mqtt_broker", "localhost")
+        port_m   = int(self.cfg.get("mqtt_port", 1883))
+        user     = self.cfg.get("mqtt_user", "")
+        password = self.cfg.get("mqtt_password", "")
+        prefix   = self.cfg.get("mqtt_topic_prefix", "Home/FRN").rstrip("/")
+        topic    = f"{prefix}/{room}"
+        payload  = json.dumps({
+            "callsign": callsign,
+            "text":     text,
+            "room":     room,
+            "time":     datetime.fromtimestamp(ts).isoformat(),
+        }, ensure_ascii=False)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, mqtt_publish, broker, port_m,
+                                   topic, payload, user, password)
+
     def _cleanup_old_wavs(self):
         max_age = int(self.cfg.get("max_age_days", 2))
         cutoff  = datetime.now() - timedelta(days=max_age)
