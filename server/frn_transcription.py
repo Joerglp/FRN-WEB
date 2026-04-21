@@ -376,9 +376,17 @@ class TranscriptionPipeline:
         removed = 0
         for p in self.wav_dir.glob("*.wav"):
             try:
-                if datetime.fromtimestamp(p.stat().st_mtime) < cutoff:
-                    p.unlink()
-                    removed += 1
+                if datetime.fromtimestamp(p.stat().st_mtime) >= cutoff:
+                    continue
+                # Nicht löschen wenn noch eine .meta-Datei (ausstehend) existiert
+                if p.with_suffix(".meta").exists():
+                    continue
+                p.unlink()
+                # .meta.done Sidecar ebenfalls entfernen
+                done = p.with_suffix(".meta.done")
+                if done.exists():
+                    done.unlink()
+                removed += 1
             except Exception:
                 pass
         if removed:
