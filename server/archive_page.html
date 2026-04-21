@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FRN Funkarchiv</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #070a07;
+    --bg2:       #0d130d;
+    --bg3:       #111811;
+    --green:     #39ff14;
+    --green-dim: #1a7a05;
+    --green-glow:#39ff1440;
+    --amber:     #ffb700;
+    --amber-dim: #7a5500;
+    --text:      #a8d8a8;
+    --text-dim:  #4a7a4a;
+    --border:    #1e3a1e;
+    --scan:      rgba(0,0,0,0.04);
+    --red:       #ff3333;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    overflow-x: hidden;
+  }
+
+  /* CRT scanline overlay */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      var(--scan) 0px,
+      var(--scan) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* CRT vignette */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none;
+    z-index: 9998;
+  }
+
+  /* ── HEADER ── */
+  header {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 2px 20px rgba(57,255,20,0.05);
+  }
+
+  .hdr-antenna {
+    color: var(--green);
+    font-size: 22px;
+    animation: pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  @keyframes pulse {
+    0%,100% { opacity: 1; text-shadow: 0 0 8px var(--green); }
+    50%      { opacity: 0.5; text-shadow: none; }
+  }
+
+  .hdr-title {
+    font-family: 'Orbitron', sans-serif;
+    font-weight: 900;
+    font-size: clamp(16px, 3vw, 22px);
+    color: var(--green);
+    text-shadow: 0 0 12px var(--green-glow);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .hdr-sub {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-top: 2px;
+  }
+
+  .hdr-spacer { flex: 1; }
+
+  .hdr-clock {
+    font-size: 11px;
+    color: var(--amber);
+    letter-spacing: 0.08em;
+    text-align: right;
+  }
+
+  .hdr-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.1em;
+  }
+
+  .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--green-dim);
+  }
+  .dot.live {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: blink 1.5s step-end infinite;
+  }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+  /* ── FILTER BAR ── */
+  .filter-bar {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .filter-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .filter-bar input,
+  .filter-bar select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    padding: 5px 10px;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    border-radius: 2px;
+  }
+
+  .filter-bar input:focus,
+  .filter-bar select:focus {
+    border-color: var(--green-dim);
+    box-shadow: 0 0 8px rgba(57,255,20,0.15);
+  }
+
+  .filter-bar input[type="text"] { width: 180px; }
+  .filter-bar input[type="date"] { width: 140px; color-scheme: dark; }
+  .filter-bar select             { min-width: 140px; }
+
+  .btn {
+    background: var(--bg3);
+    border: 1px solid var(--green-dim);
+    color: var(--green);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 5px 14px;
+    cursor: pointer;
+    transition: all 0.15s;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  .btn:hover {
+    background: var(--green-dim);
+    box-shadow: 0 0 10px var(--green-glow);
+  }
+  .btn.clear {
+    border-color: var(--amber-dim);
+    color: var(--amber);
+  }
+  .btn.clear:hover { background: var(--amber-dim); }
+
+  /* ── STATS BAR ── */
+  .stats-bar {
+    padding: 6px 20px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+
+  .stat-item { display: flex; gap: 6px; align-items: center; }
+  .stat-val  { color: var(--green); font-weight: bold; }
+
+  /* ── MAIN CONTENT ── */
+  main {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 16px 16px 80px;
+  }
+
+  /* ── DATE DIVIDER ── */
+  .date-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 24px 0 12px;
+    color: var(--text-dim);
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+  .date-divider::before,
+  .date-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ── MESSAGE BUBBLE ── */
+  .msg {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green-dim);
+    border-radius: 2px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    animation: fadeIn 0.25s ease-out;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .msg:hover {
+    border-left-color: var(--green);
+    box-shadow: 0 0 12px rgba(57,255,20,0.06);
+  }
+
+  .msg-header {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 7px;
+  }
+
+  .msg-callsign {
+    font-family: 'Orbitron', sans-serif;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    text-shadow: 0 0 8px currentColor;
+  }
+
+  .msg-room {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border: 1px solid;
+    border-radius: 2px;
+    opacity: 0.75;
+  }
+
+  .msg-time {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.05em;
+    margin-left: auto;
+  }
+
+  .msg-text {
+    color: var(--text);
+    line-height: 1.55;
+    font-size: 13px;
+    word-break: break-word;
+  }
+
+  .msg-footer {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 9px;
+    flex-wrap: wrap;
+  }
+
+  .msg-duration {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.05em;
+  }
+
+  /* ── AUDIO PLAYER ── */
+  .msg audio {
+    height: 26px;
+    flex: 1;
+    min-width: 180px;
+    max-width: 340px;
+    filter: invert(1) hue-rotate(90deg) brightness(0.7) sepia(1) saturate(3);
+    opacity: 0.85;
+  }
+  .msg audio:hover { opacity: 1; }
+
+  /* ── EMPTY STATE ── */
+  .empty {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--text-dim);
+  }
+  .empty-icon { font-size: 40px; margin-bottom: 12px; opacity: 0.4; }
+  .empty-text { font-size: 13px; letter-spacing: 0.1em; }
+
+  /* ── LOADER ── */
+  .loader {
+    text-align: center;
+    padding: 20px;
+    color: var(--green-dim);
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    animation: flicker 1s linear infinite;
+  }
+  @keyframes flicker {
+    0%,100%{opacity:1} 45%{opacity:0.8} 50%{opacity:0.3} 55%{opacity:0.9}
+  }
+
+  /* ── LOAD MORE ── */
+  .load-more-wrap {
+    text-align: center;
+    padding: 16px 0;
+  }
+  .btn-load-more {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 8px 24px;
+    cursor: pointer;
+    transition: all 0.15s;
+    border-radius: 2px;
+  }
+  .btn-load-more:hover {
+    border-color: var(--green-dim);
+    color: var(--green);
+    box-shadow: 0 0 8px var(--green-glow);
+  }
+  .btn-load-more:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  /* ── SCROLLBAR ── */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--green-dim); }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width: 600px) {
+    .filter-bar input[type="text"] { width: 140px; }
+    .filter-bar input[type="date"] { width: 120px; }
+    .hdr-clock { display: none; }
+    main { padding: 12px 10px 60px; }
+  }
+
+  /* Grid texture background */
+  .bg-grid {
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 40px 40px;
+    opacity: 0.25;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  header, .filter-bar, .stats-bar, main { position: relative; z-index: 1; }
+</style>
+</head>
+<body>
+
+<div class="bg-grid"></div>
+
+<!-- HEADER -->
+<header>
+  <div class="hdr-antenna">⌖</div>
+  <div>
+    <div class="hdr-title">FRN Funkarchiv</div>
+    <div class="hdr-sub">Free Radio Network · Transkriptions-Log</div>
+  </div>
+  <div class="hdr-spacer"></div>
+  <div class="hdr-status">
+    <div class="dot live" id="dot-live"></div>
+    <span id="status-txt">BEREIT</span>
+  </div>
+  <div class="hdr-clock" id="hdr-clock">--:--:--</div>
+</header>
+
+<!-- FILTER BAR -->
+<div class="filter-bar">
+  <span class="filter-label">Filter:</span>
+
+  <input type="text" id="f-search" placeholder="Suche Text / Rufzeichen…"
+         title="Text oder Callsign suchen">
+
+  <select id="f-room">
+    <option value="">Alle Räume</option>
+  </select>
+
+  <span class="filter-label">Von:</span>
+  <input type="date" id="f-from">
+  <span class="filter-label">Bis:</span>
+  <input type="date" id="f-to">
+
+  <button class="btn" onclick="applyFilter()">&#9654; Anwenden</button>
+  <button class="btn clear" onclick="clearFilter()">&#10005; Löschen</button>
+</div>
+
+<!-- STATS BAR -->
+<div class="stats-bar">
+  <div class="stat-item">
+    <span>Gesamt:</span>
+    <span class="stat-val" id="stat-total">–</span>
+  </div>
+  <div class="stat-item">
+    <span>Angezeigt:</span>
+    <span class="stat-val" id="stat-shown">0</span>
+  </div>
+  <div class="stat-item" id="stat-pending-item" style="display:none">
+    <span>Warteschlange:</span>
+    <span class="stat-val" id="stat-pending" style="color:var(--amber)">0</span>
+  </div>
+  <div class="stat-item" id="stat-filter-info" style="display:none">
+    <span style="color:var(--amber)">▲ Filter aktiv</span>
+  </div>
+  <div style="margin-left:auto; font-size:10px; color:var(--text-dim)" id="last-refresh"></div>
+</div>
+
+<!-- MAIN -->
+<main id="main-content">
+  <div class="loader" id="loader">EMPFANGE DATEN…</div>
+</main>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let offset      = 0;
+let totalCount  = 0;
+let shownCount  = 0;
+let isLoading   = false;
+let refreshTimer = null;
+let allRooms    = [];
+const LIMIT     = 50;
+
+// ── Clock ──────────────────────────────────────────────────────────────────
+function updateClock() {
+  const now = new Date();
+  document.getElementById('hdr-clock').textContent =
+    now.toLocaleTimeString('de-DE', {hour12: false});
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── Callsign color (hash) ──────────────────────────────────────────────────
+const COLORS = [
+  '#39ff14','#00e5ff','#ffb700','#ff6b35','#c8ff20',
+  '#ff4fcf','#7bff7b','#ffd700','#00ffcc','#ff9f1c',
+];
+function csColor(callsign) {
+  let h = 0;
+  for (let i = 0; i < callsign.length; i++) h = (h * 31 + callsign.charCodeAt(i)) >>> 0;
+  return COLORS[h % COLORS.length];
+}
+
+// ── Room badge color ───────────────────────────────────────────────────────
+function roomColor(room) {
+  const RCOLORS = ['#00e5ff','#c8ff20','#ffb700','#ff6b35','#ff4fcf','#7bff7b'];
+  let h = 0;
+  for (let i = 0; i < room.length; i++) h = (h * 17 + room.charCodeAt(i)) >>> 0;
+  return RCOLORS[h % RCOLORS.length];
+}
+
+// ── Date grouping ──────────────────────────────────────────────────────────
+let lastDateLabel = null;
+function dateDivider(isoTime) {
+  const d = isoTime.slice(0, 10);
+  if (d === lastDateLabel) return null;
+  lastDateLabel = d;
+  const dt = new Date(isoTime);
+  const opts = {weekday:'long', year:'numeric', month:'long', day:'numeric'};
+  return dt.toLocaleDateString('de-DE', opts);
+}
+
+// ── Render one message ─────────────────────────────────────────────────────
+function renderMsg(e) {
+  const color = csColor(e.callsign || '?');
+  const rc    = roomColor(e.room || '');
+  const label = dateDivider(e.time);
+  let html    = '';
+
+  if (label) {
+    html += `<div class="date-divider">${label}</div>`;
+  }
+
+  const timeOnly = e.time.slice(11, 19);
+  const audioTag = e.has_audio
+    ? `<audio controls preload="none" src="/api/archive/audio/${encodeURIComponent(e.audio_file)}"></audio>`
+    : '';
+  const dur = e.duration_s > 0 ? `<span class="msg-duration">⏱ ${e.duration_s}s</span>` : '';
+
+  html += `
+  <div class="msg">
+    <div class="msg-header">
+      <span class="msg-callsign" style="color:${color}">${esc(e.callsign || '—')}</span>
+      <span class="msg-room" style="color:${rc};border-color:${rc}40">${esc(e.room || '?')}</span>
+      <span class="msg-time">${esc(timeOnly)}</span>
+    </div>
+    <div class="msg-text">${esc(e.text)}</div>
+    ${(audioTag || dur) ? `<div class="msg-footer">${audioTag}${dur}</div>` : ''}
+  </div>`;
+  return html;
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Load entries ───────────────────────────────────────────────────────────
+async function loadEntries(append = false) {
+  if (isLoading) return;
+  isLoading = true;
+
+  const search  = document.getElementById('f-search').value.trim();
+  const room    = document.getElementById('f-room').value;
+  const dfrom   = document.getElementById('f-from').value;
+  const dto     = document.getElementById('f-to').value;
+  const filterActive = !!(search || room || dfrom || dto);
+
+  document.getElementById('stat-filter-info').style.display =
+    filterActive ? '' : 'none';
+
+  if (!append) {
+    offset = 0;
+    lastDateLabel = null;
+    if (!filterActive) scheduleRefresh();
+    else cancelRefresh();
+  }
+
+  const params = new URLSearchParams({
+    limit:  LIMIT,
+    offset: offset,
+    ...(search ? {search} : {}),
+    ...(room   ? {room}   : {}),
+    ...(dfrom  ? {from: dfrom} : {}),
+    ...(dto    ? {to: dto}     : {}),
+  });
+
+  setStatus('EMPFANGE…', false);
+  try {
+    const resp = await fetch('/api/archive?' + params);
+    if (!resp.ok) throw new Error(resp.status);
+    const data = await resp.json();
+
+    // Populate rooms dropdown once
+    if (data.rooms && data.rooms.length > allRooms.length) {
+      allRooms = data.rooms;
+      const sel = document.getElementById('f-room');
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">Alle Räume</option>';
+      allRooms.forEach(r => {
+        const o = document.createElement('option');
+        o.value = r; o.textContent = r;
+        if (r === cur) o.selected = true;
+        sel.appendChild(o);
+      });
+    }
+
+    totalCount = data.total || 0;
+    document.getElementById('stat-total').textContent = totalCount;
+
+    const pending = data.pending || 0;
+    document.getElementById('stat-pending').textContent = pending;
+    document.getElementById('stat-pending-item').style.display = pending > 0 ? '' : 'none';
+
+    const container = document.getElementById('main-content');
+
+    if (!append) {
+      container.innerHTML = '';
+      shownCount = 0;
+    }
+    // Remove old load-more button
+    const oldLM = document.getElementById('load-more-wrap');
+    if (oldLM) oldLM.remove();
+
+    if (data.entries.length === 0 && !append) {
+      container.innerHTML = `
+        <div class="empty">
+          <div class="empty-icon">📻</div>
+          <div class="empty-text">KEINE EINTRÄGE GEFUNDEN</div>
+        </div>`;
+    } else {
+      let html = '';
+      data.entries.forEach(e => { html += renderMsg(e); });
+      container.insertAdjacentHTML('beforeend', html);
+      shownCount += data.entries.length;
+      offset     += data.entries.length;
+
+      if (offset < totalCount) {
+        container.insertAdjacentHTML('beforeend', `
+          <div class="load-more-wrap" id="load-more-wrap">
+            <button class="btn-load-more" onclick="loadMore()">
+              ▼ Weitere laden (${totalCount - offset} verbleibend)
+            </button>
+          </div>`);
+      }
+    }
+
+    document.getElementById('stat-shown').textContent = shownCount;
+    document.getElementById('last-refresh').textContent =
+      'Aktualisiert: ' + new Date().toLocaleTimeString('de-DE');
+    setStatus('BEREIT', true);
+
+  } catch (err) {
+    setStatus('FEHLER', false);
+    console.error(err);
+  }
+  isLoading = false;
+}
+
+function loadMore() {
+  loadEntries(true);
+}
+
+// ── Filter ─────────────────────────────────────────────────────────────────
+function applyFilter() { loadEntries(false); }
+
+function clearFilter() {
+  document.getElementById('f-search').value = '';
+  document.getElementById('f-room').value   = '';
+  document.getElementById('f-from').value   = '';
+  document.getElementById('f-to').value     = '';
+  loadEntries(false);
+}
+
+// Search on Enter
+document.getElementById('f-search').addEventListener('keydown', e => {
+  if (e.key === 'Enter') applyFilter();
+});
+
+// ── Auto refresh ───────────────────────────────────────────────────────────
+function scheduleRefresh() {
+  cancelRefresh();
+  refreshTimer = setTimeout(() => {
+    const search = document.getElementById('f-search').value.trim();
+    const room   = document.getElementById('f-room').value;
+    const dfrom  = document.getElementById('f-from').value;
+    const dto    = document.getElementById('f-to').value;
+    if (!search && !room && !dfrom && !dto) loadEntries(false);
+  }, 30000);
+}
+
+function cancelRefresh() {
+  if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
+}
+
+// ── Status indicator ───────────────────────────────────────────────────────
+function setStatus(text, live) {
+  document.getElementById('status-txt').textContent = text;
+  document.getElementById('dot-live').classList.toggle('live', live);
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+loadEntries(false);
+</script>
+</body>
+</html>

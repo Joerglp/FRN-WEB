@@ -1475,7 +1475,11 @@ class TXServer:
             None, _archive.query_entries, limit, offset, room, search, date_from, date_to
         )
         rooms = await loop.run_in_executor(None, _archive.get_rooms)
-        return web.json_response({"entries": entries, "total": total, "rooms": rooms})
+        # Warteschlange: .meta-Dateien die noch nicht transkribiert wurden
+        wav_dir = Path(self.cfg.get("transcription", {}).get("wav_dir", "/opt/FRN/recordings"))
+        pending = len(list(wav_dir.glob("*.meta")))
+        return web.json_response({"entries": entries, "total": total, "rooms": rooms,
+                                  "pending": pending})
 
     async def handle_archive_audio(self, request):
         if not _ARCHIVE_AVAILABLE:
