@@ -313,25 +313,34 @@ class TranscriptionPipeline:
         model_size = self.cfg.get("whisper_model", "medium")
         language   = self.cfg.get("whisper_language", "de")
 
-        # Bei konfiguriertem Remote-Server: warten bis er wieder erreichbar ist
+        # Bei konfiguriertem Remote-Server: bei Fehler warten und erneut versuchen
         remote_url = _get_whisper_remote_url()
-        if remote_url:
-            loop = asyncio.get_event_loop()
-            while not await loop.run_in_executor(None, _is_remote_available, remote_url):
-                log.warning("Remote-Whisper nicht erreichbar — Warteschlange pausiert, "
-                            "nächster Versuch in 30s …")
-                await asyncio.sleep(30)
-
         text = ""
-        try:
-            text = await asyncio.wait_for(
-                transcribe_wav(wav_path, model_size, language),
-                timeout=300.0
-            )
-        except asyncio.TimeoutError:
-            log.warning("[%s] Whisper-Timeout für %s", room, Path(wav_path).name)
-        except Exception as e:
-            log.warning("[%s] Whisper-Fehler für %s: %r", room, Path(wav_path).name, e)
+        while True:
+            if remote_url:
+                loop = asyncio.get_event_loop()
+                while not await loop.run_in_executor(None, _is_remote_available, remote_url):
+                    log.warning("Remote-Whisper nicht erreichbar — Warteschlange pausiert, "
+                                "nächster Versuch in 30s …")
+                    await asyncio.sleep(30)
+            try:
+                text = await asyncio.wait_for(
+                    transcribe_wav(wav_path, model_size, language),
+                    timeout=300.0
+                )
+                break  # Erfolg
+            except asyncio.TimeoutError:
+                log.warning("[%s] Whisper-Timeout für %s", room, Path(wav_path).name)
+                if not remote_url:
+                    break  # lokaler Fehler → überspringen
+                log.warning("Warte 30s und versuche erneut …")
+                await asyncio.sleep(30)
+            except Exception as e:
+                log.warning("[%s] Whisper-Fehler für %s: %r", room, Path(wav_path).name, e)
+                if not remote_url:
+                    break  # lokaler Fehler → überspringen
+                log.warning("Warte 30s und versuche erneut …")
+                await asyncio.sleep(30)
 
         if not text:
             return
