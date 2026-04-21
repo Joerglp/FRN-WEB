@@ -118,14 +118,22 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
     return _remove_repetitions(" ".join(parts).strip())
 
 
+def _is_remote_available(url: str) -> bool:
+    """Prüft ob der Remote-Whisper-Server erreichbar ist (Health-Check)."""
+    import urllib.request as _ur
+    health = url.rsplit("/", 1)[0] + "/health"
+    try:
+        _ur.urlopen(_ur.Request(health), timeout=5)
+        return True
+    except Exception:
+        return False
+
+
 def _transcribe_sync(wav_path: str, model_size: str, language: str) -> str:
     """Remote-API wenn konfiguriert, sonst lokales Modell."""
     remote_url = _get_whisper_remote_url()
     if remote_url:
-        try:
-            return _transcribe_remote(wav_path, remote_url, language)
-        except Exception as e:
-            log.warning("Remote-Whisper nicht erreichbar (%s) — lokaler Fallback", e)
+        return _transcribe_remote(wav_path, remote_url, language)
     return _transcribe_local(wav_path, model_size, language)
 
 
@@ -304,6 +312,16 @@ class TranscriptionPipeline:
         """Transkribiert eine fertige WAV-Datei (von frn_stream.py aufgezeichnet)."""
         model_size = self.cfg.get("whisper_model", "medium")
         language   = self.cfg.get("whisper_language", "de")
+
+        # Bei konfiguriertem Remote-Server: warten bis er wieder erreichbar ist
+        remote_url = _get_whisper_remote_url()
+        if remote_url:
+            loop = asyncio.get_event_loop()
+            while not await loop.run_in_executor(None, _is_remote_available, remote_url):
+                log.warning("Remote-Whisper nicht erreichbar — Warteschlange pausiert, "
+                            "nächster Versuch in 30s …")
+                await asyncio.sleep(30)
+
         text = ""
         try:
             text = await asyncio.wait_for(
