@@ -440,11 +440,11 @@ class FRNTXRoom:
         self._writer.write(b"TX0\r\n")
         await self._writer.drain()
         try:
-            await asyncio.wait_for(self._tx_approved.wait(), timeout=5.0)
+            await asyncio.wait_for(self._tx_approved.wait(), timeout=30.0)
             self._pcm_buf = b""
             return True
         except asyncio.TimeoutError:
-            log.warning("[%s] TX approve timeout", self.name)
+            log.warning("[%s] TX approve timeout (30s)", self.name)
             return False
 
     async def send_pcm(self, pcm_chunk: bytes):
@@ -1350,6 +1350,9 @@ class TXServer:
         log.info("WS connected: user=%s room=%s", info["user"], mount)
 
         in_tx        = False
+        waiting_tx   = False          # TX beantragt, Genehmigung ausstehend
+        pre_buf: list[bytes] = []     # PCM-Puffer während der Wartezeit
+        _tx_approval_task = None
         src_rate     = 48000
         native_buf   = np.array([], dtype=np.float32)
         native_block = 960
@@ -1396,39 +1399,54 @@ class TXServer:
                         src_rate     = int(data.get("sampleRate", 48000))
                         native_block = max(1, int(block_8k * src_rate / 8000))
                         native_buf   = np.array([], dtype=np.float32)
+                        pre_buf      = []
 
                         if room._tx_lock.locked():
                             await ws.send_json({"type": "error",
                                                 "msg": "Raum belegt (jemand sendet)"})
                             continue
 
-                        async with room._tx_lock:
-                            in_tx = True
-                            try:
+                        waiting_tx = True
+                        await ws.send_json({"type": "tx_waiting"})
+
+                        async def _request_and_notify():
+                            nonlocal in_tx, waiting_tx, pre_buf
+                            async with room._tx_lock:
                                 ok = await tx_conn.request_tx()
-                                if ok:
-                                    await ws.send_json({"type": "tx_active"})
-                                else:
-                                    await ws.send_json({"type": "error",
-                                                        "msg": "TX nicht genehmigt"})
-                                    in_tx = False
-                            except Exception as e:
-                                log.error("TX request error: %s", e)
-                                await ws.send_json({"type": "error", "msg": str(e)})
-                                in_tx = False
+                            waiting_tx = False
+                            if ok:
+                                in_tx = True
+                                for chunk in pre_buf:
+                                    await tx_conn.send_pcm(chunk)
+                                pre_buf = []
+                                await ws.send_json({"type": "tx_active", "beep": True})
+                            else:
+                                pre_buf = []
+                                await ws.send_json({"type": "error",
+                                                    "msg": "TX nicht genehmigt (Kanal belegt)"})
+
+                        _tx_approval_task = asyncio.create_task(_request_and_notify())
 
                     elif cmd == "PTT_STOP":
+                        waiting_tx = False
+                        if _tx_approval_task and not _tx_approval_task.done():
+                            _tx_approval_task.cancel()
+                            _tx_approval_task = None
                         if in_tx:
                             await tx_conn.end_tx()
                             in_tx = False
                             await ws.send_json({"type": "tx_stopped"})
 
                 elif msg.type == web.WSMsgType.BINARY:
-                    if not in_tx:
+                    if not in_tx and not waiting_tx:
                         continue
                     pcm_in = np.frombuffer(msg.data, dtype="<i2").astype(np.float32)
                     if src_rate == 8000:
-                        await tx_conn.send_pcm(pcm_in.astype("<i2").tobytes())
+                        pcm_8k = pcm_in.astype("<i2").tobytes()
+                        if waiting_tx:
+                            pre_buf.append(pcm_8k)
+                        else:
+                            await tx_conn.send_pcm(pcm_8k)
                     else:
                         native_buf = np.append(native_buf, pcm_in)
                         while len(native_buf) >= native_block:
@@ -1436,7 +1454,10 @@ class TXServer:
                             native_buf = native_buf[native_block:]
                             resampled  = sp_resample(chunk, block_8k)
                             pcm_bytes  = np.clip(resampled, -32768, 32767).astype("<i2").tobytes()
-                            await tx_conn.send_pcm(pcm_bytes)
+                            if waiting_tx:
+                                pre_buf.append(pcm_bytes)
+                            else:
+                                await tx_conn.send_pcm(pcm_bytes)
 
                 elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
                     break
