@@ -1358,29 +1358,13 @@ class TXServer:
         native_block = 960
         block_8k     = 160
 
-        # Eigene FRN-Verbindung sofort aufbauen wenn User via FRN eingeloggt
+        # Eigene FRN-Verbindung wird erst bei PTT_START aufgebaut (lazy),
+        # damit kein AL=BLOCK entsteht wenn die vorherige Session noch nicht
+        # vollständig beendet ist.
         frn_email    = info.get("frn_email", "")
         frn_password = info.get("frn_password", "")
         user_tx_conn = None
-        if frn_email and frn_password:
-            user_tx_conn = FRNTXRoom(
-                name=room.name,
-                frn_server=room.server,
-                frn_port=room.port,
-                email=frn_email,
-                password=frn_password,
-                callsign=callsign,
-            )
-            try:
-                await user_tx_conn.ensure_connected()
-                log.info("[%s] User-TX vorab verbunden: %s (%s)",
-                         room.name, info["user"], callsign)
-            except Exception as e:
-                log.warning("[%s] User-TX Vorverbindung fehlgeschlagen (%s) — Fallback",
-                            room.name, e)
-                user_tx_conn = None
-
-        tx_conn = user_tx_conn or room
+        tx_conn      = room   # Fallback bis user_tx_conn aufgebaut ist
 
         try:
             await ws.send_json({"type": "ready", "callsign": callsign,
@@ -1410,7 +1394,34 @@ class TXServer:
                         await ws.send_json({"type": "tx_waiting"})
 
                         async def _request_and_notify():
-                            nonlocal in_tx, waiting_tx, pre_buf
+                            nonlocal in_tx, waiting_tx, pre_buf, user_tx_conn, tx_conn
+                            # Eigene FRN-Verbindung jetzt aufbauen (lazy, Retry bei BLOCK)
+                            if frn_email and frn_password and user_tx_conn is None:
+                                for attempt in range(4):
+                                    try:
+                                        conn = FRNTXRoom(
+                                            name=room.name,
+                                            frn_server=room.server,
+                                            frn_port=room.port,
+                                            email=frn_email,
+                                            password=frn_password,
+                                            callsign=callsign,
+                                        )
+                                        await conn.ensure_connected()
+                                        user_tx_conn = conn
+                                        tx_conn = conn
+                                        log.info("[%s] User-TX verbunden: %s (%s)",
+                                                 room.name, info["user"], callsign)
+                                        break
+                                    except Exception as e:
+                                        if "BLOCK" in str(e) and attempt < 3:
+                                            log.info("[%s] AL=BLOCK — warte 8s (Versuch %d/4)",
+                                                     room.name, attempt + 1)
+                                            await asyncio.sleep(8)
+                                        else:
+                                            log.warning("[%s] User-TX fehlgeschlagen (%s) — Fallback",
+                                                        room.name, e)
+                                            break
                             async with room._tx_lock:
                                 ok = await tx_conn.request_tx()
                             waiting_tx = False
