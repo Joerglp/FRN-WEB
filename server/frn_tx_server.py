@@ -495,6 +495,9 @@ class TXServer:
         self.users: dict[str, dict] = {}
         self.tokens: dict[str, dict] = {}
         self.rooms: dict[str, FRNTXRoom] = {}
+        # Persistente User-TX-Verbindungen (email+mount → FRNTXRoom)
+        # bleiben zwischen PTT-Drücken am Leben → kein AL=BLOCK
+        self._user_tx_conns: dict[tuple, "FRNTXRoom"] = {}
         self._users_path: Path | None = None
         self._rooms_path: Path | None = None
         self._tokens_path: Path = Path(__file__).parent / "tx_tokens.json"
@@ -640,6 +643,16 @@ class TXServer:
         }
         self._save_tokens()
         return token
+
+    async def _disconnect_user_tx(self, email: str):
+        """Trennt alle persistenten User-TX-Verbindungen für eine E-Mail-Adresse."""
+        to_del = [k for k in self._user_tx_conns if k[0] == email]
+        for k in to_del:
+            conn = self._user_tx_conns.pop(k)
+            try:
+                await conn.disconnect()
+            except Exception:
+                pass
 
     def _validate_token(self, token: str) -> dict | None:
         info = self.tokens.get(token)
@@ -1002,6 +1015,17 @@ class TXServer:
         return web.json_response(
             {"error": "Ungültiger Benutzername oder Passwort"}, status=401)
 
+    async def handle_logout(self, request):
+        token = request.headers.get("X-Token", "")
+        info  = self.tokens.get(token)
+        if info:
+            email = info.get("frn_email", "") or info.get("user", "")
+            await self._disconnect_user_tx(email)
+            del self.tokens[token]
+            self._save_tokens()
+        return web.json_response({"ok": True})
+
+
     async def handle_rooms(self, request):
         token = request.rel_url.query.get("token", "")
         if not self._validate_token(token):
@@ -1358,13 +1382,12 @@ class TXServer:
         native_block = 960
         block_8k     = 160
 
-        # Eigene FRN-Verbindung wird erst bei PTT_START aufgebaut (lazy),
-        # damit kein AL=BLOCK entsteht wenn die vorherige Session noch nicht
-        # vollständig beendet ist.
         frn_email    = info.get("frn_email", "")
         frn_password = info.get("frn_password", "")
-        user_tx_conn = None
-        tx_conn      = room   # Fallback bis user_tx_conn aufgebaut ist
+        user_key     = (frn_email, mount) if frn_email else None
+        # Bestehende User-TX-Verbindung wiederverwenden (kein Disconnect zwischen Drücken)
+        user_tx_conn = self._user_tx_conns.get(user_key) if user_key else None
+        tx_conn      = user_tx_conn or room
 
         try:
             await ws.send_json({"type": "ready", "callsign": callsign,
@@ -1401,32 +1424,39 @@ class TXServer:
                             ok = False
                             try:
                                 # Eigene FRN-Verbindung aufbauen (lazy, Retry bei BLOCK)
-                                if frn_email and frn_password and user_tx_conn is None:
-                                    for attempt in range(4):
-                                        try:
-                                            conn = FRNTXRoom(
-                                                name=room.name,
-                                                frn_server=room.server,
-                                                frn_port=room.port,
-                                                email=frn_email,
-                                                password=frn_password,
-                                                callsign=callsign,
-                                            )
-                                            await conn.ensure_connected()
-                                            user_tx_conn = conn
-                                            tx_conn = conn
-                                            log.info("[%s] User-TX verbunden: %s (%s)",
-                                                     room.name, info["user"], callsign)
-                                            break
-                                        except Exception as e:
-                                            if "BLOCK" in str(e) and attempt < 3:
-                                                log.info("[%s] AL=BLOCK — warte 8s (Versuch %d/4)",
-                                                         room.name, attempt + 1)
-                                                await asyncio.sleep(8)
-                                            else:
-                                                log.warning("[%s] User-TX fehlgeschlagen (%s) — Fallback",
-                                                            room.name, e)
+                                if frn_email and frn_password:
+                                    # Bestehende Verbindung prüfen
+                                    existing = self._user_tx_conns.get(user_key)
+                                    if existing and existing._connected:
+                                        user_tx_conn = existing
+                                        tx_conn = existing
+                                    else:
+                                        for attempt in range(4):
+                                            try:
+                                                conn = FRNTXRoom(
+                                                    name=room.name,
+                                                    frn_server=room.server,
+                                                    frn_port=room.port,
+                                                    email=frn_email,
+                                                    password=frn_password,
+                                                    callsign=callsign,
+                                                )
+                                                await conn.ensure_connected()
+                                                user_tx_conn = conn
+                                                tx_conn = conn
+                                                self._user_tx_conns[user_key] = conn
+                                                log.info("[%s] User-TX verbunden: %s (%s)",
+                                                         room.name, info["user"], callsign)
                                                 break
+                                            except Exception as e:
+                                                if "BLOCK" in str(e) and attempt < 3:
+                                                    log.info("[%s] AL=BLOCK — warte 8s (Versuch %d/4)",
+                                                             room.name, attempt + 1)
+                                                    await asyncio.sleep(8)
+                                                else:
+                                                    log.warning("[%s] User-TX fehlgeschlagen (%s) — Fallback",
+                                                                room.name, e)
+                                                    break
                                 ok = await tx_conn.request_tx()
                             finally:
                                 room._tx_lock.release()
@@ -1485,8 +1515,7 @@ class TXServer:
         finally:
             if in_tx:
                 await tx_conn.end_tx()
-            if user_tx_conn:
-                await user_tx_conn.disconnect()
+            # user_tx_conn bleibt am Leben (in self._user_tx_conns) für nächsten PTT-Druck
             log.info("WS closed: user=%s", info["user"])
 
         return ws
@@ -1560,6 +1589,7 @@ class TXServer:
         app.router.add_get ("/",                   self.handle_root)
         app.router.add_get ("/tx_processor.js",    self.handle_worklet)
         app.router.add_post("/api/login",           self.handle_login)
+        app.router.add_post("/api/logout",          self.handle_logout)
         app.router.add_get ("/api/rooms",           self.handle_rooms)
         app.router.add_get ("/api/config",          self.handle_config)
         app.router.add_get ("/stream/{mount}.mp3",            self.handle_stream_proxy)

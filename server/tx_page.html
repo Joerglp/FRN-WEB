@@ -1311,6 +1311,9 @@ async function fetchRoomsAndShow() {
 }
 
 function doLogout() {
+  if (authToken) fetch(`${TX_BASE}/api/logout`, {
+    method: "POST", headers: {"X-Token": authToken}
+  }).catch(() => {});
   authToken = null; callsign = ""; isAdmin = false;
   localStorage.removeItem("frn_token");
   localStorage.removeItem("frn_callsign");
