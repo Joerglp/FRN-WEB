@@ -1425,12 +1425,22 @@ class TXServer:
                             try:
                                 # Eigene FRN-Verbindung aufbauen (lazy, Retry bei BLOCK)
                                 if frn_email and frn_password:
-                                    # Bestehende Verbindung prüfen
+                                    # Bestehende Verbindung für diesen Raum wiederverwenden
                                     existing = self._user_tx_conns.get(user_key)
                                     if existing and existing._connected:
                                         user_tx_conn = existing
                                         tx_conn = existing
                                     else:
+                                        # Verbindungen für andere Räume (gleiche Email) trennen
+                                        for k in list(self._user_tx_conns):
+                                            if k[0] == frn_email and k != user_key:
+                                                old = self._user_tx_conns.pop(k)
+                                                try:
+                                                    await old.disconnect()
+                                                except Exception:
+                                                    pass
+                                                log.info("[%s] User-TX anderer Raum getrennt: %s",
+                                                         room.name, k[1])
                                         for attempt in range(4):
                                             try:
                                                 conn = FRNTXRoom(
