@@ -1390,48 +1390,55 @@ class TXServer:
                                                 "msg": "Raum belegt (jemand sendet)"})
                             continue
 
+                        # Lock sofort belegen — kein yield zwischen check und acquire
+                        # (asyncio.Lock.acquire() ist atomisch wenn Lock frei ist)
+                        await room._tx_lock.acquire()
                         waiting_tx = True
                         await ws.send_json({"type": "tx_waiting"})
 
                         async def _request_and_notify():
                             nonlocal in_tx, waiting_tx, pre_buf, user_tx_conn, tx_conn
-                            # Eigene FRN-Verbindung jetzt aufbauen (lazy, Retry bei BLOCK)
-                            if frn_email and frn_password and user_tx_conn is None:
-                                for attempt in range(4):
-                                    try:
-                                        conn = FRNTXRoom(
-                                            name=room.name,
-                                            frn_server=room.server,
-                                            frn_port=room.port,
-                                            email=frn_email,
-                                            password=frn_password,
-                                            callsign=callsign,
-                                        )
-                                        await conn.ensure_connected()
-                                        user_tx_conn = conn
-                                        tx_conn = conn
-                                        log.info("[%s] User-TX verbunden: %s (%s)",
-                                                 room.name, info["user"], callsign)
-                                        break
-                                    except Exception as e:
-                                        if "BLOCK" in str(e) and attempt < 3:
-                                            log.info("[%s] AL=BLOCK — warte 8s (Versuch %d/4)",
-                                                     room.name, attempt + 1)
-                                            await asyncio.sleep(8)
-                                        else:
-                                            log.warning("[%s] User-TX fehlgeschlagen (%s) — Fallback",
-                                                        room.name, e)
+                            ok = False
+                            try:
+                                # Eigene FRN-Verbindung aufbauen (lazy, Retry bei BLOCK)
+                                if frn_email and frn_password and user_tx_conn is None:
+                                    for attempt in range(4):
+                                        try:
+                                            conn = FRNTXRoom(
+                                                name=room.name,
+                                                frn_server=room.server,
+                                                frn_port=room.port,
+                                                email=frn_email,
+                                                password=frn_password,
+                                                callsign=callsign,
+                                            )
+                                            await conn.ensure_connected()
+                                            user_tx_conn = conn
+                                            tx_conn = conn
+                                            log.info("[%s] User-TX verbunden: %s (%s)",
+                                                     room.name, info["user"], callsign)
                                             break
-                            async with room._tx_lock:
+                                        except Exception as e:
+                                            if "BLOCK" in str(e) and attempt < 3:
+                                                log.info("[%s] AL=BLOCK — warte 8s (Versuch %d/4)",
+                                                         room.name, attempt + 1)
+                                                await asyncio.sleep(8)
+                                            else:
+                                                log.warning("[%s] User-TX fehlgeschlagen (%s) — Fallback",
+                                                            room.name, e)
+                                                break
                                 ok = await tx_conn.request_tx()
-                            waiting_tx = False
+                            finally:
+                                room._tx_lock.release()
+                                waiting_tx = False
+
                             if ok:
                                 in_tx = True
                                 for chunk in pre_buf:
                                     await tx_conn.send_pcm(chunk)
                                 pre_buf = []
                                 await ws.send_json({"type": "tx_active", "beep": True})
-                            else:
+                            elif not asyncio.current_task().cancelled():
                                 pre_buf = []
                                 await ws.send_json({"type": "error",
                                                     "msg": "TX nicht genehmigt (Kanal belegt)"})
