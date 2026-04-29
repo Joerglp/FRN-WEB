@@ -902,7 +902,16 @@ class TXServer:
             m  = re.search(r"<AL>(.*?)</AL>", result)
             al = m.group(1) if m else "?"
             log.info("FRN auth for %s: AL=%s", email, al)
-            return al in ("OK", "ADMIN", "OWNER", "NETOWNER")
+            if al in ("OK", "ADMIN", "OWNER", "NETOWNER"):
+                return True
+            # AL=BLOCK kann bedeuten dass wir selbst noch verbunden sind —
+            # eigene persistente Verbindung gilt als Beweis gültiger Credentials
+            if al == "BLOCK":
+                own_conn = any(k[0] == email for k in self._user_tx_conns)
+                if own_conn:
+                    log.info("FRN auth %s: AL=BLOCK, aber eigene Verbindung aktiv — OK", email)
+                    return True
+            return False
         except Exception as e:
             log.warning("FRN auth error: %s", e)
             return False
