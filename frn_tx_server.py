@@ -646,6 +646,8 @@ class TXServer:
 
     # ── Clips ──────────────────────────────────────────────────────────────
 
+    _CLIPS_DIR = Path(__file__).parent / "clips"
+
     def _load_clips(self) -> list[dict]:
         """Load clip list from config.ini [clips] section."""
         import configparser
@@ -665,8 +667,25 @@ class TXServer:
             label = label.strip()
             text  = text.strip()
             if label and text:
-                clips.append({"id": clip_id, "label": label, "text": text})
+                has_rec = (self._CLIPS_DIR / f"{clip_id}.wav").exists()
+                clips.append({"id": clip_id, "label": label,
+                               "text": text, "has_recording": has_rec})
         return clips
+
+    async def _get_clip_pcm(self, clip_id: str, clip_text: str,
+                             lang: str = "de") -> bytes:
+        """Return 8 kHz mono s16le PCM: prefers recorded file, falls back to TTS."""
+        recorded = self._CLIPS_DIR / f"{clip_id}.wav"
+        if recorded.exists():
+            ffm = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-i", str(recorded),
+                "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            pcm, _ = await ffm.communicate()
+            return pcm
+        return await self._gen_espeak_pcm(clip_text, lang)
 
     @staticmethod
     async def _gen_espeak_pcm(text: str, lang: str = "de") -> bytes:
@@ -1284,6 +1303,63 @@ class TXServer:
             return web.json_response({"error": "unauthorized"}, status=401)
         return web.json_response({"clips": self._load_clips()})
 
+    async def handle_clip_recording_upload(self, request):
+        """POST /api/clips/{id}/recording — save custom audio for a clip."""
+        import re as _re
+        token = request.rel_url.query.get("token", "")
+        if not self._validate_token(token):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        clip_id = request.match_info["id"]
+        if not _re.match(r'^[a-z0-9_]{1,40}$', clip_id):
+            return web.json_response({"error": "Ungültige Clip-ID"}, status=400)
+        if not any(c["id"] == clip_id for c in self._load_clips()):
+            return web.json_response({"error": "Clip nicht gefunden"}, status=404)
+
+        data = await request.read()
+        if len(data) < 200:
+            return web.json_response({"error": "Audio zu kurz"}, status=400)
+        if len(data) > 10 * 1024 * 1024:
+            return web.json_response({"error": "Audio zu groß (max 10 MB)"}, status=400)
+
+        self._CLIPS_DIR.mkdir(exist_ok=True)
+        tmp  = self._CLIPS_DIR / f"_{clip_id}.tmp"
+        dest = self._CLIPS_DIR / f"{clip_id}.wav"
+        try:
+            tmp.write_bytes(data)
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", str(tmp),
+                "-ar", "8000", "-ac", "1", str(dest),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+        finally:
+            tmp.unlink(missing_ok=True)
+
+        if not dest.exists() or dest.stat().st_size < 100:
+            return web.json_response({"error": "Konvertierung fehlgeschlagen"}, status=500)
+
+        log.info("Clip '%s': eigene Aufnahme gespeichert (%d Bytes)", clip_id, dest.stat().st_size)
+        return web.json_response({"ok": True})
+
+    async def handle_clip_recording_delete(self, request):
+        """DELETE /api/clips/{id}/recording — remove custom recording, fall back to TTS."""
+        import re as _re
+        token = request.rel_url.query.get("token", "")
+        if not self._validate_token(token):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        clip_id = request.match_info["id"]
+        if not _re.match(r'^[a-z0-9_]{1,40}$', clip_id):
+            return web.json_response({"error": "Ungültige Clip-ID"}, status=400)
+
+        recorded = self._CLIPS_DIR / f"{clip_id}.wav"
+        if recorded.exists():
+            recorded.unlink()
+            log.info("Clip '%s': eigene Aufnahme gelöscht → TTS", clip_id)
+        return web.json_response({"ok": True})
+
     async def handle_frn_networks(self, request):
         """Return list of available FRN room names (requires valid token).
 
@@ -1627,7 +1703,7 @@ class TXServer:
                                 in_tx = True
                                 await ws.send_json({"type": "tx_active", "beep": True})
                                 try:
-                                    pcm = await self._gen_espeak_pcm(ct, cl)
+                                    pcm = await self._get_clip_pcm(clip_id, ct, cl)
                                     for i in range(0, len(pcm), PCM_PACKET_BYTES):
                                         await tx_conn.send_pcm(pcm[i:i + PCM_PACKET_BYTES])
                                 except asyncio.CancelledError:
@@ -1754,7 +1830,9 @@ class TXServer:
         app.router.add_get ("/api/rooms",           self.handle_rooms)
         app.router.add_get ("/api/config",          self.handle_config)
         app.router.add_get ("/stream/{mount}.mp3",            self.handle_stream_proxy)
-        app.router.add_get ("/api/clips",                     self.handle_clips)
+        app.router.add_get   ("/api/clips",                          self.handle_clips)
+        app.router.add_post  ("/api/clips/{id}/recording",          self.handle_clip_recording_upload)
+        app.router.add_delete("/api/clips/{id}/recording",          self.handle_clip_recording_delete)
         app.router.add_get ("/api/frn-networks",              self.handle_frn_networks)
         app.router.add_get ("/api/rooms/{mount}/clients",    self.handle_room_clients)
         app.router.add_get ("/ws",                           self.handle_ws)
