@@ -1,0 +1,1971 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>FRN Webstreams</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:      #0d1117;
+  --panel:   #141c2b;
+  --inset:   #0e1520;
+  --border:  #2a3f5f;
+  --accent:  #4fc3f7;
+  --accent2: #81d4fa;
+  --text:    #dce8f0;
+  --muted:   #8aabbf;
+  --dim:     #2d3f55;
+  --red:     #ef5350;
+  --green:   #4caf50;
+  --green2:  #69f0ae;
+  --orange:  #ffa726;
+  --yellow:  #ffee58;
+  --chrome:  #7a9ab0;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Rajdhani', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 0 0 calc(32px + env(safe-area-inset-bottom)) 0;
+  min-height: 100dvh;
+  background-image:
+    linear-gradient(rgba(79,195,247,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(79,195,247,0.02) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* ── Header ── */
+.site-header {
+  padding: 20px 20px 0;
+  display: flex; align-items: flex-start; gap: 16px;
+  margin-bottom: 24px;
+}
+.header-badge {
+  width: 48px; height: 48px; flex-shrink: 0;
+  border: 2px solid var(--accent); border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--inset);
+  box-shadow: 0 0 12px rgba(79,195,247,0.25), inset 0 0 8px rgba(79,195,247,0.05);
+  font-size: 22px;
+}
+.header-text { flex: 1; }
+.header-text h1 {
+  font-family: 'Orbitron', monospace;
+  font-size: 1.45em; font-weight: 900;
+  letter-spacing: 0.06em; color: var(--accent);
+  text-shadow: 0 0 16px rgba(79,195,247,0.4);
+  line-height: 1.1;
+}
+.header-sub {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.72em; color: var(--muted);
+  letter-spacing: 0.04em; margin-top: 4px;
+}
+
+/* ── Section Labels ── */
+.section-label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.68em; letter-spacing: 0.2em;
+  color: var(--muted); text-transform: uppercase;
+  padding: 0 20px; margin-bottom: 10px;
+  display: flex; align-items: center; gap: 10px;
+}
+.section-label::after {
+  content: ''; flex: 1; height: 1px; background: var(--border);
+}
+
+/* ── Panel ── */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin: 0 12px 12px;
+  overflow: hidden; position: relative;
+}
+.panel::before, .panel::after {
+  content: ''; position: absolute;
+  width: 10px; height: 10px;
+  border-color: var(--accent); border-style: solid; opacity: 0.4;
+}
+.panel::before { top: 6px; left: 6px; border-width: 2px 0 0 2px; }
+.panel::after  { bottom: 6px; right: 6px; border-width: 0 2px 2px 0; }
+
+.panel-header {
+  display: flex; align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border); gap: 10px;
+}
+.panel-title {
+  font-family: 'Orbitron', monospace;
+  font-size: 0.78em; font-weight: 700;
+  letter-spacing: 0.08em; color: var(--accent2); flex: 1;
+}
+.panel-body { padding: 14px 16px; }
+
+/* LED */
+.led {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--dim); flex-shrink: 0;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.led.active {
+  background: var(--green2);
+  box-shadow: 0 0 6px var(--green2), 0 0 12px rgba(105,240,174,0.4);
+}
+.led.tx {
+  background: var(--red);
+  box-shadow: 0 0 6px var(--red), 0 0 14px rgba(239,83,80,0.5);
+  animation: led-pulse 0.6s ease-in-out infinite alternate;
+}
+@keyframes led-pulse { from { opacity: 1; } to { opacity: 0.5; } }
+
+/* ── Streams ── */
+.stream-freq {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.65em; color: var(--muted);
+  letter-spacing: 0.12em; margin-bottom: 6px;
+}
+audio {
+  width: 100%; height: 36px; outline: none; border-radius: 6px;
+  accent-color: var(--accent); filter: brightness(0.92) saturate(0.8);
+}
+.stream-links { margin-top: 6px; display: flex; gap: 12px; }
+.stream-links a {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.68em; color: var(--muted);
+  text-decoration: none; letter-spacing: 0.06em;
+  transition: color 0.15s;
+}
+.stream-links a:hover { color: var(--accent); }
+
+/* ── Login ── */
+#login-section .panel-body {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.input-group { display: flex; flex-direction: column; gap: 4px; }
+.input-group label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.65em; letter-spacing: 0.1em;
+  color: var(--muted); text-transform: uppercase;
+}
+.input-group input {
+  background: var(--inset); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.95em; padding: 10px 12px; width: 100%; outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input-group input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(79,195,247,0.15);
+}
+.input-group input::placeholder { color: var(--muted); opacity: 0.5; }
+
+.btn-primary {
+  background: linear-gradient(135deg, #1a3a5c, #0d2540);
+  border: 1px solid var(--accent); border-radius: 8px;
+  color: var(--accent);
+  font-family: 'Orbitron', monospace;
+  font-size: 0.75em; font-weight: 700; letter-spacing: 0.12em;
+  padding: 12px; width: 100%; cursor: pointer; text-transform: uppercase;
+  box-shadow: 0 0 10px rgba(79,195,247,0.1);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.btn-primary:hover {
+  background: linear-gradient(135deg, #1e4a72, #112d50);
+  box-shadow: 0 0 16px rgba(79,195,247,0.25);
+}
+#login-error {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.75em; color: var(--red); min-height: 1em;
+  letter-spacing: 0.04em;
+}
+
+/* ── TX Panel ── */
+#tx-section { display: none; }
+
+.tx-meta {
+  display: flex; align-items: center;
+  justify-content: space-between; margin-bottom: 14px; gap: 8px;
+}
+.tx-callsign {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.82em; color: var(--accent2); letter-spacing: 0.06em;
+}
+.tx-callsign span { color: var(--muted); font-size: 0.85em; }
+.tx-actions { display: flex; gap: 8px; }
+
+#logout-btn, #admin-btn {
+  background: none; border: 1px solid var(--dim); color: var(--muted);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.68em; letter-spacing: 0.08em;
+  padding: 5px 10px; border-radius: 4px; cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+#admin-btn { display: none; border-color: rgba(79,195,247,0.3); }
+#logout-btn:hover, #admin-btn:hover {
+  border-color: var(--chrome); color: var(--text);
+}
+#admin-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+
+/* ── PTT Button ── */
+.ptt-wrap {
+  display: flex; flex-direction: column;
+  align-items: center; padding: 10px 0 24px;
+}
+#ptt-btn {
+  width: 190px; height: 190px; border-radius: 50%;
+  border: none; cursor: pointer;
+  user-select: none; touch-action: none;
+  -webkit-touch-callout: none; outline: none; position: relative;
+  box-shadow:
+    0 0 0 3px #1a2a40, 0 0 0 6px #0d1a2e, 0 0 0 8px #253545,
+    0 8px 32px rgba(0,0,0,0.7), 0 2px 8px rgba(0,0,0,0.5);
+  background: radial-gradient(circle at 38% 34%,
+    #2a4060 0%, #1a2d48 35%, #0f1d30 70%, #080e18 100%);
+  color: var(--accent);
+  font-family: 'Orbitron', monospace; font-size: 0.65em;
+  font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px;
+  transition: background 0.08s, box-shadow 0.08s, transform 0.08s;
+}
+#ptt-btn::before {
+  content: '🎙'; font-size: 2.2em; display: block;
+  filter: grayscale(0.3); transition: filter 0.08s;
+}
+#ptt-btn:hover:not(.active) {
+  box-shadow:
+    0 0 0 3px #1a2a40, 0 0 0 6px #0d1a2e, 0 0 0 8px #253545,
+    0 10px 36px rgba(0,0,0,0.7), 0 0 20px rgba(79,195,247,0.12);
+  background: radial-gradient(circle at 38% 34%,
+    #2e4a6e 0%, #1e3558 35%, #132238 70%, #08101e 100%);
+}
+#ptt-btn.active {
+  background: radial-gradient(circle at 40% 36%,
+    #7a1a18 0%, #5a1210 35%, #3a0a08 70%, #1e0504 100%);
+  color: #fff;
+  transform: scale(0.97) translateY(2px);
+  box-shadow:
+    0 0 0 3px #3a1010, 0 0 0 6px #1a0808, 0 0 0 8px #4a1515,
+    0 4px 16px rgba(0,0,0,0.8),
+    0 0 30px rgba(239,83,80,0.4), 0 0 60px rgba(239,83,80,0.2);
+  animation: ptt-pulse 0.7s ease-in-out infinite alternate;
+}
+#ptt-btn.active::before { filter: brightness(1.3); }
+@keyframes ptt-pulse {
+  from { box-shadow: 0 0 0 3px #3a1010, 0 0 0 6px #1a0808, 0 0 0 8px #4a1515,
+    0 4px 16px rgba(0,0,0,0.8), 0 0 30px rgba(239,83,80,0.4), 0 0 60px rgba(239,83,80,0.2); }
+  to   { box-shadow: 0 0 0 3px #5a1515, 0 0 0 6px #2a0a0a, 0 0 0 8px #6a2020,
+    0 4px 16px rgba(0,0,0,0.8), 0 0 40px rgba(239,83,80,0.6), 0 0 80px rgba(239,83,80,0.3); }
+}
+.ptt-label { font-size: 0.9em; opacity: 0.7; }
+#ptt-btn.active .ptt-label { opacity: 1; }
+
+#tx-status {
+  margin-top: 14px;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.78em; letter-spacing: 0.06em;
+  color: var(--muted); min-height: 1.4em; text-align: center;
+}
+#tx-status.ok    { color: var(--green2); text-shadow: 0 0 8px rgba(105,240,174,0.4); }
+#tx-status.busy  { color: var(--orange); }
+#tx-status.error { color: var(--red); }
+
+/* ── VU Meter ── */
+.vu-wrap {
+  margin-top: 16px; padding: 10px 12px;
+  background: var(--inset); border: 1px solid var(--border); border-radius: 8px;
+}
+.vu-label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.58em; letter-spacing: 0.14em;
+  color: var(--muted); text-transform: uppercase; margin-bottom: 6px;
+}
+.vu-segments { display: flex; gap: 3px; height: 18px; align-items: stretch; }
+.vu-seg { flex: 1; border-radius: 2px; background: var(--dim); transition: background 0.04s; }
+.vu-seg.lit-green  { background: var(--green);  box-shadow: 0 0 4px rgba(76,175,80,0.6); }
+.vu-seg.lit-yellow { background: var(--yellow); box-shadow: 0 0 4px rgba(255,238,88,0.6); }
+.vu-seg.lit-red    { background: var(--red);    box-shadow: 0 0 4px rgba(239,83,80,0.7); }
+
+#level-bar-wrap { display: none; }
+#level-bar { height: 100%; width: 0%; }
+
+/* ── Room Panel ── */
+#room-panel { display: none; }
+#room-select {
+  flex: 1; background: var(--inset); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text);
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 1em; font-weight: 600; padding: 9px 10px; outline: none;
+  cursor: pointer; transition: border-color 0.15s;
+}
+#room-select:focus { border-color: var(--accent); }
+
+.room-selector-row {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+}
+.room-selector-label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.65em; letter-spacing: 0.1em;
+  color: var(--muted); text-transform: uppercase; white-space: nowrap;
+}
+
+/* user list */
+.user-list-header {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.58em; letter-spacing: 0.16em; color: var(--muted);
+  text-transform: uppercase; margin-bottom: 8px;
+  display: flex; align-items: center; gap: 8px;
+}
+.user-list-header::after {
+  content: ''; flex: 1; height: 1px; background: var(--border);
+}
+#user-list {
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 180px; overflow-y: auto;
+}
+.user-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: 5px;
+  background: var(--inset); border: 1px solid var(--border);
+  font-family: 'Share Tech Mono', monospace; font-size: 0.8em;
+}
+.user-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--green2);
+  box-shadow: 0 0 5px rgba(105,240,174,0.6);
+}
+.user-callsign {
+  color: var(--accent2); font-weight: 600; letter-spacing: 0.06em; flex-shrink: 0;
+}
+.user-desc {
+  color: var(--muted); font-size: 0.88em; flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.user-type {
+  color: var(--dim); font-size: 0.9em; flex-shrink: 0;
+}
+.user-empty {
+  font-family: 'Share Tech Mono', monospace; font-size: 0.75em;
+  color: var(--muted); letter-spacing: 0.06em;
+  text-align: center; padding: 10px 0;
+}
+.user-loading {
+  font-family: 'Share Tech Mono', monospace; font-size: 0.75em;
+  color: var(--muted); letter-spacing: 0.06em;
+  text-align: center; padding: 10px 0; animation: blink 1s step-end infinite;
+}
+@keyframes blink { 50% { opacity: 0.3; } }
+
+/* RX stream bar */
+.rx-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; margin-bottom: 14px;
+  background: var(--inset); border: 1px solid var(--border); border-radius: 8px;
+}
+.rx-bar-left {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+}
+.rx-bar-label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.6em; letter-spacing: 0.14em; color: var(--muted);
+  text-transform: uppercase; width: 2.8em;
+}
+.rx-vu-segs {
+  flex: 1; display: flex; gap: 2px; height: 14px; align-items: stretch;
+}
+.rx-mute-btn {
+  background: none; border: 1px solid var(--dim); border-radius: 4px;
+  color: var(--muted); font-size: 0.9em; padding: 2px 7px;
+  cursor: pointer; flex-shrink: 0; transition: border-color 0.15s, color 0.15s;
+  line-height: 1.6;
+}
+.rx-mute-btn:hover { border-color: var(--accent); color: var(--accent); }
+.rx-mute-btn.muted { border-color: var(--red); color: var(--red); }
+
+/* ── Footer ── */
+.site-footer {
+  padding: 20px 20px 0;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.62em; color: var(--muted); letter-spacing: 0.06em;
+  border-top: 1px solid var(--border); margin: 16px 12px 0;
+  display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px;
+}
+.site-footer a { color: var(--muted); text-decoration: none; }
+.site-footer a:hover { color: var(--accent); }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ADMIN PANEL OVERLAY
+══════════════════════════════════════════════════════════════════════════ */
+#admin-overlay {
+  display: none;
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.85);
+  backdrop-filter: blur(4px);
+  align-items: flex-start; justify-content: center;
+  padding: 20px 12px calc(20px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+}
+#admin-overlay.open { display: flex; }
+
+.admin-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px; width: 100%; max-width: 640px;
+  overflow: hidden; flex-shrink: 0;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.8), 0 0 0 1px rgba(79,195,247,0.1);
+}
+
+.admin-header {
+  display: flex; align-items: center;
+  padding: 14px 20px; border-bottom: 1px solid var(--border);
+  background: linear-gradient(135deg, #0d1a2e, #111827);
+  gap: 12px;
+}
+.admin-header h2 {
+  font-family: 'Orbitron', monospace;
+  font-size: 0.9em; font-weight: 700;
+  letter-spacing: 0.1em; color: var(--accent); flex: 1;
+}
+.admin-close {
+  background: none; border: 1px solid var(--dim);
+  color: var(--muted); width: 28px; height: 28px;
+  border-radius: 6px; cursor: pointer; font-size: 1em;
+  display: flex; align-items: center; justify-content: center;
+  transition: border-color 0.15s, color 0.15s;
+}
+.admin-close:hover { border-color: var(--red); color: var(--red); }
+
+/* Tabs */
+.admin-tabs {
+  display: flex; border-bottom: 1px solid var(--border);
+  background: var(--inset);
+}
+.admin-tab {
+  flex: 1; padding: 10px 16px; background: none; border: none;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.7em; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+.admin-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.admin-tab:hover:not(.active) { color: var(--text); }
+
+.admin-tab-content { display: none; padding: 20px; }
+.admin-tab-content.active { display: block; }
+
+/* Admin tables */
+.admin-table {
+  width: 100%; border-collapse: collapse; margin-bottom: 20px;
+  font-family: 'Rajdhani', sans-serif; font-size: 0.9em;
+}
+.admin-table th {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.65em; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--muted); padding: 6px 10px; text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.admin-table td {
+  padding: 8px 10px; border-bottom: 1px solid rgba(30,45,69,0.5);
+  color: var(--text); vertical-align: middle;
+}
+.admin-table tr:last-child td { border-bottom: none; }
+.admin-table tr:hover td { background: rgba(79,195,247,0.03); }
+
+.badge {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.65em; letter-spacing: 0.08em; padding: 2px 6px;
+  border-radius: 4px; text-transform: uppercase;
+}
+.badge-admin { background: rgba(79,195,247,0.15); color: var(--accent); }
+.badge-user  { background: rgba(138,171,191,0.15); color: var(--muted); }
+.badge-frn   { background: rgba(255,167,38,0.15); color: var(--orange); }
+.badge-ok    { background: rgba(76,175,80,0.15); color: var(--green2); }
+
+.btn-icon {
+  background: none; border: 1px solid var(--dim);
+  color: var(--muted); padding: 3px 8px; border-radius: 4px;
+  cursor: pointer; font-size: 0.8em;
+  transition: border-color 0.15s, color 0.15s;
+}
+.btn-icon:hover { border-color: var(--red); color: var(--red); }
+.btn-icon.edit:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Add-form */
+.admin-section-title {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.68em; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 12px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+
+.form-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;
+}
+.form-grid.single { grid-template-columns: 1fr; }
+
+.form-field { display: flex; flex-direction: column; gap: 4px; }
+.form-field label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.62em; letter-spacing: 0.08em;
+  color: var(--muted); text-transform: uppercase;
+}
+.form-field input, .form-field select {
+  background: var(--inset); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text);
+  font-family: 'Share Tech Mono', monospace; font-size: 0.88em;
+  padding: 7px 10px; outline: none; width: 100%;
+  transition: border-color 0.15s;
+}
+.form-field input:focus, .form-field select:focus {
+  border-color: var(--accent);
+}
+.form-field.full { grid-column: 1 / -1; }
+
+.checkbox-row {
+  display: flex; align-items: center; gap: 8px;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.75em; color: var(--text); cursor: pointer;
+}
+.checkbox-row input[type="checkbox"] {
+  width: 16px; height: 16px; accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.btn-save {
+  background: linear-gradient(135deg, #1a3a5c, #0d2540);
+  border: 1px solid var(--accent); border-radius: 6px;
+  color: var(--accent); font-family: 'Orbitron', monospace;
+  font-size: 0.68em; font-weight: 700; letter-spacing: 0.1em;
+  padding: 9px 20px; cursor: pointer; text-transform: uppercase;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.btn-save:hover {
+  background: linear-gradient(135deg, #1e4a72, #112d50);
+  box-shadow: 0 0 12px rgba(79,195,247,0.2);
+}
+
+.admin-msg {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.72em; min-height: 1.2em;
+  margin-top: 8px; letter-spacing: 0.04em;
+}
+.admin-msg.ok    { color: var(--green2); }
+.admin-msg.error { color: var(--red); }
+
+/* Status tab */
+.status-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px;
+}
+.status-card {
+  background: var(--inset); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px;
+}
+.status-card-label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.6em; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 6px;
+}
+.status-card-value {
+  font-family: 'Orbitron', monospace;
+  font-size: 1.3em; font-weight: 700; color: var(--accent);
+}
+
+/* ── Clip-Buttons ── */
+.clips-wrap {
+  margin-top: 14px; padding: 10px 12px;
+  background: var(--inset); border: 1px solid var(--border); border-radius: 8px;
+}
+.clips-label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.58em; letter-spacing: 0.14em;
+  color: var(--muted); text-transform: uppercase; margin-bottom: 8px;
+}
+.clips-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 6px;
+}
+.clip-btn {
+  background: var(--panel);
+  border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.75em; letter-spacing: 0.03em;
+  padding: 10px 6px; cursor: pointer; text-align: center;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  line-height: 1.3; min-height: 42px;
+  display: flex; align-items: center; justify-content: center;
+}
+.clip-btn:hover:not(:disabled) {
+  border-color: var(--accent); color: var(--accent);
+  background: rgba(79,195,247,0.06);
+}
+.clip-btn.sending {
+  border-color: var(--red); color: var(--red);
+  background: rgba(239,83,80,0.08);
+  animation: led-pulse 0.7s ease-in-out infinite alternate;
+}
+.clip-btn:disabled {
+  opacity: 0.38; cursor: not-allowed;
+}
+
+/* ── Responsive ── */
+@media (min-width: 480px) {
+  .site-header { padding: 28px 28px 0; }
+  .panel { margin: 0 16px 14px; }
+  .section-label { padding: 0 28px; }
+  .site-footer { margin: 16px 16px 0; }
+}
+@media (min-width: 600px) {
+  .header-text h1 { font-size: 1.7em; }
+  #ptt-btn { width: 210px; height: 210px; }
+}
+@media (max-width: 480px) {
+  .form-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-badge">📻</div>
+  <div class="header-text">
+    <h1 id="page-title">FRN WEBSTREAMS</h1>
+    <div class="header-sub" id="page-subtitle">FREE RADIO NETWORK &nbsp;·&nbsp; DE</div>
+  </div>
+</header>
+
+<!-- ── Room Selector ── -->
+<div class="section-label" id="room-section-label" style="display:none">RAUM — Auswahl</div>
+<div class="panel" id="room-panel">
+  <div class="panel-header">
+    <div class="led" id="led-room"></div>
+    <div class="panel-title">NETZWERK</div>
+    <div id="room-user-count" style="font-family:'Share Tech Mono',monospace;font-size:0.65em;color:var(--muted);letter-spacing:0.08em;"></div>
+  </div>
+  <div class="panel-body">
+    <div class="room-selector-row">
+      <div class="room-selector-label">Raum</div>
+      <select id="room-select" onchange="onRoomChange()"></select>
+    </div>
+    <!-- RX Stream Auto-Play + VU -->
+    <div class="rx-bar">
+      <div class="rx-bar-left">
+        <span class="led" id="led-rx"></span>
+        <span class="rx-bar-label" id="rx-label">RX</span>
+      </div>
+      <div class="rx-vu-segs" id="rx-vu-segments"></div>
+      <button class="rx-mute-btn" id="rx-mute-btn" onclick="toggleRxMute()" title="Stummschalten">🔇</button>
+    </div>
+    <div class="user-list-header">Verbundene Benutzer</div>
+    <div id="user-list"><div class="user-loading">· · ·</div></div>
+  </div>
+</div>
+
+<!-- ── RX ── -->
+<div class="section-label" id="rx-section-label">RX — Mithören</div>
+<div id="stream-cards">
+  <!-- dynamically populated from /api/config -->
+</div>
+
+<!-- ── Login ── -->
+<div class="section-label">TX — Senden</div>
+<div class="panel" id="login-section">
+  <div class="panel-header">
+    <div class="led"></div>
+    <div class="panel-title">AUTHENTIFIZIERUNG</div>
+  </div>
+  <div class="panel-body">
+    <div class="input-group">
+      <label>Benutzername oder FRN-E-Mail</label>
+      <input type="text" id="username" placeholder="benutzername oder email@frn.de"
+             autocomplete="username" oninput="updateCallsignHint()">
+    </div>
+    <div class="input-group" id="callsign-row" style="display:none">
+      <label>Rufzeichen (optional, sonst aus E-Mail)</label>
+      <input type="text" id="callsign" placeholder="DL0XYZ" autocomplete="off">
+    </div>
+    <div class="input-group">
+      <label>Passwort</label>
+      <input type="password" id="password" placeholder="••••••••"
+             autocomplete="current-password"
+             onkeydown="if(event.key==='Enter') doLogin()">
+    </div>
+    <button class="btn-primary" onclick="doLogin()">ANMELDEN</button>
+    <div id="login-error"></div>
+  </div>
+</div>
+
+<!-- ── TX Panel ── -->
+<div class="panel" id="tx-section">
+  <div class="panel-header">
+    <div class="led" id="led-tx"></div>
+    <div class="panel-title">TRANSMIT</div>
+  </div>
+  <div class="panel-body">
+    <div class="tx-meta">
+      <div class="tx-callsign">
+        <span>LOGGED IN &nbsp;</span><span id="tx-info"></span>
+      </div>
+      <div class="tx-actions">
+        <button id="admin-btn" onclick="openAdmin()">⚙ ADMIN</button>
+        <button id="logout-btn" onclick="doLogout()">ABMELDEN</button>
+      </div>
+    </div>
+    <div class="ptt-wrap">
+      <button id="ptt-btn"
+        onpointerdown="pttStart(event)"
+        onpointerup="pttStop(event)"
+        onpointercancel="pttStop(event)"
+        onpointerleave="if(txActive) pttStop(event)">
+        <span class="ptt-label">PTT</span>
+      </button>
+      <div id="tx-status"></div>
+    </div>
+    <div class="vu-wrap">
+      <div class="vu-label">Audio Level</div>
+      <div class="vu-segments" id="vu-segments"></div>
+    </div>
+    <div id="level-bar-wrap"><div id="level-bar"></div></div>
+    <!-- Clip-Buttons (werden via /api/clips befüllt) -->
+    <div id="clips-section" style="display:none">
+      <div class="clips-wrap">
+        <div class="clips-label">Schnell-Sätze</div>
+        <div class="clips-grid" id="clips-grid"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer class="site-footer">
+  <span>Icecast2 &nbsp;·&nbsp; 64&thinsp;kbps MP3 &nbsp;·&nbsp; 22050&thinsp;Hz Mono</span>
+  <a href="/stream/status.xsl">Icecast-Status &#x2197;</a>
+</footer>
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     ADMIN PANEL
+════════════════════════════════════════════════════════════════════════ -->
+<div id="admin-overlay">
+  <div class="admin-panel">
+
+    <div class="admin-header">
+      <div class="led active"></div>
+      <h2>ADMINISTRATION</h2>
+      <button class="admin-close" onclick="closeAdmin()">✕</button>
+    </div>
+
+    <div class="admin-tabs">
+      <button class="admin-tab active" onclick="showAdminTab('users')">BENUTZER</button>
+      <button class="admin-tab"        onclick="showAdminTab('rooms')">RÄUME</button>
+      <button class="admin-tab"        onclick="showAdminTab('status')">STATUS</button>
+    </div>
+
+    <!-- ── Users tab ── -->
+    <div id="admin-tab-users" class="admin-tab-content active">
+      <div class="admin-section-title">Benutzer</div>
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>Benutzername / Callsign</th><th>Standard-Raum</th><th>Rolle</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="users-tbody"></tbody>
+      </table>
+
+      <div class="admin-section-title">Neuer Benutzer</div>
+      <div class="form-grid">
+        <div class="form-field">
+          <label>Benutzername / FRN-E-Mail *</label>
+          <input type="text" id="nu-username" placeholder="name oder frn@example.de">
+        </div>
+        <div class="form-field">
+          <label>Callsign</label>
+          <input type="text" id="nu-callsign" placeholder="DL0XYZ">
+        </div>
+        <div class="form-field" id="nu-pw-field">
+          <label>Passwort *</label>
+          <input type="password" id="nu-password" placeholder="min. 4 Zeichen">
+        </div>
+        <div class="form-field">
+          <label>Standard-Raum</label>
+          <select id="nu-default-room">
+            <option value="">— kein Standard —</option>
+          </select>
+        </div>
+        <div class="form-field" style="gap:6px">
+          <label class="checkbox-row">
+            <input type="checkbox" id="nu-frn-only" onchange="toggleFrnOnly()"> Nur FRN-Login (kein lokales Passwort)
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="nu-admin"> Admin-Rechte
+          </label>
+        </div>
+      </div>
+      <button class="btn-save" onclick="addUser()">BENUTZER ANLEGEN</button>
+      <div class="admin-msg" id="msg-users"></div>
+    </div>
+
+    <!-- ── Rooms tab ── -->
+    <div id="admin-tab-rooms" class="admin-tab-content">
+      <div class="admin-section-title">TX-Räume</div>
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>Mount</th><th>Raumname</th>
+            <th>Callsign</th><th>FRN-Server</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="rooms-tbody"></tbody>
+      </table>
+
+      <div class="admin-section-title">Neuer Raum</div>
+      <div class="form-grid">
+        <div class="form-field">
+          <label>Mount (URL-Teil) *</label>
+          <input type="text" id="nr-mount" placeholder="meinraum">
+        </div>
+        <div class="form-field">
+          <label>Raumname *</label>
+          <input type="text" id="nr-name" placeholder="Mein FRN Raum">
+        </div>
+        <div class="form-field">
+          <label>Callsign</label>
+          <input type="text" id="nr-callsign" placeholder="TX-Meinraum">
+        </div>
+        <div class="form-field">
+          <label>FRN E-Mail *</label>
+          <input type="text" id="nr-email" placeholder="tx@example.de">
+        </div>
+        <div class="form-field">
+          <label>FRN Passwort *</label>
+          <input type="password" id="nr-password" placeholder="FRN-Passwort">
+        </div>
+        <div class="form-field">
+          <label>FRN Server</label>
+          <input type="text" id="nr-server" placeholder="localhost">
+        </div>
+        <div class="form-field">
+          <label>FRN Port</label>
+          <input type="number" id="nr-port" placeholder="10024">
+        </div>
+      </div>
+      <button class="btn-save" onclick="addRoom()">RAUM ANLEGEN</button>
+      <div class="admin-msg" id="msg-rooms"></div>
+    </div>
+
+    <!-- ── Status tab ── -->
+    <div id="admin-tab-status" class="admin-tab-content">
+      <div class="admin-section-title">Server-Status</div>
+      <div class="status-grid" id="status-grid"></div>
+      <br>
+      <div class="admin-section-title">Räume</div>
+      <table class="admin-table" id="status-rooms-table">
+        <thead><tr><th>Mount</th><th>Raum</th><th>FRN</th><th>TX</th></tr></thead>
+        <tbody id="status-rooms-tbody"></tbody>
+      </table>
+      <button class="btn-save" onclick="loadStatus()" style="margin-top:4px">AKTUALISIEREN</button>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ── VU Meter setup ──────────────────────────────────────────────────────────
+const VU_COUNT = 16;
+// Build TX VU segments
+const vuWrap = document.getElementById("vu-segments");
+for (let i = 0; i < VU_COUNT; i++) {
+  const s = document.createElement("div");
+  s.className = "vu-seg"; s.id = "vu-" + i;
+  vuWrap.appendChild(s);
+}
+// Build RX VU segments
+const rxVuWrap = document.getElementById("rx-vu-segments");
+for (let i = 0; i < VU_COUNT; i++) {
+  const s = document.createElement("div");
+  s.className = "vu-seg"; s.id = "rxvu-" + i;
+  rxVuWrap.appendChild(s);
+}
+
+function setLed(id, on) {
+  const el = document.getElementById(id);
+  if (el) el.className = "led" + (on ? " active" : "");
+}
+
+// ── Config ──────────────────────────────────────────────────────────────────
+const TX_BASE = location.protocol + "//" + location.host;
+
+// Load UI config from server
+async function loadUIConfig() {
+  try {
+    const r = await fetch(`${TX_BASE}/api/config`);
+    if (!r.ok) return;
+    const cfg = await r.json();
+
+    // Title
+    if (cfg.title)
+      document.getElementById("page-title").textContent = cfg.title.toUpperCase();
+    if (cfg.subtitle)
+      document.getElementById("page-subtitle").textContent =
+        cfg.subtitle.toUpperCase() + " \u00B7 DE";
+
+    // Stream cards
+    const cfgHost = cfg.icecast_host || "localhost";
+    iceHost = (cfgHost === "localhost" || cfgHost === "127.0.0.1")
+              ? location.hostname : cfgHost;
+    icePort = cfg.icecast_port || 8000;
+    const cards = document.getElementById("stream-cards");
+    cards.innerHTML = "";
+    (cfg.streams || []).forEach((s, idx) => {
+      const id = "led-" + s.mount;
+      cards.innerHTML += `
+<div class="panel stream-card">
+  <div class="panel-header">
+    <div class="led" id="${id}"></div>
+    <div class="panel-title">${s.name.toUpperCase()}</div>
+    <div class="stream-freq">${s.channel || "CH-0" + (idx+1)}</div>
+  </div>
+  <div class="panel-body">
+    <audio controls preload="none"
+      onplay="setLed('${id}',true)" onpause="setLed('${id}',false)" onended="setLed('${id}',false)">
+      <source src="/stream/${s.mount}.mp3" type="audio/mpeg">
+    </audio>
+    <div class="stream-links">
+      <a href="/stream/${s.mount}.mp3">&#x25B6; Direkt-Link</a>
+    </div>
+  </div>
+</div>`;
+    });
+  } catch(e) {
+    // fallback: static cards already in HTML (none here, but graceful)
+    console.warn("Could not load UI config:", e);
+  }
+}
+
+// ── State ───────────────────────────────────────────────────────────────────
+let authToken = localStorage.getItem("frn_token")    || null;
+let callsign  = localStorage.getItem("frn_callsign") || "";
+let isAdmin   = localStorage.getItem("frn_is_admin") === "true";
+let ws = null, audioCtx = null, micSource = null;
+let workletNode = null, analyser = null;
+let txActive = false, levelTimer = null;
+let clientPollTimer = null;
+let clipActive = false;   // Clip wird gerade gesendet
+let iceHost = location.hostname;
+let icePort = 8000;
+
+// ── RX WebSocket PCM Player ──────────────────────────────────────────────────
+// Empfängt s16le PCM @ 8 kHz mono direkt vom FRN-Server (kein Icecast-Puffer).
+// Kein Echo beim PTT-Senden: während txActive=true werden Pakete einfach verworfen.
+
+const RX_SAMPLE_RATE = 8000;
+
+let rxAudioCtx    = null;
+let rxGainNode    = null;   // Lautstärke-Steuerung (TX-Mute + User-Mute)
+let rxAnalyser    = null;
+let rxMsdNode     = null;   // MediaStreamDestinationNode → iOS-Background-Audio
+let rxAudioEl     = null;   // unsichtbares <audio>-Element für iOS Lock-Screen
+let rxWs              = null;   // WebSocket zur /rx Endpoint
+let _rxReconnectDelay = 3000;   // Exponentieller Backoff (ms)
+let rxMuted       = false;  // User-Mute-Status
+let rxLevelTimer  = null;
+let rxScheduleTime = 0;     // Nächster Wiedergabe-Zeitpunkt im AudioContext
+
+// ── iOS Hintergrund-Audio via Icecast ────────────────────────────────────
+// iOS suspendiert Web Audio API wenn Display aus. Lösung: im Hintergrund
+// auf nativen <audio>-Stream (Icecast MP3) umschalten — das darf iOS
+// wie eine Musik-App im Hintergrund abspielen.
+let _bgAudioEl   = null;
+let _bgAudioMount = null;
+
+function _initBgAudio() {
+  if (_bgAudioEl) return;
+  _bgAudioEl = document.createElement("audio");
+  _bgAudioEl.setAttribute("playsinline", "");
+  _bgAudioEl.setAttribute("x-webkit-airplay", "allow");
+  _bgAudioEl.preload = "none";
+  _bgAudioEl.volume  = 1.0;
+  document.body.appendChild(_bgAudioEl);
+}
+
+function _startBgAudio(mount) {
+  _initBgAudio();
+  if (_bgAudioMount === mount && !_bgAudioEl.paused) return;
+  _bgAudioMount      = mount;
+  _bgAudioEl.src     = `/stream/${encodeURIComponent(mount)}.mp3`;
+  _bgAudioEl.play().catch(e => console.warn("BgAudio play:", e));
+  console.log("BgAudio: Icecast gestartet →", mount);
+}
+
+function _stopBgAudio() {
+  if (!_bgAudioEl || _bgAudioEl.paused) return;
+  _bgAudioEl.pause();
+  _bgAudioEl.src = "";
+  _bgAudioMount  = null;
+  console.log("BgAudio: gestoppt");
+}
+
+function ensureRxAudioCtx() {
+  if (rxAudioCtx) {
+    if (rxAudioCtx.state === "suspended") rxAudioCtx.resume().catch(() => {});
+    return;
+  }
+  try {
+    // Keine feste Samplerate — Browser benutzt Hardware-Rate und resampelt die
+    // eingehenden 8-kHz-Buffer automatisch. Verhindert Konflikte mit dem TX-
+    // AudioContext (der 8 kHz für den GSM-Worklet braucht).
+    rxAudioCtx = new AudioContext();
+    rxGainNode = rxAudioCtx.createGain();
+    rxAnalyser = rxAudioCtx.createAnalyser();
+    rxAnalyser.fftSize = 256;
+    rxGainNode.connect(rxAnalyser);
+    rxAnalyser.connect(rxAudioCtx.destination);
+
+    // iOS Background Audio: Web-Audio-Graph über MediaStreamDestinationNode an
+    // ein natives <audio>-Element koppeln. iOS registriert das als aktive
+    // Mediasession und lässt Audio + Netzwerk auch bei gesperrtem Bildschirm laufen.
+    if (typeof rxAudioCtx.createMediaStreamDestination === "function") {
+      rxMsdNode = rxAudioCtx.createMediaStreamDestination();
+      rxGainNode.connect(rxMsdNode);
+      rxAudioEl = document.createElement("audio");
+      rxAudioEl.srcObject = rxMsdNode.stream;
+      rxAudioEl.setAttribute("playsinline", "");
+      rxAudioEl.setAttribute("autoplay", "");
+      rxAudioEl.muted = false;
+      // Nicht in DOM hängen nötig, aber Safari braucht play()-Aufruf
+      rxAudioEl.play().catch(() => {});
+    }
+
+    // Lock-Screen / Control-Center Anzeige (iOS 15+, Chrome Android)
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title:  "FRN Webstream",
+        artist: "Free Radio Network",
+      });
+      navigator.mediaSession.setActionHandler("play",  () => rxAudioCtx?.resume());
+      navigator.mediaSession.setActionHandler("pause", () => {});  // Pause blockieren
+    }
+
+    clearInterval(rxLevelTimer);
+    rxLevelTimer = setInterval(updateRxLevel, 100);
+  } catch (e) {
+    console.warn("RX AudioContext:", e);
+  }
+}
+
+// Hintergrund/Vordergrund-Wechsel
+document.addEventListener("visibilitychange", () => {
+  const mount = document.getElementById("room-select")?.value;
+
+  if (document.visibilityState === "hidden") {
+    // Display aus / App im Hintergrund
+    clearInterval(rxLevelTimer); rxLevelTimer = null;
+    clearTimeout(clientPollTimer); clientPollTimer = null;
+    clearRxVu();
+
+    // Auf Icecast-Stream umschalten — überlebt iOS Display-Aus
+    if (mount && authToken) {
+      _startBgAudio(mount);
+    }
+  } else {
+    // Display an / App wieder sichtbar
+    _stopBgAudio();   // Icecast-Fallback stoppen
+
+    // AudioContext aufwecken
+    if (rxAudioCtx?.state === "suspended") rxAudioCtx.resume().catch(() => {});
+
+    // VU-Meter neu starten
+    if (rxAnalyser && !rxLevelTimer)
+      rxLevelTimer = setInterval(updateRxLevel, 100);
+
+    if (mount && authToken) {
+      if (!clientPollTimer) loadRoomClients(mount);
+      // WebSocket neu verbinden falls tot
+      const wsOk = rxWs && rxWs.readyState === WebSocket.OPEN;
+      if (!wsOk) connectRxWs(mount);
+    }
+  }
+});
+
+// AudioContext beim allerersten Pointer-Event anlegen (Browser-Autoplay-Policy)
+document.addEventListener("pointerdown", () => {
+  ensureRxAudioCtx();
+  _initBgAudio();   // iOS Audio-Session bereits bei erstem Touch öffnen
+}, { once: true, passive: true });
+
+function connectRxWs(mount) {
+  disconnectRxWs();
+  if (!authToken || !mount) return;
+  ensureRxAudioCtx();
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  rxWs = new WebSocket(`${proto}://${location.host}/rx?token=${authToken}&room=${encodeURIComponent(mount)}`);
+  rxWs.binaryType = "arraybuffer";
+  rxScheduleTime  = 0;
+
+  rxWs.onopen = () => {
+    _rxReconnectDelay = 3000;   // Backoff zurücksetzen
+    setRxLed(true);
+    // Lock-Screen-Anzeige mit aktuellem Raumnamen aktualisieren
+    if ("mediaSession" in navigator) {
+      const roomName = document.getElementById("room-select")?.selectedOptions[0]?.text || mount;
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title:  roomName,
+        artist: "FRN Webstream",
+      });
+      navigator.mediaSession.playbackState = "playing";
+    }
+    // iOS: sicherstellen dass <audio>-Element weiterläuft
+    rxAudioEl?.play().catch(() => {});
+  };
+
+  rxWs.onmessage = (evt) => {
+    if (!(evt.data instanceof ArrayBuffer)) return;
+    if (txActive) return;    // eigener TX — Pakete verwerfen (kein Echo)
+    if (!rxAudioCtx) return;
+    if (rxAudioCtx.state === "suspended") { rxAudioCtx.resume().catch(() => {}); return; }
+
+    const int16   = new Int16Array(evt.data);
+    const samples = int16.length;
+    const buf     = rxAudioCtx.createBuffer(1, samples, RX_SAMPLE_RATE);
+    const ch      = buf.getChannelData(0);
+    for (let i = 0; i < samples; i++) ch[i] = int16[i] / 32768.0;
+
+    const src = rxAudioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(rxGainNode);
+
+    const now = rxAudioCtx.currentTime;
+    // Lookahead: 250 ms — etwas mehr als ein Paket (200 ms).
+    // Liegt rxScheduleTime weniger als 50 ms vor der Gegenwart, springen wir
+    // 250 ms voraus statt nur 50 ms. Das füllt kurze Lücken (Sprechpausen,
+    // Netzwerkjitter) ohne hörbare Dopplungen zu erzeugen.
+    if (rxScheduleTime < now + 0.05) rxScheduleTime = now + 0.25;
+    src.start(rxScheduleTime);
+    rxScheduleTime += buf.duration;  // 200 ms pro FRN-Paket
+  };
+
+  let _rxReconnectDelay = 3000;
+  rxWs.onclose = (evt) => {
+    setRxLed(false);
+    clearRxVu();
+    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none";
+
+    if (!authToken) return;
+
+    // Code 4001 = Token abgelaufen → neu einloggen
+    if (evt.code === 4001) {
+      console.warn("Token abgelaufen — logout");
+      authToken = null;
+      localStorage.removeItem("frn_token");
+      showLogin();
+      return;
+    }
+
+    // Exponentieller Backoff: 3s → 6s → 12s → max 30s
+    const delay = _rxReconnectDelay;
+    _rxReconnectDelay = Math.min(_rxReconnectDelay * 2, 30000);
+    setTimeout(() => {
+      const m = document.getElementById("room-select")?.value;
+      if (m && authToken) {
+        _rxReconnectDelay = 3000;   // Reset nach erfolgreichem Reconnect
+        connectRxWs(m);
+      }
+    }, delay);
+  };
+
+  rxWs.onerror = () => { setRxLed(false); };
+}
+
+function disconnectRxWs() {
+  if (rxWs) {
+    const old = rxWs;
+    rxWs = null;
+    old.onclose = null;   // kein automatischer Reconnect
+    old.close();
+  }
+  setRxLed(false);
+  clearRxVu();
+}
+
+function toggleRxMute() {
+  rxMuted = !rxMuted;
+  _applyRxGain();
+  const btn = document.getElementById("rx-mute-btn");
+  btn.textContent = rxMuted ? "🔈" : "🔇";
+  btn.classList.toggle("muted", rxMuted);
+}
+
+function _applyRxGain() {
+  if (!rxGainNode) return;
+  const target = (rxMuted || txActive) ? 0.0 : 1.0;
+  rxGainNode.gain.setTargetAtTime(target, rxAudioCtx.currentTime, 0.01);
+}
+
+function setRxLed(on) {
+  document.getElementById("led-rx").className   = on ? "led active" : "led";
+  document.getElementById("rx-label").textContent = on ? "LIVE" : "RX";
+}
+
+let _lastRxLit = -1;
+function updateRxLevel() {
+  if (!rxAnalyser) return;
+  const data = new Uint8Array(rxAnalyser.frequencyBinCount);
+  rxAnalyser.getByteFrequencyData(data);
+  const avg = data.reduce((a, b) => a + b, 0) / data.length;
+  const lit = Math.round(Math.min(1, avg / 40) * VU_COUNT);
+  if (lit === _lastRxLit) return;   // kein DOM-Update wenn sich nichts ändert
+  _lastRxLit = lit;
+  for (let i = 0; i < VU_COUNT; i++) {
+    const s = document.getElementById("rxvu-" + i);
+    if (!s) continue;
+    s.className = "vu-seg" + (i < lit
+      ? " " + (i < 10 ? "lit-green" : i < 13 ? "lit-yellow" : "lit-red")
+      : "");
+  }
+}
+
+function clearRxVu() {
+  for (let i = 0; i < VU_COUNT; i++) {
+    const s = document.getElementById("rxvu-" + i);
+    if (s) s.className = "vu-seg";
+  }
+}
+
+// ── Room client list ─────────────────────────────────────────────────────────
+function onRoomChange() {
+  const mount = document.getElementById("room-select").value;
+  clearTimeout(clientPollTimer);
+  connectRxWs(mount);
+  loadRoomClients(mount);
+}
+
+async function loadRoomClients(mount) {
+  if (!authToken || !mount) return;
+  const ul = document.getElementById("user-list");
+  try {
+    const resp = await fetch(`${TX_BASE}/api/rooms/${mount}/clients?token=${authToken}`);
+    if (!resp.ok) { renderUserList([]); return; }
+    const data = await resp.json();
+    renderUserList(data.clients || []);
+    const cnt = (data.clients || []).length;
+    document.getElementById("room-user-count").textContent =
+      cnt ? `${cnt} QRV` : "";
+    document.getElementById("led-room").className = cnt ? "led active" : "led";
+  } catch {
+    renderUserList([]);
+  }
+  clientPollTimer = setTimeout(
+    () => loadRoomClients(document.getElementById("room-select")?.value),
+    15000
+  );
+}
+
+function renderUserList(clients) {
+  const ul = document.getElementById("user-list");
+  if (!clients.length) {
+    ul.innerHTML = '<div class="user-empty">— keine Benutzer verbunden —</div>';
+    return;
+  }
+  const typeLabel = { "0": "⇄ XL", "1": "⊕ GW", "2": "▶ PC" };
+  ul.innerHTML = clients.map(c => `
+    <div class="user-item">
+      <span class="user-dot"></span>
+      <span class="user-callsign">${esc(c.callsign)}</span>
+      <span class="user-desc">${esc(c.desc)}</span>
+      <span class="user-type">${typeLabel[c.type] || "▶"}</span>
+    </div>`).join("");
+}
+
+// ── Boot ────────────────────────────────────────────────────────────────────
+window.addEventListener("DOMContentLoaded", () => {
+  loadUIConfig();
+  if (authToken) fetchRoomsAndShow();
+  document.addEventListener("keydown", e => {
+    if (e.code === "Space" &&
+        document.getElementById("tx-section").style.display === "block") {
+      e.preventDefault();
+      if (!txActive) pttStart();
+    }
+  });
+  document.addEventListener("keyup", e => {
+    if (e.code === "Space") pttStop();
+  });
+  // Close admin on Escape
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") closeAdmin();
+  });
+});
+
+// ── Login ───────────────────────────────────────────────────────────────────
+function updateCallsignHint() {
+  const val = document.getElementById("username").value;
+  // E-Mail erkannt → Callsign-Feld anzeigen
+  document.getElementById("callsign-row").style.display =
+    val.includes("@") ? "flex" : "none";
+}
+
+async function doLogin() {
+  const user     = document.getElementById("username").value.trim();
+  const pass     = document.getElementById("password").value;
+  const inputCallsign = document.getElementById("callsign")?.value.trim() || "";
+  document.getElementById("login-error").textContent = "";
+  const payload = { username: user, password: pass };
+  if (inputCallsign) payload.callsign = inputCallsign;
+  try {
+    const resp = await fetch(`${TX_BASE}/api/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      document.getElementById("login-error").textContent = data.error || "Fehler";
+      return;
+    }
+    authToken    = data.token;
+    callsign     = data.callsign;
+    isAdmin      = data.is_admin || false;
+    localStorage.setItem("frn_token",        authToken);
+    localStorage.setItem("frn_callsign",     callsign);
+    localStorage.setItem("frn_is_admin",     isAdmin);
+    localStorage.setItem("frn_default_room", data.default_room || "");
+    showTxPanel(data.rooms, data.default_room || "");
+  } catch(err) {
+    document.getElementById("login-error").textContent =
+      "Verbindungsfehler: " + err.message;
+  }
+}
+
+async function fetchRoomsAndShow() {
+  try {
+    const resp = await fetch(`${TX_BASE}/api/rooms?token=${authToken}`);
+    if (!resp.ok) { doLogout(); return; }
+    const data = await resp.json();
+    showTxPanel(data.rooms, localStorage.getItem("frn_default_room") || "");
+  } catch { doLogout(); }
+}
+
+function doLogout() {
+  if (authToken) fetch(`${TX_BASE}/api/logout`, {
+    method: "POST", headers: {"X-Token": authToken}
+  }).catch(() => {});
+  authToken = null; callsign = ""; isAdmin = false;
+  clipActive = false;
+  document.getElementById("clips-section").style.display = "none";
+  localStorage.removeItem("frn_token");
+  localStorage.removeItem("frn_callsign");
+  localStorage.removeItem("frn_is_admin");
+  if (ws) ws.close();
+  clearTimeout(clientPollTimer); clientPollTimer = null;
+  disconnectRxWs();
+  clearInterval(rxLevelTimer); rxLevelTimer = null;
+  if (rxAudioCtx) { rxAudioCtx.close(); rxAudioCtx = null; }
+  rxGainNode = null; rxAnalyser = null;
+  closeAdmin();
+  document.getElementById("login-section").style.display      = "block";
+  document.getElementById("tx-section").style.display         = "none";
+  document.getElementById("room-panel").style.display         = "none";
+  document.getElementById("room-section-label").style.display = "none";
+  document.getElementById("stream-cards").style.display       = "";
+  document.getElementById("rx-section-label").style.display  = "";
+  document.getElementById("password").value = "";
+}
+
+let adminRooms = {};  // mount → name, für Admin-Dropdowns
+
+function showTxPanel(rooms, defaultRoom = "") {
+  document.getElementById("login-section").style.display    = "none";
+  document.getElementById("tx-section").style.display       = "block";
+  document.getElementById("room-panel").style.display       = "block";
+  document.getElementById("room-section-label").style.display = "flex";
+  document.getElementById("stream-cards").style.display     = "none";
+  document.getElementById("rx-section-label").style.display = "none";
+  document.getElementById("tx-info").textContent = callsign;
+  document.getElementById("admin-btn").style.display = isAdmin ? "block" : "none";
+
+  adminRooms = {};
+  const sel = document.getElementById("room-select");
+  sel.innerHTML = "";
+  for (const r of rooms) {
+    adminRooms[r.mount] = r.name;
+    const opt = document.createElement("option");
+    opt.value = r.mount; opt.textContent = r.name;
+    sel.appendChild(opt);
+  }
+
+  // Standard-Raum vorwählen (falls gesetzt und vorhanden)
+  const startMount = (defaultRoom && adminRooms[defaultRoom])
+    ? defaultRoom
+    : (rooms[0]?.mount || "");
+  if (startMount) sel.value = startMount;
+
+  if (startMount) {
+    loadRoomClients(startMount);
+    connectRxWs(startMount);
+  }
+  loadClips();
+}
+
+// ── PTT ─────────────────────────────────────────────────────────────────────
+async function pttStart(e) {
+  if (e) {
+    e.preventDefault();
+    if (e.pointerId != null && e.target?.setPointerCapture) {
+      try { e.target.setPointerCapture(e.pointerId); } catch {}
+    }
+  }
+  if (txActive || clipActive) return;
+  txActive = true;
+  _applyRxGain();      // sofort stumm schalten (kein Echo durch eigene Stimme)
+  setStatus("Verbinde...", "");
+
+  let stream;
+  try {
+    // sampleRate als "ideal" (nicht exakt) — viele Browser/ALSA ignorieren exact-Constraints
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        sampleRate: { ideal: 8000 },
+      }
+    });
+  } catch(err) {
+    txActive = false; _applyRxGain();
+    setStatus("Mikrofon-Fehler: " + err.message, "error"); return;
+  }
+
+  // AudioContext ohne feste Rate — der Server resampelt sowieso von beliebiger Rate auf 8 kHz.
+  // Kein sampleRate-Konflikt mit rxAudioCtx.
+  audioCtx = new AudioContext();
+  const sampleRate = audioCtx.sampleRate;
+
+  const room = document.getElementById("room-select").value;
+  ws = new WebSocket(
+    `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${authToken}&room=${room}`);
+  ws.binaryType = "arraybuffer";
+  ws.onmessage = onWsMessage;
+  ws.onerror   = () => setStatus("WebSocket-Fehler", "error");
+  ws.onclose   = () => {
+    stopAudio();
+    if (txActive) setStatus("Verbindung getrennt", "error");
+    txActive = false;
+    _applyRxGain();
+    document.getElementById("ptt-btn").classList.remove("active");
+    document.getElementById("led-tx").className = "led";
+  };
+
+  const wsReady = await new Promise((res, rej) => {
+    ws.onopen = () => res(true);
+    setTimeout(() => rej(new Error("WS timeout")), 5000);
+  }).catch(err => {
+    txActive = false; _applyRxGain();
+    setStatus("Verbindungsfehler: " + err.message, "error");
+    stopAudio(); return false;
+  });
+  if (!wsReady) return;   // abort — .catch-return oben verlässt nicht pttStart
+
+  try {
+    await audioCtx.audioWorklet.addModule(`${TX_BASE}/tx_processor.js`);
+  } catch(err) {
+    txActive = false; _applyRxGain();
+    setStatus("AudioWorklet-Fehler: " + err.message, "error");
+    ws.close(); return;
+  }
+
+  micSource   = audioCtx.createMediaStreamSource(stream);
+  workletNode = new AudioWorkletNode(audioCtx, "tx-processor");
+  analyser    = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  micSource.connect(workletNode);
+  micSource.connect(analyser);
+
+  workletNode.port.onmessage = (evt) => {
+    if (ws && ws.readyState === WebSocket.OPEN && txActive) ws.send(evt.data);
+  };
+  ws.send(JSON.stringify({ cmd: "PTT_START", sampleRate }));
+  levelTimer = setInterval(updateLevel, 100);
+}
+
+function pttStop(e) {
+  if (e) e.preventDefault();
+  if (!txActive && !clipActive) { stopAudio(); return; }
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ cmd: "PTT_STOP" }));
+  } else {
+    // WS noch nicht geöffnet oder bereits zu — sofort abbrechen
+    txActive = false;
+    _applyRxGain();
+    stopAudio();
+    if (ws) { const old = ws; ws = null; old.onclose = null; old.close(); }
+  }
+}
+
+function stopAudio() {
+  clearInterval(levelTimer);
+  for (let i = 0; i < VU_COUNT; i++) {
+    const s = document.getElementById("vu-" + i);
+    if (s) s.className = "vu-seg";
+  }
+  document.getElementById("level-bar").style.width = "0%";
+  if (workletNode) { workletNode.disconnect(); workletNode = null; }
+  if (micSource)   { micSource.disconnect();   micSource   = null; }
+  if (analyser)    { analyser.disconnect();     analyser    = null; }
+  if (audioCtx)    { audioCtx.close();          audioCtx    = null; }
+}
+
+function onWsMessage(evt) {
+  if (typeof evt.data !== "string") return;
+  let msg;
+  try { msg = JSON.parse(evt.data); } catch { return; }
+
+  if (msg.type === "tx_active") {
+    if (!clipActive) {
+      txActive = true;
+      document.getElementById("ptt-btn").classList.add("active");
+    }
+    _applyRxGain();
+    document.getElementById("led-tx").className = "led tx";
+    const roomName = document.getElementById("room-select").selectedOptions[0]?.text || "";
+    setStatus("● SENDE: " + (clipActive ? (window._activeClipLabel || roomName) : roomName), "ok");
+    if (msg.beep) playBeep();
+  } else if (msg.type === "tx_waiting") {
+    setStatus("⏳ WARTE AUF TX-FREIGABE...", "busy");
+  } else if (msg.type === "tx_stopped") {
+    if (clipActive) {
+      clipActive = false;
+      setClipButtonsSending(null);
+      updateClipButtons();
+    }
+    txActive = false;
+    _applyRxGain();
+    document.getElementById("ptt-btn").classList.remove("active");
+    document.getElementById("led-tx").className = "led";
+    setStatus("BEREIT", ""); stopAudio(); ws?.close();
+  } else if (msg.type === "error") {
+    if (clipActive) {
+      clipActive = false;
+      setClipButtonsSending(null);
+      updateClipButtons();
+    }
+    txActive = false;
+    _applyRxGain();
+    document.getElementById("ptt-btn").classList.remove("active");
+    document.getElementById("led-tx").className = "led";
+    setStatus("FEHLER: " + msg.msg, "error"); stopAudio(); ws?.close();
+  } else if (msg.type === "ready") {
+    setStatus("BEREIT", "");
+  }
+}
+
+// ── Clip-Buttons ─────────────────────────────────────────────────────────────
+window._activeClipLabel = "";
+
+async function loadClips() {
+  if (!authToken) return;
+  try {
+    const r = await fetch(`${TX_BASE}/api/clips?token=${authToken}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    renderClips(data.clips || []);
+  } catch(e) { /* no clips */ }
+}
+
+function renderClips(clips) {
+  const section = document.getElementById("clips-section");
+  const grid    = document.getElementById("clips-grid");
+  if (!clips.length) { section.style.display = "none"; return; }
+  section.style.display = "";
+  grid.innerHTML = clips.map(c =>
+    `<button class="clip-btn" data-id="${esc(c.id)}" data-label="${esc(c.label)}"
+       onclick="sendClip('${esc(c.id)}','${esc(c.label)}')">${esc(c.label)}</button>`
+  ).join("");
+}
+
+function updateClipButtons() {
+  const busy = txActive || clipActive;
+  document.querySelectorAll(".clip-btn").forEach(b => {
+    b.disabled = busy;
+  });
+}
+
+function setClipButtonsSending(clipId) {
+  document.querySelectorAll(".clip-btn").forEach(b => {
+    b.classList.toggle("sending", b.dataset.id === clipId);
+  });
+}
+
+async function sendClip(id, label) {
+  if (txActive || clipActive) return;
+  if (!authToken) return;
+
+  const room = document.getElementById("room-select").value;
+  if (!room) return;
+
+  clipActive = true;
+  window._activeClipLabel = label;
+  updateClipButtons();
+  setClipButtonsSending(id);
+  setStatus("⏳ Verbinde für Clip...", "");
+
+  // Öffne frische WS-Verbindung (kein Audio-Worklet nötig)
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${authToken}&room=${encodeURIComponent(room)}`);
+  ws.binaryType = "arraybuffer";
+  ws.onmessage  = onWsMessage;
+  ws.onerror    = () => {
+    clipActive = false; setClipButtonsSending(null); updateClipButtons();
+    setStatus("WebSocket-Fehler", "error");
+  };
+  ws.onclose    = () => {
+    if (clipActive) {
+      clipActive = false; setClipButtonsSending(null); updateClipButtons();
+      setStatus("BEREIT", "");
+    }
+    document.getElementById("led-tx").className = "led";
+  };
+
+  const ok = await new Promise(res => {
+    ws.onopen = () => res(true);
+    setTimeout(() => res(false), 5000);
+  });
+  if (!ok) {
+    clipActive = false; setClipButtonsSending(null); updateClipButtons();
+    setStatus("Verbindungsfehler", "error");
+    ws.close();
+    return;
+  }
+
+  ws.send(JSON.stringify({ cmd: "PLAY_CLIP", id }));
+}
+
+function playBeep() {
+  try {
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.4, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.18);
+    ctx.close().catch(() => {});
+  } catch(e) {}
+}
+
+function setStatus(text, cls) {
+  const el = document.getElementById("tx-status");
+  el.textContent = text; el.className = cls;
+}
+function muteStreams(mute) {
+  // Icecast stream-card audio elements (sichtbar wenn ausgeloggt)
+  document.querySelectorAll("audio").forEach(a => { a.muted = mute; });
+}
+let _lastTxLit = -1;
+function updateLevel() {
+  if (!analyser) return;
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(data);
+  const avg = data.reduce((a, b) => a + b, 0) / data.length;
+  const pct = Math.min(100, avg * 2);
+  const lit = Math.round(pct / 100 * VU_COUNT);
+  if (lit === _lastTxLit) return;   // kein DOM-Update wenn sich nichts ändert
+  _lastTxLit = lit;
+  document.getElementById("level-bar").style.width = pct + "%";
+  for (let i = 0; i < VU_COUNT; i++) {
+    const s = document.getElementById("vu-" + i);
+    if (!s) continue;
+    s.className = "vu-seg" + (i < lit
+      ? " " + (i < 10 ? "lit-green" : i < 13 ? "lit-yellow" : "lit-red")
+      : "");
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ADMIN
+// ══════════════════════════════════════════════════════════════════════════
+function openAdmin() {
+  document.getElementById("admin-overlay").classList.add("open");
+  showAdminTab("users");
+  loadUsers();
+}
+function closeAdmin() {
+  document.getElementById("admin-overlay").classList.remove("open");
+}
+
+function showAdminTab(name) {
+  document.querySelectorAll(".admin-tab").forEach(b =>
+    b.classList.toggle("active", b.textContent.toLowerCase().includes(name.substring(0,4).toLowerCase()) ||
+    (name==="status" && b.textContent.toLowerCase().includes("stat"))));
+  document.querySelectorAll(".admin-tab-content").forEach(d =>
+    d.classList.remove("active"));
+  const el = document.getElementById("admin-tab-" + name);
+  if (el) {
+    el.classList.add("active");
+    if (name === "status") loadStatus();
+    if (name === "rooms")  loadRooms();
+  }
+}
+
+function adminFetch(url, opts = {}) {
+  const sep = url.includes("?") ? "&" : "?";
+  return fetch(`${TX_BASE}${url}${sep}token=${authToken}`, opts);
+}
+
+// ── Users ──────────────────────────────────────────────────────────────────
+async function loadUsers() {
+  const r = await adminFetch("/api/admin/users");
+  const data = await r.json();
+  const tbody = document.getElementById("users-tbody");
+  tbody.innerHTML = "";
+
+  // Standard-Raum-Dropdown im Neu-Formular befüllen
+  const roomOpts = Object.entries(adminRooms || {})
+    .map(([m, n]) => `<option value="${esc(m)}">${esc(n)}</option>`).join("");
+  const sel = document.getElementById("nu-default-room");
+  if (sel) sel.innerHTML = `<option value="">— kein Standard —</option>${roomOpts}`;
+
+  (data.users || []).forEach(u => {
+    const roleCls  = u.is_admin ? 'badge-admin' : (u.frn_only ? 'badge-frn' : 'badge-user');
+    const roleText = u.is_admin ? 'Admin'       : (u.frn_only ? 'FRN'       : 'User');
+    const roomName = adminRooms?.[u.default_room] || (u.default_room ? u.default_room : '—');
+
+    // Hauptzeile
+    const tr = document.createElement("tr");
+    tr.dataset.username = u.username;
+    tr.innerHTML = `
+      <td><b>${esc(u.username)}</b><br>
+          <small style="color:var(--muted);font-size:0.8em">${esc(u.callsign)}</small></td>
+      <td><span style="color:var(--muted);font-size:0.85em">${esc(roomName)}</span></td>
+      <td><span class="badge ${roleCls}">${roleText}</span></td>
+      <td style="white-space:nowrap">
+        <button class="btn-icon edit" style="margin-right:4px"
+          onclick="toggleUserEdit(this)">✎</button>
+        <button class="btn-icon"
+          onclick="deleteUser('${esc(u.username)}')">✕</button>
+      </td>`;
+    tbody.appendChild(tr);
+
+    // Edit-Zeile (versteckt) — username nur als data-Attribut, keine IDs mit Sonderzeichen
+    const roomSelOpts = `<option value="">— kein Standard —</option>${
+      Object.entries(adminRooms || {}).map(([m, n]) =>
+        `<option value="${esc(m)}" ${u.default_room === m ? 'selected' : ''}>${esc(n)}</option>`
+      ).join("")}`;
+    const etr = document.createElement("tr");
+    etr.className = "user-edit-row";
+    etr.dataset.username = u.username;
+    etr.style.display = "none";
+    etr.innerHTML = `
+      <td colspan="4" style="padding:10px 10px 14px;background:var(--inset)">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+          <div class="form-field">
+            <label>Callsign</label>
+            <input class="ue-cs" value="${esc(u.callsign)}" style="background:var(--panel)">
+          </div>
+          <div class="form-field">
+            <label>Standard-Raum</label>
+            <select class="ue-room" style="background:var(--panel)">${roomSelOpts}</select>
+          </div>
+        </div>
+        <button class="btn-save" style="font-size:0.62em;padding:7px 16px"
+          onclick="saveUser(this)">SPEICHERN</button>
+        <span class="ue-msg" style="margin-left:10px;font-size:0.8em"></span>
+      </td>`;
+    tbody.appendChild(etr);
+  });
+}
+
+function toggleUserEdit(btn) {
+  const etr = btn.closest("tr").nextElementSibling;
+  if (!etr || !etr.classList.contains("user-edit-row")) return;
+  etr.style.display = etr.style.display === "none" ? "" : "none";
+}
+
+async function saveUser(btn) {
+  const etr      = btn.closest("tr");
+  const username = etr.dataset.username;
+  const cs       = etr.querySelector(".ue-cs")?.value.trim();
+  const room     = etr.querySelector(".ue-room")?.value;
+  const msg      = etr.querySelector(".ue-msg");
+  const r = await adminFetch(`/api/admin/users/${encodeURIComponent(username)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ callsign: cs, default_room: room }),
+  });
+  if (r.ok) {
+    if (msg) { msg.style.color = "var(--green2)"; msg.textContent = "Gespeichert ✓"; }
+    setTimeout(() => loadUsers(), 800);
+  } else {
+    if (msg) { msg.style.color = "var(--red)"; msg.textContent = "Fehler"; }
+  }
+}
+
+function toggleFrnOnly() {
+  const frn = document.getElementById("nu-frn-only").checked;
+  const pwField = document.getElementById("nu-pw-field");
+  if (pwField) pwField.style.display = frn ? "none" : "";
+}
+
+async function addUser() {
+  const msg   = document.getElementById("msg-users");
+  const uname    = document.getElementById("nu-username").value.trim();
+  const cs       = document.getElementById("nu-callsign").value.trim();
+  const pw       = document.getElementById("nu-password").value;
+  const admin    = document.getElementById("nu-admin").checked;
+  const frnOnly  = document.getElementById("nu-frn-only").checked;
+  const defRoom  = document.getElementById("nu-default-room")?.value || "";
+
+  msg.textContent = ""; msg.className = "admin-msg";
+  if (!uname) { showMsg("msg-users", "Benutzername erforderlich", "error"); return; }
+  if (!frnOnly && !pw) { showMsg("msg-users", "Passwort erforderlich (oder FRN-Login aktivieren)", "error"); return; }
+
+  const r = await adminFetch("/api/admin/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: uname, callsign: cs, password: pw,
+                           is_admin: admin, frn_only: frnOnly, default_room: defRoom })
+  });
+  const data = await r.json();
+  if (!r.ok) { showMsg("msg-users", data.error, "error"); return; }
+  showMsg("msg-users", `Benutzer '${uname}' angelegt.`, "ok");
+  document.getElementById("nu-username").value  = "";
+  document.getElementById("nu-callsign").value  = "";
+  document.getElementById("nu-password").value  = "";
+  document.getElementById("nu-admin").checked   = false;
+  document.getElementById("nu-frn-only").checked = false;
+  document.getElementById("nu-pw-field").style.display = "";
+  const dr = document.getElementById("nu-default-room"); if (dr) dr.value = "";
+  loadUsers();
+}
+
+async function deleteUser(username) {
+  if (!confirm(`Benutzer '${username}' wirklich löschen?`)) return;
+  const r = await adminFetch(`/api/admin/users/${encodeURIComponent(username)}`,
+    { method: "DELETE" });
+  const data = await r.json();
+  if (!r.ok) { showMsg("msg-users", data.error, "error"); return; }
+  showMsg("msg-users", `Benutzer '${username}' gelöscht.`, "ok");
+  loadUsers();
+}
+
+// ── Rooms ──────────────────────────────────────────────────────────────────
+async function loadRooms() {
+  const r = await adminFetch("/api/admin/rooms");
+  const data = await r.json();
+  const tbody = document.getElementById("rooms-tbody");
+  tbody.innerHTML = "";
+  (data.rooms || []).forEach(room => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><code>${esc(room.mount)}</code></td>
+      <td>${esc(room.name)}</td>
+      <td><small>${esc(room.callsign)}</small></td>
+      <td><small>${esc(room.frn_server)}:${room.frn_port}</small></td>
+      <td><button class="btn-icon" onclick="deleteRoom('${esc(room.mount)}')">✕</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function addRoom() {
+  const mount = document.getElementById("nr-mount").value.trim();
+  const name  = document.getElementById("nr-name").value.trim();
+  const cs    = document.getElementById("nr-callsign").value.trim();
+  const email = document.getElementById("nr-email").value.trim();
+  const pw    = document.getElementById("nr-password").value;
+  const srv   = document.getElementById("nr-server").value.trim();
+  const port  = document.getElementById("nr-port").value.trim();
+
+  if (!mount || !name || !email || !pw) {
+    showMsg("msg-rooms", "Mount, Name, E-Mail und Passwort erforderlich", "error"); return;
+  }
+
+  const body = { mount, name, callsign: cs, email, password: pw };
+  if (srv)  body.frn_server = srv;
+  if (port) body.frn_port   = parseInt(port);
+
+  const r = await adminFetch("/api/admin/rooms", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = await r.json();
+  if (!r.ok) { showMsg("msg-rooms", data.error, "error"); return; }
+  showMsg("msg-rooms", `Raum '${mount}' angelegt.`, "ok");
+  ["nr-mount","nr-name","nr-callsign","nr-email","nr-password","nr-server","nr-port"]
+    .forEach(id => document.getElementById(id).value = "");
+  loadRooms();
+  // Refresh room selector
+  fetchRoomsAndShow();
+}
+
+async function deleteRoom(mount) {
+  if (!confirm(`Raum '${mount}' wirklich löschen?`)) return;
+  const r = await adminFetch(`/api/admin/rooms/${encodeURIComponent(mount)}`,
+    { method: "DELETE" });
+  const data = await r.json();
+  if (!r.ok) { showMsg("msg-rooms", data.error, "error"); return; }
+  showMsg("msg-rooms", `Raum '${mount}' gelöscht.`, "ok");
+  loadRooms(); fetchRoomsAndShow();
+}
+
+// ── Status ─────────────────────────────────────────────────────────────────
+async function loadStatus() {
+  const r = await adminFetch("/api/admin/status");
+  const d = await r.json();
+
+  document.getElementById("status-grid").innerHTML = `
+    <div class="status-card">
+      <div class="status-card-label">Räume</div>
+      <div class="status-card-value">${d.rooms?.length ?? 0}</div>
+    </div>
+    <div class="status-card">
+      <div class="status-card-label">Benutzer</div>
+      <div class="status-card-value">${d.users ?? 0}</div>
+    </div>
+    <div class="status-card">
+      <div class="status-card-label">Aktive Sessions</div>
+      <div class="status-card-value">${d.active_tokens ?? 0}</div>
+    </div>`;
+
+  const tbody = document.getElementById("status-rooms-tbody");
+  tbody.innerHTML = "";
+  (d.rooms || []).forEach(room => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><code>${esc(room.mount)}</code></td>
+      <td>${esc(room.name)}</td>
+      <td><span class="badge ${room.connected ? 'badge-ok' : 'badge-user'}">
+        ${room.connected ? 'Verbunden' : 'Getrennt'}</span></td>
+      <td><span class="badge ${room.tx_locked ? 'badge-admin' : 'badge-user'}">
+        ${room.tx_locked ? 'AKTIV' : 'Frei'}</span></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function showMsg(id, text, cls) {
+  const el = document.getElementById(id);
+  el.textContent = text; el.className = "admin-msg " + cls;
+  setTimeout(() => { if (el.textContent === text) el.textContent = ""; }, 4000);
+}
+function esc(s) {
+  return String(s ?? "")
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+</script>
+</body>
+</html>
