@@ -1,12 +1,10 @@
-# Secrets & lokale Configs
-config.ini
-# config/config.json ist die Vorlage und bleibt im Repo
-# Lokale Overrides (z.B. mit echter IP/Passwort) hier ausschließen:
-config/config.local.json
-*.log
-*.db
-*.opus
 __pycache__/
 *.pyc
-recordings/
-archive/
+transcription.log
+tx_tokens.json
+clips/
+*.log
+
+env.*
+config.json
+tx_users.json

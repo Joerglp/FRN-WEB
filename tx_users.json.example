@@ -1,0 +1,12 @@
+{
+  "users": [
+    {
+      "username": "admin",
+      "callsign": "WebTX-Admin",
+      "is_admin": true,
+      "default_room": "",
+      "frn_only": false,
+      "password_hash": ""
+    }
+  ]
+}
