@@ -454,6 +454,10 @@
     <span>Angezeigt:</span>
     <span class="stat-val" id="stat-shown">0</span>
   </div>
+  <div class="stat-item" id="stat-pending-item" style="display:none">
+    <span>Warteschlange:</span>
+    <span class="stat-val" id="stat-pending" style="color:var(--amber)">0</span>
+  </div>
   <div class="stat-item" id="stat-filter-info" style="display:none">
     <span style="color:var(--amber)">▲ Filter aktiv</span>
   </div>
@@ -602,6 +606,10 @@ async function loadEntries(append = false) {
 
     totalCount = data.total || 0;
     document.getElementById('stat-total').textContent = totalCount;
+
+    const pending = data.pending || 0;
+    document.getElementById('stat-pending').textContent = pending;
+    document.getElementById('stat-pending-item').style.display = pending > 0 ? '' : 'none';
 
     const container = document.getElementById('main-content');
 

@@ -393,6 +393,21 @@ audio {
 .rx-mute-btn:hover { border-color: var(--accent); color: var(--accent); }
 .rx-mute-btn.muted { border-color: var(--red); color: var(--red); }
 
+/* ── Hintergrund-Audio-Schalter ── */
+.bgaudio-btn, .wakelock-btn {
+  width: 38px; height: 38px; flex-shrink: 0; align-self: center;
+  background: var(--inset); border: 1px solid var(--dim); border-radius: 8px;
+  color: var(--muted); font-size: 1.1em;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; transition: border-color 0.2s, color 0.2s, box-shadow 0.2s;
+}
+.bgaudio-btn:hover, .wakelock-btn:hover { border-color: var(--accent); color: var(--accent); }
+.bgaudio-btn.active, .wakelock-btn.active {
+  border-color: var(--green); color: var(--green);
+  box-shadow: 0 0 8px rgba(76,175,80,0.35);
+}
+.wakelock-btn.unsupported { opacity: 0.3; cursor: default; pointer-events: none; }
+
 /* ── Footer ── */
 .site-footer {
   padding: 20px 20px 0;
@@ -581,6 +596,165 @@ audio {
   font-size: 1.3em; font-weight: 700; color: var(--accent);
 }
 
+/* ── Aufnahme-Modal ── */
+#record-overlay {
+  display: none; position: fixed; inset: 0; z-index: 1100;
+  background: rgba(0,0,0,0.88); backdrop-filter: blur(4px);
+  align-items: center; justify-content: center;
+  padding: 20px 16px;
+}
+#record-overlay.open { display: flex; }
+.record-panel {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 16px; width: 100%; max-width: 360px;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.8), 0 0 0 1px rgba(79,195,247,0.1);
+  overflow: hidden;
+}
+.record-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+  background: linear-gradient(135deg, #0d1a2e, #111827);
+}
+.record-header h3 {
+  font-family: 'Orbitron', monospace; font-size: 0.78em;
+  font-weight: 700; letter-spacing: 0.08em; color: var(--accent); flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.record-body { padding: 20px 18px; display: flex; flex-direction: column; gap: 14px; }
+
+/* VU in modal */
+.record-vu {
+  display: flex; gap: 3px; height: 22px; align-items: stretch;
+}
+.record-vu-seg {
+  flex: 1; border-radius: 2px; background: var(--dim); transition: background 0.04s;
+}
+
+/* Timer */
+#record-timer {
+  font-family: 'Orbitron', monospace; font-size: 1.6em; font-weight: 700;
+  color: var(--accent2); text-align: center; letter-spacing: 0.12em;
+}
+#record-timer.recording { color: var(--red); }
+
+/* Status */
+#record-status {
+  font-family: 'Share Tech Mono', monospace; font-size: 0.72em;
+  letter-spacing: 0.06em; color: var(--muted); text-align: center;
+  min-height: 1.4em;
+}
+#record-status.ok    { color: var(--green2); }
+#record-status.error { color: var(--red); }
+
+/* Big record button */
+#record-btn {
+  width: 100%; padding: 14px;
+  background: linear-gradient(135deg, #1a3a5c, #0d2540);
+  border: 1px solid var(--accent); border-radius: 10px;
+  color: var(--accent); font-family: 'Orbitron', monospace;
+  font-size: 0.78em; font-weight: 700; letter-spacing: 0.1em;
+  cursor: pointer; transition: background 0.15s, box-shadow 0.15s;
+}
+#record-btn:hover {
+  background: linear-gradient(135deg, #1e4a72, #112d50);
+  box-shadow: 0 0 16px rgba(79,195,247,0.25);
+}
+#record-btn.recording {
+  background: linear-gradient(135deg, #5a1210, #3a0a08);
+  border-color: var(--red); color: var(--red);
+  animation: led-pulse 0.7s ease-in-out infinite alternate;
+}
+
+/* Preview audio */
+#record-preview {
+  width: 100%; height: 36px; accent-color: var(--accent);
+  filter: brightness(0.92) saturate(0.8);
+}
+
+/* Action row */
+.record-actions {
+  display: flex; gap: 8px; flex-wrap: wrap;
+}
+.record-actions button {
+  flex: 1; padding: 9px 10px;
+  background: var(--inset); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.7em; letter-spacing: 0.06em;
+  cursor: pointer; transition: border-color 0.15s, color 0.15s;
+  min-width: 80px;
+}
+.record-actions button:hover:not(:disabled) { border-color: var(--chrome); color: var(--text); }
+.record-actions button:disabled { opacity: 0.35; cursor: not-allowed; }
+#rec-save-btn { border-color: var(--accent); color: var(--accent); }
+#rec-save-btn:hover:not(:disabled) {
+  border-color: var(--accent); color: var(--accent);
+  box-shadow: 0 0 10px rgba(79,195,247,0.2);
+}
+#rec-del-btn  { border-color: var(--red); color: var(--red); }
+#rec-del-btn:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+
+/* ── Clip-Buttons ── */
+.clips-wrap {
+  margin-top: 14px; padding: 10px 12px;
+  background: var(--inset); border: 1px solid var(--border); border-radius: 8px;
+}
+.clips-label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.58em; letter-spacing: 0.14em;
+  color: var(--muted); text-transform: uppercase; margin-bottom: 8px;
+}
+.clips-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 6px;
+}
+.clip-item { position: relative; }
+.clip-btn {
+  background: var(--panel);
+  border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.75em; letter-spacing: 0.03em;
+  padding: 10px 6px 10px; cursor: pointer; text-align: center;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  line-height: 1.3; min-height: 42px; width: 100%;
+  display: flex; align-items: center; justify-content: center;
+}
+.clip-btn:hover:not(:disabled) {
+  border-color: var(--accent); color: var(--accent);
+  background: rgba(79,195,247,0.06);
+}
+.clip-btn.sending {
+  border-color: var(--red); color: var(--red);
+  background: rgba(239,83,80,0.08);
+  animation: led-pulse 0.7s ease-in-out infinite alternate;
+}
+.clip-btn:disabled { opacity: 0.38; cursor: not-allowed; }
+/* Grüner Punkt = eigene Aufnahme vorhanden */
+.clip-btn.has-recording::after {
+  content: ''; position: absolute;
+  top: 5px; right: 5px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--green2);
+  box-shadow: 0 0 4px rgba(105,240,174,0.7);
+}
+/* Kleines Mikro-Icon rechts oben → öffnet Aufnahme-Dialog */
+.clip-rec-btn {
+  position: absolute; top: 3px; right: 3px;
+  width: 20px; height: 20px;
+  background: rgba(13,21,32,0.75); border: 1px solid var(--dim);
+  border-radius: 4px; color: var(--muted); font-size: 0.65em;
+  cursor: pointer; padding: 0; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity 0.15s, border-color 0.15s, color 0.15s;
+  z-index: 2;
+}
+.clip-item:hover .clip-rec-btn { opacity: 1; }
+.clip-rec-btn:hover { border-color: var(--accent); color: var(--accent); }
+/* Touch-Geräte: immer sichtbar */
+@media (hover: none) { .clip-rec-btn { opacity: 0.6; } }
+
 /* ── Responsive ── */
 @media (min-width: 480px) {
   .site-header { padding: 28px 28px 0; }
@@ -602,8 +776,12 @@ audio {
 <header class="site-header">
   <div class="header-badge">📻</div>
   <div class="header-text">
-    <h1 id="page-title">FRN WEBSTREAMS</h1>
+    <h1 id="page-title">FRN</h1>
     <div class="header-sub" id="page-subtitle">FREE RADIO NETWORK &nbsp;·&nbsp; DE</div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;align-self:center">
+    <button class="bgaudio-btn active" id="bgaudio-btn" onclick="toggleBgAudio()" title="Stream läuft weiter bei Bildschirmsperre — tippen zum Deaktivieren">🔊</button>
+    <button class="wakelock-btn" id="wakelock-btn" onclick="toggleWakeLock()" title="Display anlassen (Bildschirm sperrt nicht)">☀️</button>
   </div>
 </header>
 
@@ -699,6 +877,13 @@ audio {
       <div class="vu-segments" id="vu-segments"></div>
     </div>
     <div id="level-bar-wrap"><div id="level-bar"></div></div>
+    <!-- Clip-Buttons (werden via /api/clips befüllt) -->
+    <div id="clips-section" style="display:none">
+      <div class="clips-wrap">
+        <div class="clips-label">Schnell-Sätze</div>
+        <div class="clips-grid" id="clips-grid"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -710,6 +895,29 @@ audio {
 <!-- ══════════════════════════════════════════════════════════════════════
      ADMIN PANEL
 ════════════════════════════════════════════════════════════════════════ -->
+<!-- ══ Aufnahme-Dialog ══════════════════════════════════════════════════ -->
+<div id="record-overlay">
+  <div class="record-panel">
+    <div class="record-header">
+      <div class="led active"></div>
+      <h3 id="record-title">Aufnahme</h3>
+      <button class="admin-close" onclick="closeRecordModal()">✕</button>
+    </div>
+    <div class="record-body">
+      <div class="record-vu" id="record-vu-segs"></div>
+      <div id="record-timer">00:00</div>
+      <div id="record-status">Bereit zum Aufnehmen</div>
+      <button id="record-btn" onclick="toggleRecord()">⏺ &nbsp;Aufnehmen</button>
+      <audio id="record-preview" controls style="display:none"></audio>
+      <div class="record-actions">
+        <button id="rec-save-btn" onclick="saveRecording()" disabled>Speichern</button>
+        <button id="rec-del-btn"  onclick="deleteRecording()" style="display:none">TTS verwenden</button>
+        <button onclick="closeRecordModal()">Abbrechen</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="admin-overlay">
   <div class="admin-panel">
 
@@ -915,6 +1123,7 @@ let ws = null, audioCtx = null, micSource = null;
 let workletNode = null, analyser = null;
 let txActive = false, levelTimer = null;
 let clientPollTimer = null;
+let clipActive = false;   // Clip wird gerade gesendet
 let iceHost = location.hostname;
 let icePort = 8000;
 
@@ -942,6 +1151,9 @@ let rxScheduleTime = 0;     // Nächster Wiedergabe-Zeitpunkt im AudioContext
 let _bgAudioEl   = null;
 let _bgAudioMount = null;
 
+// Minimales stilles WAV (44 Byte, 0 Samples) als Data-URI zum Primen der iOS-Audio-Session
+const _SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+
 function _initBgAudio() {
   if (_bgAudioEl) return;
   _bgAudioEl = document.createElement("audio");
@@ -950,6 +1162,10 @@ function _initBgAudio() {
   _bgAudioEl.preload = "none";
   _bgAudioEl.volume  = 1.0;
   document.body.appendChild(_bgAudioEl);
+  // iOS-Audio-Session während der User-Geste primen: kurz stilles Audio abspielen,
+  // damit play() später beim Bildschirmsperren ohne User-Geste erlaubt ist.
+  _bgAudioEl.src = _SILENT_WAV;
+  _bgAudioEl.play().then(() => { _bgAudioEl.pause(); _bgAudioEl.src = ""; }).catch(() => {});
 }
 
 function _startBgAudio(mount) {
@@ -1027,35 +1243,121 @@ document.addEventListener("visibilitychange", () => {
     clearTimeout(clientPollTimer); clientPollTimer = null;
     clearRxVu();
 
-    // Auf Icecast-Stream umschalten — überlebt iOS Display-Aus
-    if (mount && authToken) {
+    // Auf Icecast-Stream umschalten — überlebt iOS Display-Aus (nur wenn aktiv)
+    if (mount && authToken && _bgAudioEnabled) {
       _startBgAudio(mount);
     }
   } else {
     // Display an / App wieder sichtbar
     _stopBgAudio();   // Icecast-Fallback stoppen
 
-    // AudioContext aufwecken
-    if (rxAudioCtx?.state === "suspended") rxAudioCtx.resume().catch(() => {});
-
-    // VU-Meter neu starten
-    if (rxAnalyser && !rxLevelTimer)
-      rxLevelTimer = setInterval(updateRxLevel, 100);
+    // AudioContext schließen und neu erstellen — verwirft alle Audio-Pakete die
+    // während der Bildschirmsperre im rxScheduleTime-Buffer aufgelaufen sind.
+    // resume() würde alles als "verpasste Gespräche" nachspielen.
+    if (rxAudioCtx) {
+      rxAudioCtx.close().catch(() => {});
+      rxAudioCtx = null;
+      rxGainNode = null;
+      rxAnalyser = null;
+      rxMsdNode  = null;
+      if (rxAudioEl) { rxAudioEl.pause(); rxAudioEl.src = ""; rxAudioEl = null; }
+    }
+    rxScheduleTime = 0;
+    clearInterval(rxLevelTimer); rxLevelTimer = null;
 
     if (mount && authToken) {
       if (!clientPollTimer) loadRoomClients(mount);
-      // WebSocket neu verbinden falls tot
-      const wsOk = rxWs && rxWs.readyState === WebSocket.OPEN;
-      if (!wsOk) connectRxWs(mount);
+      // Immer neu verbinden → live einsteigen, kein Replay alter Pakete
+      connectRxWs(mount);
+      if (rxAnalyser && !rxLevelTimer)
+        rxLevelTimer = setInterval(updateRxLevel, 100);
     }
   }
 });
 
-// AudioContext beim allerersten Pointer-Event anlegen (Browser-Autoplay-Policy)
-document.addEventListener("pointerdown", () => {
+// ── Hintergrund-Audio bei Bildschirmsperre ───────────────────────────────────
+let _bgAudioEnabled = true;
+let _bgAudioPrimed  = false;  // iOS: wurde getUserMedia bereits aufgerufen?
+
+async function toggleBgAudio() {
+  _bgAudioEnabled = !_bgAudioEnabled;
+  const btn = document.getElementById("bgaudio-btn");
+  if (_bgAudioEnabled) {
+    btn.classList.add("active");
+    btn.textContent = "🔊";
+    btn.title = "Stream läuft weiter bei Bildschirmsperre — tippen zum Deaktivieren";
+    await _primeBgAudio();
+  } else {
+    btn.classList.remove("active");
+    btn.textContent = "🔇";
+    btn.title = "Stream stoppt bei Bildschirmsperre — tippen zum Aktivieren";
+    _stopBgAudio();
+  }
+}
+
+async function _primeBgAudio() {
+  if (_bgAudioPrimed) return;
+  // iOS erlaubt Hintergrundwiedergabe erst nachdem getUserMedia aufgerufen wurde.
+  // Mikrofon kurz öffnen und sofort wieder schließen — das reicht um die Audio-Session zu primen.
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop());
+    _bgAudioPrimed = true;
+  } catch(e) {
+    // Kein Mikrofon-Zugriff — iOS Background-Audio funktioniert evtl. nicht ohne PTT
+    console.warn("BgAudio-Prime:", e);
+  }
+}
+
+// ── Wake Lock (Display anlassen) ─────────────────────────────────────────────
+let _wakeLock       = null;
+let _wakeLockWanted = false;
+
+async function toggleWakeLock() {
+  const btn = document.getElementById("wakelock-btn");
+  if (!("wakeLock" in navigator)) {
+    btn.classList.add("unsupported");
+    btn.title = "Nicht unterstützt von diesem Browser";
+    return;
+  }
+  _wakeLockWanted = !_wakeLockWanted;
+  if (_wakeLockWanted) {
+    await _acquireWakeLock();
+  } else {
+    if (_wakeLock) { _wakeLock.release(); _wakeLock = null; }
+    btn.classList.remove("active");
+    btn.title = "Display anlassen (Bildschirm sperrt nicht)";
+  }
+}
+
+async function _acquireWakeLock() {
+  const btn = document.getElementById("wakelock-btn");
+  try {
+    _wakeLock = await navigator.wakeLock.request("screen");
+    btn.classList.add("active");
+    btn.title = "Display bleibt an — tippen zum Deaktivieren";
+    _wakeLock.addEventListener("release", () => {
+      _wakeLock = null;
+      btn.classList.remove("active");
+    });
+  } catch (e) {
+    _wakeLockWanted = false;
+    btn.classList.remove("active");
+  }
+}
+
+// Wake Lock nach Tab-Wechsel neu anfordern
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState === "visible" && _wakeLockWanted && !_wakeLock)
+    await _acquireWakeLock();
+});
+
+// AudioContext und iOS-Audio-Session beim allerersten Pointer-Event initialisieren
+document.addEventListener("pointerdown", async () => {
   ensureRxAudioCtx();
-  _initBgAudio();   // iOS Audio-Session bereits bei erstem Touch öffnen
-}, { once: true, passive: true });
+  _initBgAudio();
+  if (_bgAudioEnabled) await _primeBgAudio();  // iOS: getUserMedia primen
+}, { once: true });
 
 function connectRxWs(mount) {
   disconnectRxWs();
@@ -1315,6 +1617,8 @@ function doLogout() {
     method: "POST", headers: {"X-Token": authToken}
   }).catch(() => {});
   authToken = null; callsign = ""; isAdmin = false;
+  clipActive = false;
+  document.getElementById("clips-section").style.display = "none";
   localStorage.removeItem("frn_token");
   localStorage.removeItem("frn_callsign");
   localStorage.removeItem("frn_is_admin");
@@ -1366,6 +1670,7 @@ function showTxPanel(rooms, defaultRoom = "") {
     loadRoomClients(startMount);
     connectRxWs(startMount);
   }
+  loadClips();
 }
 
 // ── PTT ─────────────────────────────────────────────────────────────────────
@@ -1376,7 +1681,7 @@ async function pttStart(e) {
       try { e.target.setPointerCapture(e.pointerId); } catch {}
     }
   }
-  if (txActive) return;
+  if (txActive || clipActive) return;
   txActive = true;
   _applyRxGain();      // sofort stumm schalten (kein Echo durch eigene Stimme)
   setStatus("Verbinde...", "");
@@ -1450,7 +1755,7 @@ async function pttStart(e) {
 
 function pttStop(e) {
   if (e) e.preventDefault();
-  if (!txActive) { stopAudio(); return; }
+  if (!txActive && !clipActive) { stopAudio(); return; }
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ cmd: "PTT_STOP" }));
   } else {
@@ -1481,35 +1786,300 @@ function onWsMessage(evt) {
   try { msg = JSON.parse(evt.data); } catch { return; }
 
   if (msg.type === "tx_active") {
-    txActive = true;
+    if (!clipActive) {
+      txActive = true;
+      document.getElementById("ptt-btn").classList.add("active");
+    }
     _applyRxGain();
-    document.getElementById("ptt-btn").classList.add("active");
     document.getElementById("led-tx").className = "led tx";
-    setStatus("● SENDE: " +
-      document.getElementById("room-select").selectedOptions[0]?.text, "ok");
+    const roomName = document.getElementById("room-select").selectedOptions[0]?.text || "";
+    setStatus("● SENDE: " + (clipActive ? (window._activeClipLabel || roomName) : roomName), "ok");
     if (msg.beep) playBeep();
   } else if (msg.type === "tx_waiting") {
     setStatus("⏳ WARTE AUF TX-FREIGABE...", "busy");
   } else if (msg.type === "tx_stopped") {
-    txActive = false;
-    _applyRxGain();   // RX wieder einschalten — parrot kommt sofort
-    document.getElementById("ptt-btn").classList.remove("active");
-    document.getElementById("led-tx").className = "led";
-    setStatus("BEREIT", ""); stopAudio(); ws.close();
-  } else if (msg.type === "error") {
+    if (clipActive) {
+      clipActive = false;
+      setClipButtonsSending(null);
+      updateClipButtons();
+    }
     txActive = false;
     _applyRxGain();
     document.getElementById("ptt-btn").classList.remove("active");
     document.getElementById("led-tx").className = "led";
-    setStatus("FEHLER: " + msg.msg, "error"); stopAudio(); ws.close();
+    setStatus("BEREIT", ""); stopAudio(); ws?.close();
+  } else if (msg.type === "error") {
+    if (clipActive) {
+      clipActive = false;
+      setClipButtonsSending(null);
+      updateClipButtons();
+    }
+    txActive = false;
+    _applyRxGain();
+    document.getElementById("ptt-btn").classList.remove("active");
+    document.getElementById("led-tx").className = "led";
+    setStatus("FEHLER: " + msg.msg, "error"); stopAudio(); ws?.close();
   } else if (msg.type === "ready") {
     setStatus("BEREIT", "");
   }
 }
 
+// ── Aufnahme-Modal ───────────────────────────────────────────────────────────
+const REC_VU_COUNT = 12;
+(function buildRecVu(){
+  const w = document.getElementById("record-vu-segs"); if (!w) return;
+  for (let i = 0; i < REC_VU_COUNT; i++) {
+    const s = document.createElement("div");
+    s.className = "record-vu-seg vu-seg"; s.id = "recvu-" + i;
+    w.appendChild(s);
+  }
+})();
+
+let _recClipId = null, _recHasRec = false;
+let _mediaRec  = null, _recChunks = [], _recBlob = null;
+let _recTimer  = null, _recSecs   = 0;
+let _recStream = null, _recACtx   = null, _recAnalyser = null, _recVuTimer = null;
+
+function openRecordModal(id, label, hasRec) {
+  _recClipId = id; _recHasRec = !!hasRec;
+  document.getElementById("record-title").textContent = "Aufnahme: " + label;
+  _setRecStatus("Bereit zum Aufnehmen", "");
+  document.getElementById("record-timer").textContent   = "00:00";
+  document.getElementById("record-timer").className     = "";
+  document.getElementById("record-preview").style.display = "none";
+  document.getElementById("record-btn").textContent     = "⏺  Aufnehmen";
+  document.getElementById("record-btn").className       = "";
+  document.getElementById("rec-save-btn").disabled      = true;
+  document.getElementById("rec-del-btn").style.display  = hasRec ? "" : "none";
+  _recBlob = null; _recChunks = [];
+  _clearRecVu();
+  document.getElementById("record-overlay").classList.add("open");
+}
+
+function closeRecordModal() {
+  _stopRecording();
+  document.getElementById("record-overlay").classList.remove("open");
+  _recClipId = null;
+}
+
+async function toggleRecord() {
+  if (_mediaRec?.state === "recording") {
+    _stopRecording();
+  } else {
+    await _startRecording();
+  }
+}
+
+async function _startRecording() {
+  try {
+    _recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch(e) {
+    _setRecStatus("Mikrofon-Fehler: " + e.message, "error"); return;
+  }
+  _recChunks = []; _recBlob = null;
+  document.getElementById("rec-save-btn").disabled = true;
+  document.getElementById("record-preview").style.display = "none";
+
+  // VU-Meter über Web Audio
+  try {
+    _recACtx     = new AudioContext();
+    _recAnalyser = _recACtx.createAnalyser();
+    _recAnalyser.fftSize = 64;
+    _recACtx.createMediaStreamSource(_recStream).connect(_recAnalyser);
+    _recVuTimer = setInterval(_updateRecVu, 60);
+  } catch(e) {}
+
+  _mediaRec = new MediaRecorder(_recStream);
+  _mediaRec.ondataavailable = e => { if (e.data.size > 0) _recChunks.push(e.data); };
+  _mediaRec.onstop = _onRecStop;
+  _mediaRec.start(100);
+
+  _recSecs = 0;
+  document.getElementById("record-timer").className = "recording";
+  document.getElementById("record-btn").textContent = "⏹  Stop";
+  document.getElementById("record-btn").className   = "recording";
+  _setRecStatus("● Aufnahme läuft ...", "");
+  _recTimer = setInterval(() => {
+    _recSecs++;
+    document.getElementById("record-timer").textContent =
+      String(Math.floor(_recSecs/60)).padStart(2,"0") + ":" +
+      String(_recSecs%60).padStart(2,"0");
+  }, 1000);
+}
+
+function _stopRecording() {
+  clearInterval(_recTimer); _recTimer = null;
+  clearInterval(_recVuTimer); _recVuTimer = null;
+  _clearRecVu();
+  if (_recACtx) { _recACtx.close().catch(()=>{}); _recACtx = null; _recAnalyser = null; }
+  if (_recStream) { _recStream.getTracks().forEach(t => t.stop()); _recStream = null; }
+  if (_mediaRec?.state === "recording") _mediaRec.stop();
+}
+
+function _onRecStop() {
+  _recBlob = new Blob(_recChunks, { type: _mediaRec?.mimeType || "audio/webm" });
+  const url = URL.createObjectURL(_recBlob);
+  const prev = document.getElementById("record-preview");
+  prev.src = url; prev.style.display = "";
+  document.getElementById("rec-save-btn").disabled = false;
+  document.getElementById("record-timer").className = "";
+  document.getElementById("record-btn").textContent = "⏺  Neu aufnehmen";
+  document.getElementById("record-btn").className   = "";
+  _setRecStatus("Aufnahme fertig — abhören und speichern", "");
+}
+
+function _updateRecVu() {
+  if (!_recAnalyser) return;
+  const data = new Uint8Array(_recAnalyser.frequencyBinCount);
+  _recAnalyser.getByteFrequencyData(data);
+  const avg = data.reduce((a,b) => a+b, 0) / data.length;
+  const lit = Math.round(Math.min(1, avg / 35) * REC_VU_COUNT);
+  for (let i = 0; i < REC_VU_COUNT; i++) {
+    const s = document.getElementById("recvu-" + i);
+    if (!s) continue;
+    s.className = "record-vu-seg vu-seg" + (i < lit
+      ? " " + (i < 7 ? "lit-green" : i < 10 ? "lit-yellow" : "lit-red") : "");
+  }
+}
+function _clearRecVu() {
+  for (let i = 0; i < REC_VU_COUNT; i++) {
+    const s = document.getElementById("recvu-" + i);
+    if (s) s.className = "record-vu-seg vu-seg";
+  }
+}
+function _setRecStatus(txt, cls) {
+  const el = document.getElementById("record-status");
+  el.textContent = txt; el.className = cls;
+}
+
+async function saveRecording() {
+  if (!_recBlob || !_recClipId) return;
+  const btn = document.getElementById("rec-save-btn");
+  btn.disabled = true; btn.textContent = "Speichert...";
+  try {
+    const r = await fetch(
+      `${TX_BASE}/api/clips/${encodeURIComponent(_recClipId)}/recording?token=${authToken}`,
+      { method: "POST",
+        headers: { "Content-Type": _recBlob.type || "audio/webm" },
+        body: _recBlob });
+    const d = await r.json();
+    if (r.ok) {
+      _setRecStatus("✓ Gespeichert!", "ok");
+      const b = document.querySelector(`.clip-btn[data-id="${_recClipId}"]`);
+      if (b) b.classList.add("has-recording");
+      document.getElementById("rec-del-btn").style.display = "";
+      _recHasRec = true;
+      setTimeout(() => closeRecordModal(), 900);
+    } else {
+      _setRecStatus("Fehler: " + (d.error || "unbekannt"), "error");
+      btn.disabled = false; btn.textContent = "Speichern";
+    }
+  } catch(e) {
+    _setRecStatus("Verbindungsfehler", "error");
+    btn.disabled = false; btn.textContent = "Speichern";
+  }
+}
+
+async function deleteRecording() {
+  if (!_recClipId) return;
+  await fetch(
+    `${TX_BASE}/api/clips/${encodeURIComponent(_recClipId)}/recording?token=${authToken}`,
+    { method: "DELETE" }).catch(() => {});
+  const b = document.querySelector(`.clip-btn[data-id="${_recClipId}"]`);
+  if (b) b.classList.remove("has-recording");
+  document.getElementById("rec-del-btn").style.display = "none";
+  _recHasRec = false;
+  _setRecStatus("TTS wird wieder verwendet", "");
+}
+
+// ── Clip-Buttons ─────────────────────────────────────────────────────────────
+window._activeClipLabel = "";
+
+async function loadClips() {
+  if (!authToken) return;
+  try {
+    const r = await fetch(`${TX_BASE}/api/clips?token=${authToken}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    renderClips(data.clips || []);
+  } catch(e) { /* no clips */ }
+}
+
+function renderClips(clips) {
+  const section = document.getElementById("clips-section");
+  const grid    = document.getElementById("clips-grid");
+  if (!clips.length) { section.style.display = "none"; return; }
+  section.style.display = "";
+  grid.innerHTML = clips.map(c => `
+    <div class="clip-item">
+      <button class="clip-btn${c.has_recording ? " has-recording" : ""}"
+        data-id="${esc(c.id)}" data-label="${esc(c.label)}"
+        onclick="sendClip('${esc(c.id)}','${esc(c.label)}')">${esc(c.label)}</button>
+      <button class="clip-rec-btn" title="Eigene Aufnahme"
+        onclick="openRecordModal('${esc(c.id)}','${esc(c.label)}',${c.has_recording})">🎙</button>
+    </div>`).join("");
+}
+
+function updateClipButtons() {
+  const busy = txActive || clipActive;
+  document.querySelectorAll(".clip-btn").forEach(b => {
+    b.disabled = busy;
+  });
+}
+
+function setClipButtonsSending(clipId) {
+  document.querySelectorAll(".clip-btn").forEach(b => {
+    b.classList.toggle("sending", b.dataset.id === clipId);
+  });
+}
+
+async function sendClip(id, label) {
+  if (txActive || clipActive) return;
+  if (!authToken) return;
+
+  const room = document.getElementById("room-select").value;
+  if (!room) return;
+
+  clipActive = true;
+  window._activeClipLabel = label;
+  updateClipButtons();
+  setClipButtonsSending(id);
+  setStatus("⏳ Verbinde für Clip...", "");
+
+  // Öffne frische WS-Verbindung (kein Audio-Worklet nötig)
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${authToken}&room=${encodeURIComponent(room)}`);
+  ws.binaryType = "arraybuffer";
+  ws.onmessage  = onWsMessage;
+  ws.onerror    = () => {
+    clipActive = false; setClipButtonsSending(null); updateClipButtons();
+    setStatus("WebSocket-Fehler", "error");
+  };
+  ws.onclose    = () => {
+    if (clipActive) {
+      clipActive = false; setClipButtonsSending(null); updateClipButtons();
+      setStatus("BEREIT", "");
+    }
+    document.getElementById("led-tx").className = "led";
+  };
+
+  const ok = await new Promise(res => {
+    ws.onopen = () => res(true);
+    setTimeout(() => res(false), 5000);
+  });
+  if (!ok) {
+    clipActive = false; setClipButtonsSending(null); updateClipButtons();
+    setStatus("Verbindungsfehler", "error");
+    ws.close();
+    return;
+  }
+
+  ws.send(JSON.stringify({ cmd: "PLAY_CLIP", id }));
+}
+
 function playBeep() {
   try {
-    const ctx = new AudioContext();
+    const ctx = audioCtx || new AudioContext();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
@@ -1519,7 +2089,6 @@ function playBeep() {
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
     osc.start(ctx.currentTime);
     osc.stop(ctx.currentTime + 0.18);
-    ctx.close().catch(() => {});
   } catch(e) {}
 }
 
