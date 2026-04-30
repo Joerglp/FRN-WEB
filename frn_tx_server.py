@@ -232,6 +232,7 @@ class FRNTXRoom:
         self._clients: list   = []   # last received MARKER_CLIENTS list
         self._rx_clients: set = set()   # WebSocket connections for RX audio
         self._recorder        = None    # SessionRecorder (gesetzt nach load_config)
+        self.on_message       = None    # callback(sender, text, room_name)
         try:
             self._gsm_dec = GSMDecoder()
         except RuntimeError as e:
@@ -303,6 +304,17 @@ class FRNTXRoom:
                 pass
         self._rx_clients.clear()
 
+    async def send_text(self, text: str):
+        """Send a text message to the FRN room."""
+        if not self._writer or self._writer.is_closing():
+            return
+        try:
+            msg = f"TM:\r\n1\r\n<ON>{self.callsign}</ON><TM>{text}</TM>\r\n"
+            self._writer.write(msg.encode())
+            await self._writer.drain()
+        except Exception as e:
+            log.debug("[%s] send_text error: %s", self.name, e)
+
     async def _keepalive_loop(self):
         try:
             while self._connected:
@@ -322,6 +334,36 @@ class FRNTXRoom:
         for m in re.finditer(r"<(\w+)>(.*?)(?:</\1>)?(?=<\w+>|$)", text):
             result[m.group(1)] = m.group(2)
         return result
+
+    def _try_parse_messages(self, buf: bytes):
+        """Try to parse a MARKER_MESSAGE (0x04) block from buf.
+
+        Returns (messages_list, remaining_buf) on success,
+        or       (None,         original_buf)  if more data is needed.
+        """
+        orig = buf
+        if not buf or buf[0] != MARKER_MESSAGE:
+            return None, orig
+        buf = buf[1:]
+        idx = buf.find(b"\r\n")
+        if idx < 0:
+            return None, orig
+        try:
+            count = int(buf[:idx].decode(errors="replace").strip())
+        except ValueError:
+            return None, orig
+        buf = buf[idx + 2:]
+        messages = []
+        for _ in range(count):
+            idx = buf.find(b"\r\n")
+            if idx < 0:
+                return None, orig
+            line = buf[:idx].decode(errors="replace")
+            buf  = buf[idx + 2:]
+            parsed = self._parse_xml_tags(line)
+            if parsed:
+                messages.append(parsed)
+        return messages, buf
 
     def _try_parse_clients(self, buf: bytes):
         """Try to parse a MARKER_CLIENTS (0x03) block from buf.
@@ -414,6 +456,21 @@ class FRNTXRoom:
                             self._clients = clients
                             buf = new_buf
                             progress = True
+                        else:
+                            break                           # need more data
+
+                    elif marker == MARKER_MESSAGE:          # 0x04 — text message
+                        messages, new_buf = self._try_parse_messages(buf)
+                        if messages is not None:
+                            buf = new_buf
+                            progress = True
+                            if self.on_message:
+                                for msg in messages:
+                                    sender = msg.get("ON", "")
+                                    text   = msg.get("TM", "")
+                                    if sender and text:
+                                        asyncio.create_task(
+                                            self.on_message(sender, text, self.name))
                         else:
                             break                           # need more data
 
@@ -574,6 +631,69 @@ class TXServer:
             self.users[u["username"]] = entry
         log.info("Loaded %d users", len(self.users))
 
+    async def _handle_frn_command(self, sender: str, text: str, room_name: str):
+        """Process !web commands received as FRN text messages."""
+        if not text.strip().lower().startswith("!web"):
+            return
+        sender_is_admin = any(
+            u.get("callsign", "").upper() == sender.upper() and u.get("is_admin")
+            for u in self.users.values()
+        )
+        if not sender_is_admin:
+            log.info("[FRN-CMD] %s tried !web but is not admin", sender)
+            return
+
+        room   = self.rooms.get(room_name)
+        parts  = text.split()
+        cmd    = parts[1].lower() if len(parts) > 1 else "help"
+        log.info("[FRN-CMD] admin %s in '%s': %s", sender, room_name, text.strip())
+
+        async def reply(msg):
+            if room:
+                await room.send_text(msg)
+
+        if cmd == "help":
+            await reply("Befehle: help | users | adduser <email> <cs> | deluser <email> | rooms | status")
+        elif cmd == "users":
+            entries = [f"{u}({v.get('callsign','?')})" + ("[A]" if v.get("is_admin") else "")
+                       for u, v in self.users.items()]
+            await reply("User: " + (", ".join(entries) if entries else "—"))
+        elif cmd == "adduser":
+            if len(parts) < 4:
+                await reply("Verwendung: !web adduser <email> <callsign>")
+                return
+            email, callsign = parts[2], parts[3]
+            if email in self.users:
+                await reply(f"{email} existiert bereits.")
+                return
+            self.users[email] = {"callsign": callsign, "is_admin": False,
+                                 "frn_only": True, "default_room": ""}
+            self._save_users()
+            await reply(f"Benutzer {email} ({callsign}) angelegt.")
+        elif cmd == "deluser":
+            if len(parts) < 3:
+                await reply("Verwendung: !web deluser <email>")
+                return
+            email = parts[2]
+            if email not in self.users:
+                await reply(f"{email} nicht gefunden.")
+                return
+            del self.users[email]
+            self._save_users()
+            await reply(f"Benutzer {email} gelöscht.")
+        elif cmd == "rooms":
+            entries = [f"{m}={r.name}" for m, r in self.rooms.items()]
+            await reply("Räume: " + (", ".join(entries) if entries else "—"))
+        elif cmd == "status":
+            entries = [f"{r.name}:{'OK' if r._connected else 'OFFLINE'}"
+                       for r in self.rooms.values()]
+            await reply(", ".join(entries) if entries else "keine Räume")
+        else:
+            await reply(f"Unbekannt: '{cmd}'. Tippe: !web help")
+
+    def _set_room_callback(self, room: "FRNTXRoom"):
+        room.on_message = self._handle_frn_command
+
     def load_rooms(self):
         path = Path(self.args.rooms)
         self._rooms_path = path
@@ -583,7 +703,7 @@ class TXServer:
         with open(path) as f:
             data = json.load(f)
         for r in data.get("rooms", []):
-            self.rooms[r["mount"]] = FRNTXRoom(
+            room = FRNTXRoom(
                 name       = r["name"],
                 frn_server = r.get("frn_server", self.args.frn_server),
                 frn_port   = r.get("frn_port",   self.args.frn_port),
@@ -591,6 +711,8 @@ class TXServer:
                 password   = r["password"],
                 callsign   = r["callsign"],
             )
+            self._set_room_callback(room)
+            self.rooms[r["mount"]] = room
         log.info("Configured %d rooms: %s", len(self.rooms), list(self.rooms))
 
     def _save_users(self):
@@ -923,7 +1045,7 @@ class TXServer:
             mount = re.sub(r"[^a-z0-9]+", "", name.lower())[:20] or f"room{i + 1}"
             if mount in self.rooms:
                 mount = f"{mount}{i + 1}"
-            self.rooms[mount] = FRNTXRoom(
+            room = FRNTXRoom(
                 name       = name,
                 frn_server = self.args.frn_server,
                 frn_port   = self.args.frn_port,
@@ -931,6 +1053,8 @@ class TXServer:
                 password   = password,
                 callsign   = f"{prefix}-{i + 1:02d}",
             )
+            self._set_room_callback(room)
+            self.rooms[mount] = room
         log.info("Auto-configured %d rooms: %s", len(self.rooms), list(self.rooms))
 
     async def _try_frn_auth(self, email: str, password: str, callsign: str) -> bool:
@@ -1261,10 +1385,12 @@ class TXServer:
         if mount in self.rooms:
             return web.json_response({"error": f"mount '{mount}' already exists"}, status=409)
 
-        self.rooms[mount] = FRNTXRoom(
+        room = FRNTXRoom(
             name=name, frn_server=frn_srv, frn_port=frn_port,
             email=email, password=password,
             callsign=callsign or f"TX-{mount.title()}")
+        self._set_room_callback(room)
+        self.rooms[mount] = room
         self._save_rooms()
         log.info("Admin: created room '%s' → /%s", name, mount)
         return web.json_response({"ok": True})
