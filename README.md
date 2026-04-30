@@ -6,12 +6,15 @@ Browser-basierter **PTT-Sender, Stream-Empfänger und Gesprächsarchiv** für da
 
 - **Mithören** — Icecast-Streams direkt im Browser (alle konfigurierten Räume)
 - **Senden (PTT)** — Push-to-Talk über Mikrofon, GSM 06.10 kodiert, in den FRN-Raum
+- **Schnell-Satz-Buttons** — vordefinierte Phrasen per Knopfdruck senden; eigene Sprachaufnahme pro Button (Mikrofon-Icon), grüner Punkt zeigt eigene Aufnahme an
 - **Login** — mit lokalem Account (`tx_users.json`) oder direkt mit FRN-Zugangsdaten
 - **Admin-Panel** — Benutzer und Räume live verwalten ohne Server-Neustart
 - **Auto-Discovery** — Räume automatisch vom FRN-Server lesen, keine feste Raumliste nötig
 - **Transkription** *(optional)* — Spracherkennung via [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CPU, kein GPU nötig)
 - **Funkarchiv** *(optional)* — Chat-Verlauf aller Übertragungen mit Audioplayer, durchsuchbar
 - **Komprimiertes Audio** — WAV-Aufnahmen werden als Opus gespeichert (~10× kleiner)
+- **Hintergrund-Audio** — 🔊-Button hält den Stream aktiv wenn der Bildschirm gesperrt wird
+- **WakeLock** — ☀️-Button verhindert das automatische Abdunkeln des Displays
 - **Docker-Support** — kompletter Stack mit `docker compose up`
 
 ## Voraussetzungen
