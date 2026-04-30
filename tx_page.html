@@ -393,6 +393,21 @@ audio {
 .rx-mute-btn:hover { border-color: var(--accent); color: var(--accent); }
 .rx-mute-btn.muted { border-color: var(--red); color: var(--red); }
 
+/* ── Hintergrund-Audio-Schalter ── */
+.bgaudio-btn, .wakelock-btn {
+  width: 38px; height: 38px; flex-shrink: 0; align-self: center;
+  background: var(--inset); border: 1px solid var(--dim); border-radius: 8px;
+  color: var(--muted); font-size: 1.1em;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; transition: border-color 0.2s, color 0.2s, box-shadow 0.2s;
+}
+.bgaudio-btn:hover, .wakelock-btn:hover { border-color: var(--accent); color: var(--accent); }
+.bgaudio-btn.active, .wakelock-btn.active {
+  border-color: var(--green); color: var(--green);
+  box-shadow: 0 0 8px rgba(76,175,80,0.35);
+}
+.wakelock-btn.unsupported { opacity: 0.3; cursor: default; pointer-events: none; }
+
 /* ── Footer ── */
 .site-footer {
   padding: 20px 20px 0;
@@ -761,8 +776,12 @@ audio {
 <header class="site-header">
   <div class="header-badge">📻</div>
   <div class="header-text">
-    <h1 id="page-title">FRN WEBSTREAMS</h1>
+    <h1 id="page-title">FRN</h1>
     <div class="header-sub" id="page-subtitle">FREE RADIO NETWORK &nbsp;·&nbsp; DE</div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;align-self:center">
+    <button class="bgaudio-btn active" id="bgaudio-btn" onclick="toggleBgAudio()" title="Stream läuft weiter bei Bildschirmsperre — tippen zum Deaktivieren">🔊</button>
+    <button class="wakelock-btn" id="wakelock-btn" onclick="toggleWakeLock()" title="Display anlassen (Bildschirm sperrt nicht)">☀️</button>
   </div>
 </header>
 
@@ -1132,6 +1151,9 @@ let rxScheduleTime = 0;     // Nächster Wiedergabe-Zeitpunkt im AudioContext
 let _bgAudioEl   = null;
 let _bgAudioMount = null;
 
+// Minimales stilles WAV (44 Byte, 0 Samples) als Data-URI zum Primen der iOS-Audio-Session
+const _SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+
 function _initBgAudio() {
   if (_bgAudioEl) return;
   _bgAudioEl = document.createElement("audio");
@@ -1140,6 +1162,10 @@ function _initBgAudio() {
   _bgAudioEl.preload = "none";
   _bgAudioEl.volume  = 1.0;
   document.body.appendChild(_bgAudioEl);
+  // iOS-Audio-Session während der User-Geste primen: kurz stilles Audio abspielen,
+  // damit play() später beim Bildschirmsperren ohne User-Geste erlaubt ist.
+  _bgAudioEl.src = _SILENT_WAV;
+  _bgAudioEl.play().then(() => { _bgAudioEl.pause(); _bgAudioEl.src = ""; }).catch(() => {});
 }
 
 function _startBgAudio(mount) {
@@ -1217,35 +1243,121 @@ document.addEventListener("visibilitychange", () => {
     clearTimeout(clientPollTimer); clientPollTimer = null;
     clearRxVu();
 
-    // Auf Icecast-Stream umschalten — überlebt iOS Display-Aus
-    if (mount && authToken) {
+    // Auf Icecast-Stream umschalten — überlebt iOS Display-Aus (nur wenn aktiv)
+    if (mount && authToken && _bgAudioEnabled) {
       _startBgAudio(mount);
     }
   } else {
     // Display an / App wieder sichtbar
     _stopBgAudio();   // Icecast-Fallback stoppen
 
-    // AudioContext aufwecken
-    if (rxAudioCtx?.state === "suspended") rxAudioCtx.resume().catch(() => {});
-
-    // VU-Meter neu starten
-    if (rxAnalyser && !rxLevelTimer)
-      rxLevelTimer = setInterval(updateRxLevel, 100);
+    // AudioContext schließen und neu erstellen — verwirft alle Audio-Pakete die
+    // während der Bildschirmsperre im rxScheduleTime-Buffer aufgelaufen sind.
+    // resume() würde alles als "verpasste Gespräche" nachspielen.
+    if (rxAudioCtx) {
+      rxAudioCtx.close().catch(() => {});
+      rxAudioCtx = null;
+      rxGainNode = null;
+      rxAnalyser = null;
+      rxMsdNode  = null;
+      if (rxAudioEl) { rxAudioEl.pause(); rxAudioEl.src = ""; rxAudioEl = null; }
+    }
+    rxScheduleTime = 0;
+    clearInterval(rxLevelTimer); rxLevelTimer = null;
 
     if (mount && authToken) {
       if (!clientPollTimer) loadRoomClients(mount);
-      // WebSocket neu verbinden falls tot
-      const wsOk = rxWs && rxWs.readyState === WebSocket.OPEN;
-      if (!wsOk) connectRxWs(mount);
+      // Immer neu verbinden → live einsteigen, kein Replay alter Pakete
+      connectRxWs(mount);
+      if (rxAnalyser && !rxLevelTimer)
+        rxLevelTimer = setInterval(updateRxLevel, 100);
     }
   }
 });
 
-// AudioContext beim allerersten Pointer-Event anlegen (Browser-Autoplay-Policy)
-document.addEventListener("pointerdown", () => {
+// ── Hintergrund-Audio bei Bildschirmsperre ───────────────────────────────────
+let _bgAudioEnabled = true;
+let _bgAudioPrimed  = false;  // iOS: wurde getUserMedia bereits aufgerufen?
+
+async function toggleBgAudio() {
+  _bgAudioEnabled = !_bgAudioEnabled;
+  const btn = document.getElementById("bgaudio-btn");
+  if (_bgAudioEnabled) {
+    btn.classList.add("active");
+    btn.textContent = "🔊";
+    btn.title = "Stream läuft weiter bei Bildschirmsperre — tippen zum Deaktivieren";
+    await _primeBgAudio();
+  } else {
+    btn.classList.remove("active");
+    btn.textContent = "🔇";
+    btn.title = "Stream stoppt bei Bildschirmsperre — tippen zum Aktivieren";
+    _stopBgAudio();
+  }
+}
+
+async function _primeBgAudio() {
+  if (_bgAudioPrimed) return;
+  // iOS erlaubt Hintergrundwiedergabe erst nachdem getUserMedia aufgerufen wurde.
+  // Mikrofon kurz öffnen und sofort wieder schließen — das reicht um die Audio-Session zu primen.
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop());
+    _bgAudioPrimed = true;
+  } catch(e) {
+    // Kein Mikrofon-Zugriff — iOS Background-Audio funktioniert evtl. nicht ohne PTT
+    console.warn("BgAudio-Prime:", e);
+  }
+}
+
+// ── Wake Lock (Display anlassen) ─────────────────────────────────────────────
+let _wakeLock       = null;
+let _wakeLockWanted = false;
+
+async function toggleWakeLock() {
+  const btn = document.getElementById("wakelock-btn");
+  if (!("wakeLock" in navigator)) {
+    btn.classList.add("unsupported");
+    btn.title = "Nicht unterstützt von diesem Browser";
+    return;
+  }
+  _wakeLockWanted = !_wakeLockWanted;
+  if (_wakeLockWanted) {
+    await _acquireWakeLock();
+  } else {
+    if (_wakeLock) { _wakeLock.release(); _wakeLock = null; }
+    btn.classList.remove("active");
+    btn.title = "Display anlassen (Bildschirm sperrt nicht)";
+  }
+}
+
+async function _acquireWakeLock() {
+  const btn = document.getElementById("wakelock-btn");
+  try {
+    _wakeLock = await navigator.wakeLock.request("screen");
+    btn.classList.add("active");
+    btn.title = "Display bleibt an — tippen zum Deaktivieren";
+    _wakeLock.addEventListener("release", () => {
+      _wakeLock = null;
+      btn.classList.remove("active");
+    });
+  } catch (e) {
+    _wakeLockWanted = false;
+    btn.classList.remove("active");
+  }
+}
+
+// Wake Lock nach Tab-Wechsel neu anfordern
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState === "visible" && _wakeLockWanted && !_wakeLock)
+    await _acquireWakeLock();
+});
+
+// AudioContext und iOS-Audio-Session beim allerersten Pointer-Event initialisieren
+document.addEventListener("pointerdown", async () => {
   ensureRxAudioCtx();
-  _initBgAudio();   // iOS Audio-Session bereits bei erstem Touch öffnen
-}, { once: true, passive: true });
+  _initBgAudio();
+  if (_bgAudioEnabled) await _primeBgAudio();  // iOS: getUserMedia primen
+}, { once: true });
 
 function connectRxWs(mount) {
   disconnectRxWs();
@@ -1967,7 +2079,7 @@ async function sendClip(id, label) {
 
 function playBeep() {
   try {
-    const ctx = new AudioContext();
+    const ctx = audioCtx || new AudioContext();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
@@ -1977,7 +2089,6 @@ function playBeep() {
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
     osc.start(ctx.currentTime);
     osc.stop(ctx.currentTime + 0.18);
-    ctx.close().catch(() => {});
   } catch(e) {}
 }
 
