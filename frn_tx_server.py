@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import secrets
+import struct
 import time
 from pathlib import Path
 
@@ -393,11 +394,14 @@ class FRNTXRoom:
                                 if self._rx_clients:
                                     asyncio.create_task(self._broadcast_rx(pcm))
                                 if self._recorder:
-                                    # Sprecher aus Client-Liste ermitteln (bester Versuch)
-                                    speaker = next(
-                                        (c.get("ON", "") for c in self._clients
-                                         if c.get("ON")), ""
-                                    )
+                                    client_idx = struct.unpack(">H", buf[1:3])[0]
+                                    if 0 <= client_idx < len(self._clients):
+                                        speaker = self._clients[client_idx].get("ON", "")
+                                    else:
+                                        speaker = next(
+                                            (c.get("ON", "") for c in self._clients
+                                             if c.get("ON")), ""
+                                        )
                                     self._recorder.feed(pcm, speaker)
                             except Exception as e:
                                 log.debug("[%s] GSM decode error: %s", self.name, e)
