@@ -1529,7 +1529,7 @@ class TXServer:
                         room._writer.close()
                     except Exception:
                         pass
-                asyncio.create_task(room.connect())
+                asyncio.create_task(room.ensure_connected())
                 log.info("Raum %s → neu verbinden mit %s:%d", mount, new_host, new_port)
 
         return web.json_response({
