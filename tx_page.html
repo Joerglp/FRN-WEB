@@ -1604,6 +1604,42 @@ function onRoomChange() {
   clearTimeout(clientPollTimer);
   connectRxWs(mount);
   loadRoomClients(mount);
+  connectChatWs(mount);
+}
+
+// ── Persistente Chat-WebSocket-Verbindung ─────────────────────────────────────
+let _chatWsRoom = null;
+let _chatWsReconnectTimer = null;
+
+function connectChatWs(room) {
+  if (!authToken || !room) return;
+  // Alte Verbindung schließen wenn Raum wechselt
+  if (ws && ws.readyState <= WebSocket.OPEN && _chatWsRoom !== room) {
+    const old = ws; ws = null; _chatWsRoom = null;
+    old.onclose = null; old.close();
+  }
+  // Bereits verbunden mit gleichem Raum
+  if (ws && ws.readyState === WebSocket.OPEN && _chatWsRoom === room) return;
+  // Bereits am Verbinden
+  if (ws && ws.readyState === WebSocket.CONNECTING) return;
+  clearTimeout(_chatWsReconnectTimer);
+  _chatWsRoom = room;
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${authToken}&room=${encodeURIComponent(room)}`);
+  ws.binaryType = "arraybuffer";
+  ws.onmessage = onWsMessage;
+  ws.onerror   = () => {};
+  ws.onclose   = () => {
+    stopAudio();
+    txActive = false; clipActive = false;
+    _applyRxGain();
+    document.getElementById("ptt-btn").classList.remove("active");
+    document.getElementById("led-tx").className = "led";
+    // Automatisch neu verbinden (für Chat)
+    if (authToken && _chatWsRoom) {
+      _chatWsReconnectTimer = setTimeout(() => connectChatWs(_chatWsRoom), 5000);
+    }
+  };
 }
 
 async function loadRoomClients(mount) {
@@ -1722,7 +1758,8 @@ function doLogout() {
   localStorage.removeItem("frn_token");
   localStorage.removeItem("frn_callsign");
   localStorage.removeItem("frn_is_admin");
-  if (ws) ws.close();
+  clearTimeout(_chatWsReconnectTimer); _chatWsReconnectTimer = null; _chatWsRoom = null;
+  if (ws) { const old = ws; ws = null; old.onclose = null; old.close(); }
   clearTimeout(clientPollTimer); clientPollTimer = null;
   disconnectRxWs();
   clearInterval(rxLevelTimer); rxLevelTimer = null;
@@ -1771,6 +1808,7 @@ function showTxPanel(rooms, defaultRoom = "") {
   if (startMount) {
     loadRoomClients(startMount);
     connectRxWs(startMount);
+    connectChatWs(startMount);   // Chat-WS sofort beim Login aufbauen
   }
   loadClips();
 }
@@ -1804,34 +1842,28 @@ async function pttStart(e) {
   }
 
   // AudioContext ohne feste Rate — der Server resampelt sowieso von beliebiger Rate auf 8 kHz.
-  // Kein sampleRate-Konflikt mit rxAudioCtx.
   audioCtx = new AudioContext();
   const sampleRate = audioCtx.sampleRate;
 
   const room = document.getElementById("room-select").value;
-  ws = new WebSocket(
-    `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${authToken}&room=${room}`);
-  ws.binaryType = "arraybuffer";
-  ws.onmessage = onWsMessage;
-  ws.onerror   = () => setStatus("WebSocket-Fehler", "error");
-  ws.onclose   = () => {
-    stopAudio();
-    if (txActive) setStatus("Verbindung getrennt", "error");
-    txActive = false;
-    _applyRxGain();
-    document.getElementById("ptt-btn").classList.remove("active");
-    document.getElementById("led-tx").className = "led";
-  };
 
-  const wsReady = await new Promise((res, rej) => {
-    ws.onopen = () => res(true);
-    setTimeout(() => rej(new Error("WS timeout")), 5000);
-  }).catch(err => {
-    txActive = false; _applyRxGain();
-    setStatus("Verbindungsfehler: " + err.message, "error");
-    stopAudio(); return false;
-  });
-  if (!wsReady) return;   // abort — .catch-return oben verlässt nicht pttStart
+  // WS wiederverwenden wenn bereits verbunden (Chat-WS), sonst neu aufbauen
+  if (!ws || ws.readyState !== WebSocket.OPEN || _chatWsRoom !== room) {
+    connectChatWs(room);
+    const wsReady = await new Promise((res, rej) => {
+      const check = setInterval(() => {
+        if (!ws) { clearInterval(check); rej(new Error("WS fehlt")); return; }
+        if (ws.readyState === WebSocket.OPEN)   { clearInterval(check); res(true); }
+        if (ws.readyState > WebSocket.OPEN)     { clearInterval(check); rej(new Error("WS geschlossen")); }
+      }, 50);
+      setTimeout(() => { clearInterval(check); rej(new Error("WS timeout")); }, 5000);
+    }).catch(err => {
+      txActive = false; _applyRxGain();
+      setStatus("Verbindungsfehler: " + err.message, "error");
+      stopAudio(); return false;
+    });
+    if (!wsReady) return;
+  }
 
   try {
     await audioCtx.audioWorklet.addModule(`${TX_BASE}/tx_processor.js`);
@@ -1909,7 +1941,7 @@ function onWsMessage(evt) {
     _applyRxGain();
     document.getElementById("ptt-btn").classList.remove("active");
     document.getElementById("led-tx").className = "led";
-    setStatus("BEREIT", ""); stopAudio(); ws?.close();
+    setStatus("BEREIT", ""); stopAudio();   // WS bleibt für Chat offen
   } else if (msg.type === "error") {
     if (clipActive) {
       clipActive = false;
@@ -1920,7 +1952,7 @@ function onWsMessage(evt) {
     _applyRxGain();
     document.getElementById("ptt-btn").classList.remove("active");
     document.getElementById("led-tx").className = "led";
-    setStatus("FEHLER: " + msg.msg, "error"); stopAudio(); ws?.close();
+    setStatus("FEHLER: " + msg.msg, "error"); stopAudio();  // WS bleibt für Chat offen
   } else if (msg.type === "ready") {
     setStatus("BEREIT", "");
     window._myCallsign = msg.callsign || "";
