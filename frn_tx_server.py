@@ -1555,6 +1555,72 @@ class TXServer:
             "frn_port":   new_port,
         })
 
+    @staticmethod
+    def _build_frn_register_msg(callsign: str, name: str, email: str,
+                                 city: str, description: str = "FRN WebTX",
+                                 band_channel: str = "PC Only",
+                                 country: str = "Germany") -> bytes:
+        on_field   = f"{callsign}, {name}"
+        city_field = f"{city} - -"
+        fields = [
+            (0, email), (2, on_field), (3, band_channel),
+            (4, description), (5, country), (6, city_field),
+        ]
+        u8tf = "".join(f"{fid:X}{len(v):02X}{v}" for fid, v in fields)
+        msg = (
+            f"IG:<ON>{on_field}</ON><EA>{email}</EA>"
+            f"<BC>{band_channel}</BC><DS>{description}</DS>"
+            f"<NN>{country}</NN><CT>{city_field}</CT>"
+            f"<U8TF>{u8tf}</U8TF>\r\n"
+        )
+        return msg.encode()
+
+    async def handle_admin_register(self, request):
+        """POST /api/admin/register — request a new FRN account password via sysman."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        callsign = str(body.get("callsign", "")).strip().upper()
+        name     = str(body.get("name",     "")).strip()
+        email    = str(body.get("email",    "")).strip()
+        city     = str(body.get("city",     "")).strip()
+        if not callsign or not name or not email or not city:
+            return web.json_response({"error": "callsign, name, email und city sind Pflichtfelder"}, status=400)
+
+        sysman_host = "sysman.freeradionetwork.de"
+        sysman_port = 10025
+        msg = self._build_frn_register_msg(callsign, name, email, city)
+        log.info("FRN-Registrierung: %s <%s> via %s:%d", callsign, email, sysman_host, sysman_port)
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(sysman_host, sysman_port), timeout=10
+            )
+            writer.write(msg)
+            await writer.drain()
+            response = await asyncio.wait_for(reader.readline(), timeout=10)
+            writer.close()
+            await writer.wait_closed()
+        except Exception as e:
+            log.warning("FRN-Registrierung fehlgeschlagen: %s", e)
+            return web.json_response({"error": f"Verbindung zum Sysman fehlgeschlagen: {e}"}, status=502)
+
+        resp_text = response.strip().decode(errors="replace")
+        log.info("FRN-Sysman Antwort: %r", resp_text)
+        if resp_text.upper() == "OK":
+            return web.json_response({"status": "ok", "email": email})
+        elif resp_text.upper() == "NOK":
+            return web.json_response({
+                "error": "E-Mail-Adresse bereits registriert — bitte E-Mail-Postfach prüfen, "
+                         "das Passwort wurde schon gesendet."
+            }, status=400)
+        else:
+            return web.json_response({"error": resp_text or "Unbekannte Sysman-Antwort"}, status=400)
+
     async def handle_clips(self, request):
         """Return list of configured quick-send clips (requires valid token)."""
         token = request.rel_url.query.get("token", "")
@@ -2148,8 +2214,9 @@ class TXServer:
 
         app.router.add_get("/api/admin/status", self.handle_admin_status)
 
-        app.router.add_get ("/api/admin/server", self.handle_admin_server_get)
-        app.router.add_post("/api/admin/server", self.handle_admin_server_set)
+        app.router.add_get ("/api/admin/server",   self.handle_admin_server_get)
+        app.router.add_post("/api/admin/server",   self.handle_admin_server_set)
+        app.router.add_post("/api/admin/register", self.handle_admin_register)
 
         return app
 

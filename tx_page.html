@@ -1078,6 +1078,37 @@ audio {
         </a>
       </div>
       <div id="srv-msg" style="margin-top:10px;font-size:.8rem;color:var(--accent)"></div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
+      <div class="admin-section-title">FRN-Konto registrieren</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">
+        Noch kein FRN-Konto? Hier neues Konto beim System-Manager beantragen.<br>
+        Das Passwort wird an die angegebene E-Mail-Adresse gesendet.
+      </div>
+      <div class="form-grid">
+        <div class="form-field" style="flex:2">
+          <label>Rufzeichen / Callsign</label>
+          <input type="text" id="reg-callsign" placeholder="DEIN1RUF" maxlength="20">
+        </div>
+        <div class="form-field" style="flex:2">
+          <label>Name</label>
+          <input type="text" id="reg-name" placeholder="Max Mustermann">
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-field" style="flex:2">
+          <label>E-Mail</label>
+          <input type="email" id="reg-email" placeholder="deine@email.de">
+        </div>
+        <div class="form-field" style="flex:2">
+          <label>Stadt</label>
+          <input type="text" id="reg-city" placeholder="Berlin">
+        </div>
+      </div>
+      <div style="margin-top:8px">
+        <button class="btn-save" onclick="registerFRN()">KONTO BEANTRAGEN</button>
+      </div>
+      <div id="reg-msg" style="margin-top:10px;font-size:.8rem;color:var(--accent)"></div>
     </div>
 
   </div>
@@ -2462,6 +2493,38 @@ async function switchServer() {
       setTimeout(() => loadStatus(), 2500);
     }
   } catch(e) {
+    msg.textContent = "Fehler: " + e;
+  }
+}
+
+async function registerFRN() {
+  const callsign = document.getElementById("reg-callsign").value.trim().toUpperCase();
+  const name     = document.getElementById("reg-name").value.trim();
+  const email    = document.getElementById("reg-email").value.trim();
+  const city     = document.getElementById("reg-city").value.trim();
+  const msg      = document.getElementById("reg-msg");
+  if (!callsign) { msg.textContent = "Rufzeichen fehlt."; return; }
+  if (!name)     { msg.textContent = "Name fehlt."; return; }
+  if (!email)    { msg.textContent = "E-Mail fehlt."; return; }
+  if (!city)     { msg.textContent = "Stadt fehlt."; return; }
+  msg.style.color = "var(--accent)";
+  msg.textContent = "Sende Registrierungsanfrage …";
+  try {
+    const r = await adminFetch("/api/admin/register", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ callsign, name, email, city })
+    });
+    const d = await r.json();
+    if (d.error) {
+      msg.style.color = "#e74c3c";
+      msg.textContent = "Fehler: " + d.error;
+    } else {
+      msg.style.color = "#2ecc71";
+      msg.textContent = "Passwort wurde an " + email + " gesendet. Bitte E-Mail prüfen.";
+    }
+  } catch(e) {
+    msg.style.color = "#e74c3c";
     msg.textContent = "Fehler: " + e;
   }
 }
