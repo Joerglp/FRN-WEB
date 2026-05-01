@@ -53,7 +53,19 @@ MARKER_KEEPALIVE  = 0x00
 MARKER_TX_APPROVE = 0x01
 MARKER_SOUND      = 0x02
 MARKER_CLIENTS    = 0x03
+MARKER_MESSAGE    = 0x04
+MARKER_NETWORKS   = 0x05
+MARKER_ADMIN_LIST = 0x06
+MARKER_ACCESS_LIST= 0x07
+MARKER_BAN        = 0x08
+MARKER_MUTE       = 0x09
+MARKER_ACCESS_MODE= 0x0A
 GSM_OPT_WAV49     = 4
+
+LINE_LIST_MARKERS = frozenset({
+    MARKER_NETWORKS, MARKER_ADMIN_LIST, MARKER_ACCESS_LIST,
+    MARKER_BAN, MARKER_MUTE, MARKER_ACCESS_MODE,
+})
 
 AUDIO_PACKET_SIZE  = 325
 PCM_PACKET_SAMPLES = 1600
@@ -232,6 +244,7 @@ class FRNTXRoom:
         self._clients: list   = []   # last received MARKER_CLIENTS list
         self._rx_clients: set = set()   # WebSocket connections for RX audio
         self._recorder        = None    # SessionRecorder (gesetzt nach load_config)
+        self.on_message       = None    # callback(sender, text, room_name)
         try:
             self._gsm_dec = GSMDecoder()
         except RuntimeError as e:
@@ -303,6 +316,17 @@ class FRNTXRoom:
                 pass
         self._rx_clients.clear()
 
+    async def send_text(self, text: str):
+        """Send a text message to the FRN room."""
+        if not self._writer or self._writer.is_closing():
+            return
+        try:
+            msg = f"TM:\r\n1\r\n<ON>{self.callsign}</ON><TM>{text}</TM>\r\n"
+            self._writer.write(msg.encode())
+            await self._writer.drain()
+        except Exception as e:
+            log.debug("[%s] send_text error: %s", self.name, e)
+
     async def _keepalive_loop(self):
         try:
             while self._connected:
@@ -322,6 +346,36 @@ class FRNTXRoom:
         for m in re.finditer(r"<(\w+)>(.*?)(?:</\1>)?(?=<\w+>|$)", text):
             result[m.group(1)] = m.group(2)
         return result
+
+    def _try_parse_messages(self, buf: bytes):
+        """Try to parse a MARKER_MESSAGE (0x04) block from buf.
+
+        Returns (messages_list, remaining_buf) on success,
+        or       (None,         original_buf)  if more data is needed.
+        """
+        orig = buf
+        if not buf or buf[0] != MARKER_MESSAGE:
+            return None, orig
+        buf = buf[1:]
+        idx = buf.find(b"\r\n")
+        if idx < 0:
+            return None, orig
+        try:
+            count = int(buf[:idx].decode(errors="replace").strip())
+        except ValueError:
+            return None, orig
+        buf = buf[idx + 2:]
+        messages = []
+        for _ in range(count):
+            idx = buf.find(b"\r\n")
+            if idx < 0:
+                return None, orig
+            line = buf[:idx].decode(errors="replace")
+            buf  = buf[idx + 2:]
+            parsed = self._parse_xml_tags(line)
+            if parsed:
+                messages.append(parsed)
+        return messages, buf
 
     def _try_parse_clients(self, buf: bytes):
         """Try to parse a MARKER_CLIENTS (0x03) block from buf.
@@ -355,6 +409,30 @@ class FRNTXRoom:
             if parsed:
                 clients.append(parsed)
         return clients, buf
+
+    @staticmethod
+    def _try_parse_line_list(buf: bytes):
+        """Skip a count-prefixed line-list packet (marker byte already included).
+
+        Returns remaining_buf on success, or None if more data is needed.
+        """
+        if not buf:
+            return None
+        buf = buf[1:]  # skip marker
+        idx = buf.find(b"\r\n")
+        if idx < 0:
+            return None
+        try:
+            count = int(buf[:idx].decode(errors="replace").strip())
+        except ValueError:
+            count = 0
+        buf = buf[idx + 2:]
+        for _ in range(count):
+            idx = buf.find(b"\r\n")
+            if idx < 0:
+                return None
+            buf = buf[idx + 2:]
+        return buf
 
     async def _reader_loop(self):
         buf = b""
@@ -417,8 +495,31 @@ class FRNTXRoom:
                         else:
                             break                           # need more data
 
+                    elif marker == MARKER_MESSAGE:          # 0x04 — text message
+                        messages, new_buf = self._try_parse_messages(buf)
+                        if messages is not None:
+                            buf = new_buf
+                            progress = True
+                            if self.on_message:
+                                for msg in messages:
+                                    sender = msg.get("ON", "")
+                                    text   = msg.get("TM", "")
+                                    if sender and text:
+                                        asyncio.create_task(
+                                            self.on_message(sender, text, self.name))
+                        else:
+                            break                           # need more data
+
+                    elif marker in LINE_LIST_MARKERS:   # 0x05–0x0A — count+lines
+                        new_buf = self._try_parse_line_list(buf)
+                        if new_buf is not None:
+                            buf = new_buf
+                            progress = True
+                        else:
+                            break                           # need more data
+
                     else:
-                        buf = buf[1:]                       # skip unknown byte
+                        buf = buf[1:]                       # skip truly unknown byte
                         progress = True
 
         except asyncio.CancelledError:
@@ -574,6 +675,69 @@ class TXServer:
             self.users[u["username"]] = entry
         log.info("Loaded %d users", len(self.users))
 
+    async def _handle_frn_command(self, sender: str, text: str, room_name: str):
+        """Process !web commands received as FRN text messages."""
+        if not text.strip().lower().startswith("!web"):
+            return
+        sender_is_admin = any(
+            u.get("callsign", "").upper() == sender.upper() and u.get("is_admin")
+            for u in self.users.values()
+        )
+        if not sender_is_admin:
+            log.info("[FRN-CMD] %s tried !web but is not admin", sender)
+            return
+
+        room   = self.rooms.get(room_name)
+        parts  = text.split()
+        cmd    = parts[1].lower() if len(parts) > 1 else "help"
+        log.info("[FRN-CMD] admin %s in '%s': %s", sender, room_name, text.strip())
+
+        async def reply(msg):
+            if room:
+                await room.send_text(msg)
+
+        if cmd == "help":
+            await reply("Befehle: help | users | adduser <email> <cs> | deluser <email> | rooms | status")
+        elif cmd == "users":
+            entries = [f"{u}({v.get('callsign','?')})" + ("[A]" if v.get("is_admin") else "")
+                       for u, v in self.users.items()]
+            await reply("User: " + (", ".join(entries) if entries else "—"))
+        elif cmd == "adduser":
+            if len(parts) < 4:
+                await reply("Verwendung: !web adduser <email> <callsign>")
+                return
+            email, callsign = parts[2], parts[3]
+            if email in self.users:
+                await reply(f"{email} existiert bereits.")
+                return
+            self.users[email] = {"callsign": callsign, "is_admin": False,
+                                 "frn_only": True, "default_room": ""}
+            self._save_users()
+            await reply(f"Benutzer {email} ({callsign}) angelegt.")
+        elif cmd == "deluser":
+            if len(parts) < 3:
+                await reply("Verwendung: !web deluser <email>")
+                return
+            email = parts[2]
+            if email not in self.users:
+                await reply(f"{email} nicht gefunden.")
+                return
+            del self.users[email]
+            self._save_users()
+            await reply(f"Benutzer {email} gelöscht.")
+        elif cmd == "rooms":
+            entries = [f"{m}={r.name}" for m, r in self.rooms.items()]
+            await reply("Räume: " + (", ".join(entries) if entries else "—"))
+        elif cmd == "status":
+            entries = [f"{r.name}:{'OK' if r._connected else 'OFFLINE'}"
+                       for r in self.rooms.values()]
+            await reply(", ".join(entries) if entries else "keine Räume")
+        else:
+            await reply(f"Unbekannt: '{cmd}'. Tippe: !web help")
+
+    def _set_room_callback(self, room: "FRNTXRoom"):
+        room.on_message = self._handle_frn_command
+
     def load_rooms(self):
         path = Path(self.args.rooms)
         self._rooms_path = path
@@ -583,7 +747,7 @@ class TXServer:
         with open(path) as f:
             data = json.load(f)
         for r in data.get("rooms", []):
-            self.rooms[r["mount"]] = FRNTXRoom(
+            room = FRNTXRoom(
                 name       = r["name"],
                 frn_server = r.get("frn_server", self.args.frn_server),
                 frn_port   = r.get("frn_port",   self.args.frn_port),
@@ -591,6 +755,8 @@ class TXServer:
                 password   = r["password"],
                 callsign   = r["callsign"],
             )
+            self._set_room_callback(room)
+            self.rooms[r["mount"]] = room
         log.info("Configured %d rooms: %s", len(self.rooms), list(self.rooms))
 
     def _save_users(self):
@@ -647,6 +813,68 @@ class TXServer:
         }
         self._save_tokens()
         return token
+
+    # ── Clips ──────────────────────────────────────────────────────────────
+
+    _CLIPS_DIR = Path(__file__).parent / "clips"
+
+    def _load_clips(self) -> list[dict]:
+        """Load clip list from config.ini [clips] section."""
+        import configparser
+        ini = configparser.ConfigParser()
+        ini_path = Path(__file__).parent / "config.ini"
+        if not ini_path.exists():
+            return []
+        ini.read(ini_path, encoding="utf-8")
+        if not ini.has_section("clips"):
+            return []
+        clips = []
+        for clip_id, value in ini["clips"].items():
+            if "|" in value:
+                label, text = value.split("|", 1)
+            else:
+                label = text = value
+            label = label.strip()
+            text  = text.strip()
+            if label and text:
+                has_rec = (self._CLIPS_DIR / f"{clip_id}.wav").exists()
+                clips.append({"id": clip_id, "label": label,
+                               "text": text, "has_recording": has_rec})
+        return clips
+
+    async def _get_clip_pcm(self, clip_id: str, clip_text: str,
+                             lang: str = "de") -> bytes:
+        """Return 8 kHz mono s16le PCM: prefers recorded file, falls back to TTS."""
+        recorded = self._CLIPS_DIR / f"{clip_id}.wav"
+        if recorded.exists():
+            ffm = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-i", str(recorded),
+                "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            pcm, _ = await ffm.communicate()
+            return pcm
+        return await self._gen_espeak_pcm(clip_text, lang)
+
+    @staticmethod
+    async def _gen_espeak_pcm(text: str, lang: str = "de") -> bytes:
+        """Generate 8 kHz mono s16le PCM from text via espeak-ng + ffmpeg."""
+        esp = await asyncio.create_subprocess_exec(
+            "espeak-ng", "-v", lang, "-s", "145", "-a", "180", "--stdout", text,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        wav_data, _ = await esp.communicate()
+        ffm = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-i", "pipe:0",
+            "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        pcm, _ = await ffm.communicate(input=wav_data)
+        return pcm
 
     async def _disconnect_user_tx(self, email: str):
         """Trennt alle persistenten User-TX-Verbindungen für eine E-Mail-Adresse."""
@@ -861,7 +1089,7 @@ class TXServer:
             mount = re.sub(r"[^a-z0-9]+", "", name.lower())[:20] or f"room{i + 1}"
             if mount in self.rooms:
                 mount = f"{mount}{i + 1}"
-            self.rooms[mount] = FRNTXRoom(
+            room = FRNTXRoom(
                 name       = name,
                 frn_server = self.args.frn_server,
                 frn_port   = self.args.frn_port,
@@ -869,6 +1097,8 @@ class TXServer:
                 password   = password,
                 callsign   = f"{prefix}-{i + 1:02d}",
             )
+            self._set_room_callback(room)
+            self.rooms[mount] = room
         log.info("Auto-configured %d rooms: %s", len(self.rooms), list(self.rooms))
 
     async def _try_frn_auth(self, email: str, password: str, callsign: str) -> bool:
@@ -1199,10 +1429,12 @@ class TXServer:
         if mount in self.rooms:
             return web.json_response({"error": f"mount '{mount}' already exists"}, status=409)
 
-        self.rooms[mount] = FRNTXRoom(
+        room = FRNTXRoom(
             name=name, frn_server=frn_srv, frn_port=frn_port,
             email=email, password=password,
             callsign=callsign or f"TX-{mount.title()}")
+        self._set_room_callback(room)
+        self.rooms[mount] = room
         self._save_rooms()
         log.info("Admin: created room '%s' → /%s", name, mount)
         return web.json_response({"ok": True})
@@ -1237,6 +1469,70 @@ class TXServer:
             "active_tokens": len(self.tokens),
             "users":         len(self.users),
         })
+
+    async def handle_clips(self, request):
+        """Return list of configured quick-send clips (requires valid token)."""
+        token = request.rel_url.query.get("token", "")
+        if not self._validate_token(token):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"clips": self._load_clips()})
+
+    async def handle_clip_recording_upload(self, request):
+        """POST /api/clips/{id}/recording — save custom audio for a clip."""
+        import re as _re
+        token = request.rel_url.query.get("token", "")
+        if not self._validate_token(token):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        clip_id = request.match_info["id"]
+        if not _re.match(r'^[a-z0-9_]{1,40}$', clip_id):
+            return web.json_response({"error": "Ungültige Clip-ID"}, status=400)
+        if not any(c["id"] == clip_id for c in self._load_clips()):
+            return web.json_response({"error": "Clip nicht gefunden"}, status=404)
+
+        data = await request.read()
+        if len(data) < 200:
+            return web.json_response({"error": "Audio zu kurz"}, status=400)
+        if len(data) > 10 * 1024 * 1024:
+            return web.json_response({"error": "Audio zu groß (max 10 MB)"}, status=400)
+
+        self._CLIPS_DIR.mkdir(exist_ok=True)
+        tmp  = self._CLIPS_DIR / f"_{clip_id}.tmp"
+        dest = self._CLIPS_DIR / f"{clip_id}.wav"
+        try:
+            tmp.write_bytes(data)
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", str(tmp),
+                "-ar", "8000", "-ac", "1", str(dest),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+        finally:
+            tmp.unlink(missing_ok=True)
+
+        if not dest.exists() or dest.stat().st_size < 100:
+            return web.json_response({"error": "Konvertierung fehlgeschlagen"}, status=500)
+
+        log.info("Clip '%s': eigene Aufnahme gespeichert (%d Bytes)", clip_id, dest.stat().st_size)
+        return web.json_response({"ok": True})
+
+    async def handle_clip_recording_delete(self, request):
+        """DELETE /api/clips/{id}/recording — remove custom recording, fall back to TTS."""
+        import re as _re
+        token = request.rel_url.query.get("token", "")
+        if not self._validate_token(token):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        clip_id = request.match_info["id"]
+        if not _re.match(r'^[a-z0-9_]{1,40}$', clip_id):
+            return web.json_response({"error": "Ungültige Clip-ID"}, status=400)
+
+        recorded = self._CLIPS_DIR / f"{clip_id}.wav"
+        if recorded.exists():
+            recorded.unlink()
+            log.info("Clip '%s': eigene Aufnahme gelöscht → TTS", clip_id)
+        return web.json_response({"ok": True})
 
     async def handle_frn_networks(self, request):
         """Return list of available FRN room names (requires valid token).
@@ -1499,6 +1795,7 @@ class TXServer:
                         _tx_approval_task = asyncio.create_task(_request_and_notify())
 
                     elif cmd == "PTT_STOP":
+                        was_active = in_tx or waiting_tx
                         waiting_tx = False
                         if _tx_approval_task and not _tx_approval_task.done():
                             _tx_approval_task.cancel()
@@ -1506,7 +1803,98 @@ class TXServer:
                         if in_tx:
                             await tx_conn.end_tx()
                             in_tx = False
+                        if was_active:
                             await ws.send_json({"type": "tx_stopped"})
+
+                    elif cmd == "PLAY_CLIP":
+                        if in_tx or waiting_tx:
+                            await ws.send_json({"type": "error",
+                                                "msg": "PTT aktiv — bitte erst loslassen"})
+                            continue
+                        if room._tx_lock.locked():
+                            await ws.send_json({"type": "error",
+                                                "msg": "Raum belegt (jemand sendet)"})
+                            continue
+
+                        clip_id   = data.get("id", "")
+                        clip_list = self._load_clips()
+                        clip      = next((c for c in clip_list if c["id"] == clip_id), None)
+                        if not clip:
+                            await ws.send_json({"type": "error",
+                                                "msg": f"Clip '{clip_id}' nicht gefunden"})
+                            continue
+
+                        clip_text = clip["text"].replace("{callsign}", callsign)
+                        clip_lang = "de"
+
+                        await room._tx_lock.acquire()
+                        waiting_tx = True
+                        await ws.send_json({"type": "tx_waiting"})
+
+                        async def _play_clip_task(ct=clip_text, cl=clip_lang):
+                            nonlocal in_tx, waiting_tx, user_tx_conn, tx_conn
+                            ok = False
+                            try:
+                                if frn_email and frn_password:
+                                    existing = self._user_tx_conns.get(user_key)
+                                    if existing and existing._connected:
+                                        user_tx_conn = existing
+                                        tx_conn = existing
+                                    else:
+                                        for k in list(self._user_tx_conns):
+                                            if k[0] == frn_email and k != user_key:
+                                                old = self._user_tx_conns.pop(k)
+                                                try:
+                                                    await old.disconnect()
+                                                except Exception:
+                                                    pass
+                                        for attempt in range(4):
+                                            try:
+                                                conn = FRNTXRoom(
+                                                    name=room.name,
+                                                    frn_server=room.server,
+                                                    frn_port=room.port,
+                                                    email=frn_email,
+                                                    password=frn_password,
+                                                    callsign=callsign,
+                                                )
+                                                await conn.ensure_connected()
+                                                user_tx_conn = conn
+                                                tx_conn = conn
+                                                self._user_tx_conns[user_key] = conn
+                                                break
+                                            except Exception as e:
+                                                if "BLOCK" in str(e) and attempt < 3:
+                                                    await asyncio.sleep(8)
+                                                else:
+                                                    break
+                                ok = await tx_conn.request_tx()
+                            finally:
+                                room._tx_lock.release()
+                                waiting_tx = False
+
+                            if ok:
+                                in_tx = True
+                                await ws.send_json({"type": "tx_active", "beep": True})
+                                try:
+                                    pcm = await self._get_clip_pcm(clip_id, ct, cl)
+                                    for i in range(0, len(pcm), PCM_PACKET_BYTES):
+                                        await tx_conn.send_pcm(pcm[i:i + PCM_PACKET_BYTES])
+                                except asyncio.CancelledError:
+                                    raise  # PTT_STOP übernimmt end_tx + tx_stopped
+                                except Exception as e:
+                                    log.warning("[%s] Clip-PCM-Fehler: %s", room.name, e)
+                                finally:
+                                    if in_tx:
+                                        await tx_conn.end_tx()
+                                        in_tx = False
+                                if not asyncio.current_task().cancelled():
+                                    await ws.send_json({"type": "tx_stopped"})
+                            elif not asyncio.current_task().cancelled():
+                                await ws.send_json({"type": "error",
+                                                    "msg": "TX nicht genehmigt (Kanal belegt)"})
+
+                        _tx_approval_task = asyncio.create_task(_play_clip_task())
 
                 elif msg.type == web.WSMsgType.BINARY:
                     if not in_tx and not waiting_tx:
@@ -1616,6 +2004,9 @@ class TXServer:
         app.router.add_get ("/api/rooms",           self.handle_rooms)
         app.router.add_get ("/api/config",          self.handle_config)
         app.router.add_get ("/stream/{mount}.mp3",            self.handle_stream_proxy)
+        app.router.add_get   ("/api/clips",                          self.handle_clips)
+        app.router.add_post  ("/api/clips/{id}/recording",          self.handle_clip_recording_upload)
+        app.router.add_delete("/api/clips/{id}/recording",          self.handle_clip_recording_delete)
         app.router.add_get ("/api/frn-networks",              self.handle_frn_networks)
         app.router.add_get ("/api/rooms/{mount}/clients",    self.handle_room_clients)
         app.router.add_get ("/ws",                           self.handle_ws)
