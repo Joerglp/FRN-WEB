@@ -445,8 +445,9 @@ class RoomRecorder:
     TX-Server (zentraler Whisper-Prozess).
     """
 
-    SILENCE_TIMEOUT = 1.5    # Sekunden Stille → Session beendet
-    MIN_DURATION    = 1.0    # Sekunden Mindestlänge (kürzere werden verworfen)
+    SILENCE_TIMEOUT = 4.0    # Sekunden Stille nach letztem Audio → Session beendet
+    MIN_DURATION    = 1.5    # Sekunden Mindestlänge (kürzere werden verworfen)
+    MAX_DURATION    = 300.0  # Sekunden Maximallänge (erzwungener Schnitt)
     SAMPLE_RATE     = 8000
     SAMPLE_WIDTH    = 2      # int16
 
@@ -468,9 +469,14 @@ class RoomRecorder:
 
         with self._lock:
             if is_silence:
-                # Schweigen während aktiver Session → Timer läuft bereits
+                if not self._active:
+                    return  # Noch keine Session — Stille ignorieren
+                # Session aktiv: Stille in Puffer schreiben (korrekte Zeitstempel)
+                # Timer läuft bereits — nicht zurücksetzen
+                self._buf.append(pcm)
                 return
-            # Audio-Daten
+
+            # Echte Audio-Daten
             if not self._active:
                 self._active   = True
                 self._start_ts = time.time()
@@ -483,7 +489,25 @@ class RoomRecorder:
             self._buf.append(pcm)
             self._last_ts = time.time()
 
-        # Silence-Timer zurücksetzen
+            # Maximallänge überschritten → Session zwangsweise beenden
+            max_bytes = int(self.MAX_DURATION * self.SAMPLE_RATE) * self.SAMPLE_WIDTH
+            if sum(len(b) for b in self._buf) >= max_bytes:
+                log.info("[%s] MAX_DURATION erreicht — Session wird gespeichert",
+                         self.room_name)
+                if self._timer:
+                    self._timer.cancel()
+                    self._timer = None
+                self._active  = False
+                pcm_data      = b"".join(self._buf)
+                callsign_snap = self._callsign
+                start_ts      = self._start_ts
+                self._buf     = []
+                threading.Thread(
+                    target=self._save, args=(pcm_data, callsign_snap, start_ts),
+                    daemon=True).start()
+                return
+
+        # Timer zurücksetzen — nur bei echtem Audio
         if self._timer:
             self._timer.cancel()
         self._timer = threading.Timer(self.SILENCE_TIMEOUT, self._on_silence)

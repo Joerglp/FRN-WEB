@@ -3,23 +3,16 @@
     {
       "mount":    "quasel",
       "name":     "Quasel-Ecke",
-      "email":    "tx-quasel@frn.local.de",
-      "password": "txpass",
-      "callsign": "TX-Quasel"
+      "callsign": "WEB-Quasel",
+      "email":    "stream-quasel@example.com",
+      "password": "DEIN_FRN_PASSWORT"
     },
     {
       "mount":    "steinheim",
       "name":     "Steinheim-Freenet5",
-      "email":    "tx-steinheim@frn.local.de",
-      "password": "txpass",
-      "callsign": "TX-Steinheim"
-    },
-    {
-      "mount":    "eickelborn",
-      "name":     "Eickelborn-Freenet",
-      "email":    "tx-eickelborn@frn.local.de",
-      "password": "txpass",
-      "callsign": "TX-Eickelborn"
+      "callsign": "WEB-Steinheim",
+      "email":    "stream-steinheim@example.com",
+      "password": "DEIN_FRN_PASSWORT"
     }
   ]
 }

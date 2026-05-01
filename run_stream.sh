@@ -19,7 +19,7 @@ FRN_PORT="${FRN_PORT:-10024}"
 
 # Icecast
 ICECAST_HOST="${ICECAST_HOST:-localhost}"
-ICECAST_PORT="${ICECAST_PORT:-8000}"
+ICECAST_PORT="${ICECAST_PORT:-8005}"
 ICECAST_PASS="${ICECAST_PASS:-ICECAST_SOURCE_PW}"
 ICECAST_URL="icecast://source:${ICECAST_PASS}@${ICECAST_HOST}:${ICECAST_PORT}/${MOUNT}.mp3"
 
@@ -55,6 +55,6 @@ while true; do
         -f mp3 "${ICECAST_URL}" \
     || true
 
-    echo "[$(date)] Stream '${ROOM}' disconnected, restarting in 15s..." >&2
-    sleep 15
+    echo "[$(date)] Stream '${ROOM}' disconnected, restarting in 45s..." >&2
+    sleep 45
 done

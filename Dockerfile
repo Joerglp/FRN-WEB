@@ -29,9 +29,10 @@ RUN if [ "$WITH_WHISPER" = "true" ]; then \
 
 WORKDIR /app
 
-COPY server/ ./server/
-COPY web/    ./web/
-COPY config/ ./config/
+# Alle Python-Skripte, HTML und JS flach kopieren
+COPY *.py   ./
+COPY *.html ./
+COPY *.js   ./
 
 # Verzeichnisse für Laufzeit-Daten
 RUN mkdir -p /opt/FRN/recordings /opt/FRN/archive/audio
@@ -41,5 +42,8 @@ EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s \
   CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8765/api/config')"
 
-CMD ["python3", "server/frn_tx_server.py", \
-     "--config", "/app/config/config.json"]
+# config/, tx_users.json, tx_rooms.json werden via Volume eingebunden
+CMD ["python3", "frn_tx_server.py", \
+     "--config", "/app/config/config.json", \
+     "--users",  "/app/config/tx_users.json", \
+     "--rooms",  "/app/config/tx_rooms.json"]

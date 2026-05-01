@@ -24,14 +24,13 @@ services:
     ports:
       - "${TX_PORT:-8765}:8765"
     volumes:
-      - ./config:/app/config                      # live-editierbare Konfiguration
+      - ./config:/app/config                      # config.json, tx_users.json, tx_rooms.json
       - frn-recordings:/opt/FRN/recordings        # WAV-Aufnahmen
       - frn-archive:/opt/FRN/archive              # SQLite DB + Opus-Dateien
       - whisper-cache:/root/.cache/huggingface    # Whisper-Modell (wird 1x geladen)
     environment:
       - PYTHONUNBUFFERED=1
       # Externer Whisper-Server (optional, überschreibt config.json whisper.remote_url)
-      # Beispiel: WHISPER_REMOTE_URL=http://ki-rechner:9001/transcribe
       - WHISPER_REMOTE_URL=${WHISPER_REMOTE_URL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"       # Zugriff auf Host (FRN_Server.jar)
@@ -52,9 +51,10 @@ services:
       args:
         WITH_WHISPER: "false"    # Streams brauchen kein Whisper
     restart: unless-stopped
-    entrypoint: ["python3", "server/frn_stream_runner.py"]
+    entrypoint: ["python3", "frn_stream_runner.py"]
     volumes:
       - ./config:/app/config
+      - frn-recordings:/opt/FRN/recordings
     environment:
       - PYTHONUNBUFFERED=1
       - ICECAST_HOST=icecast

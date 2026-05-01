@@ -1,0 +1,25 @@
+{
+  "rooms": [
+    {
+      "mount":    "quasel",
+      "name":     "Quasel-Ecke",
+      "email":    "tx-quasel@frn.local.de",
+      "password": "txpass",
+      "callsign": "TX-Quasel"
+    },
+    {
+      "mount":    "eickelborn_ch74",
+      "name":     "Eickelborn-CH74",
+      "email":    "tx-ch74@frn.local.de",
+      "password": "txpass",
+      "callsign": "TX-CH74"
+    },
+    {
+      "mount":    "eickelborn",
+      "name":     "Eickelborn-Freenet",
+      "email":    "tx-eickelborn@frn.local.de",
+      "password": "txpass",
+      "callsign": "TX-Eickelborn"
+    }
+  ]
+}
