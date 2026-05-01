@@ -1042,7 +1042,7 @@ audio {
 
     <!-- ── Server tab ── -->
     <div id="admin-tab-server" class="admin-tab-content">
-      <div class="admin-section-title">Aktueller FRN-Server</div>
+      <div class="admin-section-title">FRN-Server</div>
       <div class="form-grid">
         <div class="form-field" style="flex:2">
           <label>Hostname / IP</label>
@@ -1053,6 +1053,23 @@ audio {
           <input type="number" id="srv-port" placeholder="10024" min="1" max="65535">
         </div>
       </div>
+
+      <div class="admin-section-title" style="margin-top:16px">FRN-Zugangsdaten</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">
+        Fremde Server erfordern beim System-Manager registrierte FRN-Konten.<br>
+        Leer lassen, um die bisherigen Raumdaten beizubehalten.
+      </div>
+      <div class="form-grid">
+        <div class="form-field" style="flex:2">
+          <label>FRN E-Mail</label>
+          <input type="email" id="srv-email" placeholder="dein@frn-konto.de">
+        </div>
+        <div class="form-field" style="flex:2">
+          <label>Passwort</label>
+          <input type="password" id="srv-password" placeholder="FRN-Passwort">
+        </div>
+      </div>
+
       <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <button class="btn-save" onclick="switchServer()">WECHSELN &amp; NEU VERBINDEN</button>
         <a href="https://tools.freeradionetwork.de:43448/FRN_Browser/" target="_blank"
@@ -2419,17 +2436,22 @@ async function loadServerTab() {
 }
 
 async function switchServer() {
-  const host = document.getElementById("srv-host").value.trim();
-  const port = parseInt(document.getElementById("srv-port").value, 10);
-  const msg  = document.getElementById("srv-msg");
+  const host  = document.getElementById("srv-host").value.trim();
+  const port  = parseInt(document.getElementById("srv-port").value, 10);
+  const email = document.getElementById("srv-email").value.trim();
+  const pw    = document.getElementById("srv-password").value;
+  const msg   = document.getElementById("srv-msg");
   if (!host) { msg.textContent = "Bitte Hostname eingeben."; return; }
   if (!port || port < 1 || port > 65535) { msg.textContent = "Ungültiger Port."; return; }
   msg.textContent = "Wechsle Server …";
+  const body = { frn_server: host, frn_port: port };
+  if (email) body.frn_email    = email;
+  if (pw)    body.frn_password = pw;
   try {
     const r = await adminFetch("/api/admin/server", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ frn_server: host, frn_port: port })
+      body: JSON.stringify(body)
     });
     const d = await r.json();
     if (d.error) { msg.textContent = "Fehler: " + d.error; return; }

@@ -1503,13 +1503,18 @@ class TXServer:
         if not new_host:
             return web.json_response({"error": "Kein Server angegeben"}, status=400)
 
+        new_email    = str(body.get("frn_email",    "")).strip() or None
+        new_password = str(body.get("frn_password", "")).strip() or None
+
         old_host = self.args.frn_server
         old_port = self.args.frn_port
-        if new_host == old_host and new_port == old_port:
+        same_server = (new_host == old_host and new_port == old_port)
+        if same_server and not new_email and not new_password:
             return web.json_response({"status": "unchanged"})
 
-        log.info("Admin: FRN-Server wechsel %s:%d → %s:%d",
-                 old_host, old_port, new_host, new_port)
+        log.info("Admin: FRN-Server wechsel %s:%d → %s:%d%s",
+                 old_host, old_port, new_host, new_port,
+                 f" (credentials: {new_email})" if new_email else "")
 
         self.args.frn_server = new_host
         self.args.frn_port   = new_port
@@ -1519,6 +1524,10 @@ class TXServer:
             if room.server == old_host and room.port == old_port:
                 room.server = new_host
                 room.port   = new_port
+                if new_email:
+                    room.email    = new_email
+                if new_password:
+                    room.password = new_password
                 room._connected = False
                 if room._reader_task:
                     room._reader_task.cancel()
@@ -1530,7 +1539,9 @@ class TXServer:
                     except Exception:
                         pass
                 asyncio.create_task(room.ensure_connected())
-                log.info("Raum %s → neu verbinden mit %s:%d", mount, new_host, new_port)
+                log.info("Raum %s → neu verbinden mit %s:%d%s",
+                         mount, new_host, new_port,
+                         f" als {new_email}" if new_email else "")
 
         return web.json_response({
             "status":     "switching",
