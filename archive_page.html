@@ -461,7 +461,13 @@
   <div class="stat-item" id="stat-filter-info" style="display:none">
     <span style="color:var(--amber)">▲ Filter aktiv</span>
   </div>
-  <div style="margin-left:auto; font-size:10px; color:var(--text-dim)" id="last-refresh"></div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-dim)">
+    <label for="auto-reload-toggle" style="cursor:pointer;user-select:none">Auto-Reload</label>
+    <input type="checkbox" id="auto-reload-toggle" checked
+           style="cursor:pointer;width:14px;height:14px;accent-color:var(--accent)"
+           onchange="onAutoReloadToggle()">
+    <span id="last-refresh"></span>
+  </div>
 </div>
 
 <!-- MAIN -->
@@ -645,8 +651,8 @@ async function loadEntries(append = false) {
     }
 
     document.getElementById('stat-shown').textContent = shownCount;
-    document.getElementById('last-refresh').textContent =
-      'Aktualisiert: ' + new Date().toLocaleTimeString('de-DE');
+    document.getElementById('last-refresh').textContent = autoReloadEnabled()
+      ? 'Aktualisiert: ' + new Date().toLocaleTimeString('de-DE') : '';
     setStatus('BEREIT', true);
 
   } catch (err) {
@@ -677,8 +683,22 @@ document.getElementById('f-search').addEventListener('keydown', e => {
 });
 
 // ── Auto refresh ───────────────────────────────────────────────────────────
+function autoReloadEnabled() {
+  return document.getElementById('auto-reload-toggle').checked;
+}
+
+function onAutoReloadToggle() {
+  if (autoReloadEnabled()) {
+    scheduleRefresh();
+  } else {
+    cancelRefresh();
+    document.getElementById('last-refresh').textContent = '';
+  }
+}
+
 function scheduleRefresh() {
   cancelRefresh();
+  if (!autoReloadEnabled()) return;
   refreshTimer = setTimeout(() => {
     const search = document.getElementById('f-search').value.trim();
     const room   = document.getElementById('f-room').value;
