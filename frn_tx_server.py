@@ -53,7 +53,19 @@ MARKER_KEEPALIVE  = 0x00
 MARKER_TX_APPROVE = 0x01
 MARKER_SOUND      = 0x02
 MARKER_CLIENTS    = 0x03
+MARKER_MESSAGE    = 0x04
+MARKER_NETWORKS   = 0x05
+MARKER_ADMIN_LIST = 0x06
+MARKER_ACCESS_LIST= 0x07
+MARKER_BAN        = 0x08
+MARKER_MUTE       = 0x09
+MARKER_ACCESS_MODE= 0x0A
 GSM_OPT_WAV49     = 4
+
+LINE_LIST_MARKERS = frozenset({
+    MARKER_NETWORKS, MARKER_ADMIN_LIST, MARKER_ACCESS_LIST,
+    MARKER_BAN, MARKER_MUTE, MARKER_ACCESS_MODE,
+})
 
 AUDIO_PACKET_SIZE  = 325
 PCM_PACKET_SAMPLES = 1600
@@ -320,7 +332,7 @@ class FRNTXRoom:
             while self._connected:
                 await asyncio.sleep(KEEPALIVE_INTERVAL)
                 if self._writer and not self._writer.is_closing():
-                    self._writer.write(b"\x00")  # MARKER_KEEPALIVE im Binary-Modus
+                    self._writer.write(b"P\r\n")
                     await self._writer.drain()
         except asyncio.CancelledError:
             pass
@@ -398,6 +410,30 @@ class FRNTXRoom:
                 clients.append(parsed)
         return clients, buf
 
+    @staticmethod
+    def _try_parse_line_list(buf: bytes):
+        """Skip a count-prefixed line-list packet (marker byte already included).
+
+        Returns remaining_buf on success, or None if more data is needed.
+        """
+        if not buf:
+            return None
+        buf = buf[1:]  # skip marker
+        idx = buf.find(b"\r\n")
+        if idx < 0:
+            return None
+        try:
+            count = int(buf[:idx].decode(errors="replace").strip())
+        except ValueError:
+            count = 0
+        buf = buf[idx + 2:]
+        for _ in range(count):
+            idx = buf.find(b"\r\n")
+            if idx < 0:
+                return None
+            buf = buf[idx + 2:]
+        return buf
+
     async def _reader_loop(self):
         buf = b""
         try:
@@ -474,8 +510,16 @@ class FRNTXRoom:
                         else:
                             break                           # need more data
 
+                    elif marker in LINE_LIST_MARKERS:   # 0x05–0x0A — count+lines
+                        new_buf = self._try_parse_line_list(buf)
+                        if new_buf is not None:
+                            buf = new_buf
+                            progress = True
+                        else:
+                            break                           # need more data
+
                     else:
-                        buf = buf[1:]                       # skip unknown byte
+                        buf = buf[1:]                       # skip truly unknown byte
                         progress = True
 
         except asyncio.CancelledError:
