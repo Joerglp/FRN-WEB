@@ -243,6 +243,7 @@ class FRNTXRoom:
         self._pcm_buf         = b""
         self._clients: list   = []   # last received MARKER_CLIENTS list
         self._rx_clients: set = set()   # WebSocket connections for RX audio
+        self._chat_clients: set = set() # WebSocket connections for chat messages
         self._recorder        = None    # SessionRecorder (gesetzt nach load_config)
         self.on_message       = None    # callback(sender, text, room_name)
         try:
@@ -500,11 +501,13 @@ class FRNTXRoom:
                         if messages is not None:
                             buf = new_buf
                             progress = True
-                            if self.on_message:
-                                for msg in messages:
-                                    sender = msg.get("ON", "")
-                                    text   = msg.get("TM", "")
-                                    if sender and text:
+                            for msg in messages:
+                                sender = msg.get("ON", "")
+                                text   = msg.get("TM", "")
+                                if sender and text:
+                                    asyncio.create_task(
+                                        self._dispatch_message(sender, text))
+                                    if self.on_message:
                                         asyncio.create_task(
                                             self.on_message(sender, text, self.name))
                         else:
@@ -537,6 +540,17 @@ class FRNTXRoom:
             except Exception:
                 dead.add(ws)
         self._rx_clients -= dead
+
+    async def _dispatch_message(self, sender: str, text: str):
+        """Broadcast an incoming FRN text message to all connected chat clients."""
+        payload = {"type": "chat", "from": sender, "text": text}
+        dead = set()
+        for ws in list(self._chat_clients):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.add(ws)
+        self._chat_clients -= dead
 
     async def request_tx(self, timeout: float = 30.0) -> bool:
         if not self._connected:
@@ -1849,6 +1863,7 @@ class TXServer:
         user_tx_conn = self._user_tx_conns.get(user_key) if user_key else None
         tx_conn      = user_tx_conn or room
 
+        room._chat_clients.add(ws)
         try:
             await ws.send_json({"type": "ready", "callsign": callsign,
                                 "room": room.name})
@@ -1970,6 +1985,14 @@ class TXServer:
                             in_tx = False
                         if was_active:
                             await ws.send_json({"type": "tx_stopped"})
+
+                    elif cmd == "CHAT":
+                        text = str(data.get("text", "")).strip()
+                        if text:
+                            await room.ensure_connected()
+                            await room.send_text(text)
+                            # Echo back to all chat clients including sender
+                            await room._dispatch_message(callsign, text)
 
                     elif cmd == "PLAY_CLIP":
                         if in_tx or waiting_tx:
@@ -2111,6 +2134,7 @@ class TXServer:
                 except Exception:
                     pass
             # user_tx_conn bleibt am Leben (in self._user_tx_conns) für nächsten PTT-Druck
+            room._chat_clients.discard(ws)
             log.info("WS closed: user=%s", info["user"])
 
         return ws

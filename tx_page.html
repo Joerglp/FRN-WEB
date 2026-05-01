@@ -887,6 +887,34 @@ audio {
   </div>
 </div>
 
+<div class="section-label" id="chat-section-label" style="display:none">CHAT — Textnachrichten</div>
+<div class="panel" id="chat-panel" style="display:none">
+  <div class="panel-header">
+    <div class="led" id="led-chat"></div>
+    <div class="panel-title">CHAT</div>
+  </div>
+  <div class="panel-body" style="padding:10px 14px">
+    <div id="chat-log" style="
+      height:160px; overflow-y:auto; background:var(--bg);
+      border:1px solid var(--border); border-radius:6px;
+      padding:8px 10px; font-family:'Share Tech Mono',monospace;
+      font-size:0.78em; line-height:1.5em; margin-bottom:8px;
+    "></div>
+    <div style="display:flex;gap:8px">
+      <input id="chat-input" type="text" maxlength="200"
+        placeholder="Nachricht eingeben …"
+        style="flex:1;background:var(--bg);border:1px solid var(--border);
+               border-radius:6px;padding:7px 10px;color:var(--fg);
+               font-family:'Share Tech Mono',monospace;font-size:0.82em"
+        onkeydown="if(event.key==='Enter') sendChat()">
+      <button onclick="sendChat()" style="
+        background:var(--accent);color:#000;border:none;border-radius:6px;
+        padding:7px 16px;cursor:pointer;font-weight:700;font-size:0.82em;
+        white-space:nowrap">SENDEN</button>
+    </div>
+  </div>
+</div>
+
 <footer class="site-footer">
   <span>Icecast2 &nbsp;·&nbsp; 64&thinsp;kbps MP3 &nbsp;·&nbsp; 22050&thinsp;Hz Mono</span>
   <a href="/stream/status.xsl">Icecast-Status &#x2197;</a>
@@ -1705,6 +1733,8 @@ function doLogout() {
   document.getElementById("tx-section").style.display         = "none";
   document.getElementById("room-panel").style.display         = "none";
   document.getElementById("room-section-label").style.display = "none";
+  document.getElementById("chat-panel").style.display         = "none";
+  document.getElementById("chat-section-label").style.display = "none";
   document.getElementById("stream-cards").style.display       = "";
   document.getElementById("rx-section-label").style.display  = "";
   document.getElementById("password").value = "";
@@ -1893,7 +1923,41 @@ function onWsMessage(evt) {
     setStatus("FEHLER: " + msg.msg, "error"); stopAudio(); ws?.close();
   } else if (msg.type === "ready") {
     setStatus("BEREIT", "");
+    window._myCallsign = msg.callsign || "";
+    // Chat-Panel einblenden sobald WS verbunden
+    document.getElementById("chat-section-label").style.display = "";
+    document.getElementById("chat-panel").style.display = "";
+  } else if (msg.type === "chat") {
+    appendChatMessage(msg.from, msg.text);
   }
+}
+
+// ── Chat ─────────────────────────────────────────────────────────────────────
+function appendChatMessage(from, text) {
+  const log  = document.getElementById("chat-log");
+  const time = new Date().toLocaleTimeString("de-DE", {hour:"2-digit", minute:"2-digit"});
+  const line = document.createElement("div");
+  line.style.cssText = "margin-bottom:3px";
+  const isMine = from === (window._myCallsign || "");
+  line.innerHTML =
+    `<span style="color:var(--muted)">${time}</span> ` +
+    `<span style="color:${isMine ? "var(--accent)" : "var(--accent2)"};">${esc(from)}</span>` +
+    `<span style="color:var(--muted)">:</span> ` +
+    `<span>${esc(text)}</span>`;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+  // LED kurz blinken
+  const led = document.getElementById("led-chat");
+  led.className = "led active";
+  setTimeout(() => { led.className = "led"; }, 600);
+}
+
+function sendChat() {
+  const input = document.getElementById("chat-input");
+  const text  = input.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({cmd: "CHAT", text}));
+  input.value = "";
 }
 
 // ── Aufnahme-Modal ───────────────────────────────────────────────────────────
