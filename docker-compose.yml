@@ -14,12 +14,38 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── Whisper Transkriptions-Server ─────────────────────────────────────────
+  # Lokaler Fallback — wird nur genutzt wenn WHISPER_REMOTE_URL leer ist.
+  # Für GPU-Rechner: WHISPER_REMOTE_URL in .env setzen → dieser Service wird ignoriert.
+  whisper:
+    build:
+      context: .
+      args:
+        WITH_WHISPER: "true"      # faster-whisper immer installieren
+    restart: unless-stopped
+    entrypoint: ["python3", "whisper_server.py"]
+    volumes:
+      - ./config:/app/config:ro               # liest initial_prompt aus config.json
+      - whisper-cache:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+      - WHISPER_MODEL=${WHISPER_MODEL:-medium}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - WHISPER_PORT=9001
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:9001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s    # Modell-Ladezeit abwarten
+
   # ── FRN Web TX Server ──────────────────────────────────────────────────────
   frn-web:
     build:
       context: .
       args:
-        WITH_WHISPER: ${WITH_WHISPER:-false}
+        WITH_WHISPER: "false"
     restart: unless-stopped
     ports:
       - "${TX_PORT:-8765}:8765"
@@ -27,15 +53,16 @@ services:
       - ./config:/app/config                      # config.json, tx_users.json, tx_rooms.json
       - frn-recordings:/opt/FRN/recordings        # WAV-Aufnahmen
       - frn-archive:/opt/FRN/archive              # SQLite DB + Opus-Dateien
-      - whisper-cache:/root/.cache/huggingface    # Whisper-Modell (wird 1x geladen)
     environment:
       - PYTHONUNBUFFERED=1
-      # Externer Whisper-Server (optional, überschreibt config.json whisper.remote_url)
-      - WHISPER_REMOTE_URL=${WHISPER_REMOTE_URL:-}
+      # Externer Whisper-Server überschreibt den lokalen whisper-Service:
+      - WHISPER_REMOTE_URL=${WHISPER_REMOTE_URL:-http://whisper:9001/transcribe}
     extra_hosts:
       - "host.docker.internal:host-gateway"       # Zugriff auf Host (FRN_Server.jar)
     depends_on:
       icecast:
+        condition: service_healthy
+      whisper:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python3", "-c",
@@ -49,7 +76,7 @@ services:
     build:
       context: .
       args:
-        WITH_WHISPER: "false"    # Streams brauchen kein Whisper
+        WITH_WHISPER: "false"
     restart: unless-stopped
     entrypoint: ["python3", "frn_stream_runner.py"]
     volumes:

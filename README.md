@@ -117,52 +117,54 @@ Nach Login mit einem Admin-Account: **⚙ ADMIN**-Button oben rechts.
 
 Im SERVER-Tab können neue FRN-Konten direkt beim System-Manager `sysman.freeradionetwork.de` beantragt werden. Rufzeichen, Name, E-Mail und Stadt eingeben → **KONTO BEANTRAGEN** → Passwort kommt per E-Mail.
 
-## Whisper-Transkription (optional)
+## Whisper-Transkription
 
 Alle Übertragungen werden automatisch transkribiert und im **Funkarchiv** gespeichert.
+`whisper_server.py` läuft als eigenständiger HTTP-Server (Docker-Service oder systemd)
+und wird von `frn_tx_server.py` über `whisper.remote_url` angesprochen.
 
-| Modus | Vorteil | Nachteil |
-|-------|---------|----------|
-| **Lokal** (Pi/Server) | Kein externes Gerät nötig | Langsam auf ARM |
-| **Extern** (GPU-Rechner) | `large-v3` auf CUDA, ~10× schneller | Separater Rechner nötig |
+### Docker (Standard)
 
-### Option A: Lokal (CPU, Docker)
+`docker compose up` startet automatisch einen lokalen `whisper`-Service (CPU, `medium`-Modell).
+Kein weiterer Aufwand — das Modell wird beim ersten Start heruntergeladen (~1,5 GB).
 
 ```bash
-WITH_WHISPER=true docker compose up -d --build
+# Anderes Modell wählen (in .env oder inline):
+WHISPER_MODEL=small docker compose up -d
 ```
 
-Beim ersten Start lädt der Server das Whisper-Modell herunter (~1,5 GB für `medium`).
-
-### Option B: Externer GPU-Rechner
+### Externer GPU-Rechner (empfohlen für bessere Qualität)
 
 Auf einem Rechner mit NVIDIA-GPU:
 
 ```bash
-pip install faster-whisper flask
-WHISPER_MODEL=large-v3 WHISPER_DEVICE=cuda python3 -c "
-from faster_whisper import WhisperModel
-from flask import Flask, request, jsonify
-import tempfile, os
-app = Flask(__name__)
-model = WhisperModel(os.environ['WHISPER_MODEL'], device=os.environ['WHISPER_DEVICE'])
-@app.route('/transcribe', methods=['POST'])
-def transcribe():
-    f = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-    f.write(request.data); f.close()
-    segs, _ = model.transcribe(f.name, language='de')
-    os.unlink(f.name)
-    return jsonify({'text': ' '.join(s.text for s in segs)})
-app.run(host='0.0.0.0', port=9001)
-"
+pip install faster-whisper aiohttp
+WHISPER_MODEL=large-v3 WHISPER_DEVICE=cuda python3 whisper_server.py
 ```
 
-Dann in `config/config.json`:
+Dann in `.env` (Docker) oder `config/config.json` (nativ):
+
+```bash
+# .env
+WHISPER_REMOTE_URL=http://192.168.x.x:9001/transcribe
+```
 
 ```json
-"whisper": {
-  "remote_url": "http://192.168.x.x:9001/transcribe"
-}
+"whisper": { "remote_url": "http://192.168.x.x:9001/transcribe" }
+```
+
+Ist `WHISPER_REMOTE_URL` gesetzt, wird der lokale `whisper`-Docker-Service ignoriert.
+
+### Nativ (systemd)
+
+```bash
+pip install faster-whisper aiohttp numpy
+python3 whisper_server.py   # läuft auf Port 9001
+```
+
+In `config/config.json`:
+```json
+"whisper": { "remote_url": "http://localhost:9001/transcribe" }
 ```
 
 | Modell | Größe | Qualität | RAM (CPU) |
