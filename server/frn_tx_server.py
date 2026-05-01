@@ -1865,7 +1865,12 @@ class TXServer:
                                 for chunk in pre_buf:
                                     await tx_conn.send_pcm(chunk)
                                 pre_buf = []
-                                await ws.send_json({"type": "tx_active", "beep": True})
+                                try:
+                                    await ws.send_json({"type": "tx_active", "beep": True})
+                                except Exception:
+                                    # WS already closed — release TX immediately
+                                    await tx_conn.end_tx()
+                                    in_tx = False
                             elif not asyncio.current_task().cancelled():
                                 pre_buf = []
                                 await ws.send_json({"type": "error",
@@ -2003,8 +2008,18 @@ class TXServer:
         except Exception as e:
             log.error("WS error: %s", e)
         finally:
-            if in_tx:
-                await tx_conn.end_tx()
+            # Cancel pending TX-approval task first
+            if _tx_approval_task and not _tx_approval_task.done():
+                _tx_approval_task.cancel()
+            # Send RX0 if TX0 was already sent but WS closed before PTT_STOP.
+            # This covers both: in_tx (TX active) and waiting_tx (TX0 sent,
+            # TX_APPROVE not yet received). Without RX0 the FRN server keeps
+            # the client locked in TX-pending state and won't approve the next TX0.
+            if in_tx or waiting_tx:
+                try:
+                    await tx_conn.end_tx()
+                except Exception:
+                    pass
             # user_tx_conn bleibt am Leben (in self._user_tx_conns) für nächsten PTT-Druck
             log.info("WS closed: user=%s", info["user"])
 
