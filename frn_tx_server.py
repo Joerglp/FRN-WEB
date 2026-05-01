@@ -1468,6 +1468,74 @@ class TXServer:
             ],
             "active_tokens": len(self.tokens),
             "users":         len(self.users),
+            "frn_server":    self.args.frn_server,
+            "frn_port":      self.args.frn_port,
+        })
+
+    async def handle_admin_server_get(self, request):
+        """GET /api/admin/server — return current FRN server."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        return web.json_response({
+            "frn_server": self.args.frn_server,
+            "frn_port":   self.args.frn_port,
+        })
+
+    async def handle_admin_server_set(self, request):
+        """POST /api/admin/server — switch all rooms to a different FRN server."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        new_host = str(body.get("frn_server", "")).strip()
+        new_port = body.get("frn_port", self.args.frn_port)
+        try:
+            new_port = int(new_port)
+            if not (1 <= new_port <= 65535):
+                raise ValueError
+        except (ValueError, TypeError):
+            return web.json_response({"error": "Ungültiger Port"}, status=400)
+        if not new_host:
+            return web.json_response({"error": "Kein Server angegeben"}, status=400)
+
+        old_host = self.args.frn_server
+        old_port = self.args.frn_port
+        if new_host == old_host and new_port == old_port:
+            return web.json_response({"status": "unchanged"})
+
+        log.info("Admin: FRN-Server wechsel %s:%d → %s:%d",
+                 old_host, old_port, new_host, new_port)
+
+        self.args.frn_server = new_host
+        self.args.frn_port   = new_port
+
+        # Reconnect all rooms that use the old default server
+        for mount, room in list(self.rooms.items()):
+            if room.server == old_host and room.port == old_port:
+                room.server = new_host
+                room.port   = new_port
+                room._connected = False
+                if room._reader_task:
+                    room._reader_task.cancel()
+                if room._keepalive_task:
+                    room._keepalive_task.cancel()
+                if room._writer:
+                    try:
+                        room._writer.close()
+                    except Exception:
+                        pass
+                asyncio.create_task(room.connect())
+                log.info("Raum %s → neu verbinden mit %s:%d", mount, new_host, new_port)
+
+        return web.json_response({
+            "status":     "switching",
+            "frn_server": new_host,
+            "frn_port":   new_port,
         })
 
     async def handle_clips(self, request):
@@ -2029,6 +2097,9 @@ class TXServer:
         app.router.add_delete("/api/admin/rooms/{mount}", self.handle_admin_rooms_delete)
 
         app.router.add_get("/api/admin/status", self.handle_admin_status)
+
+        app.router.add_get ("/api/admin/server", self.handle_admin_server_get)
+        app.router.add_post("/api/admin/server", self.handle_admin_server_set)
 
         return app
 
