@@ -931,6 +931,7 @@ audio {
       <button class="admin-tab active" onclick="showAdminTab('users')">BENUTZER</button>
       <button class="admin-tab"        onclick="showAdminTab('rooms')">RÄUME</button>
       <button class="admin-tab"        onclick="showAdminTab('status')">STATUS</button>
+      <button class="admin-tab"        onclick="showAdminTab('server');loadServerTab()">SERVER</button>
     </div>
 
     <!-- ── Users tab ── -->
@@ -1037,6 +1038,29 @@ audio {
         <tbody id="status-rooms-tbody"></tbody>
       </table>
       <button class="btn-save" onclick="loadStatus()" style="margin-top:4px">AKTUALISIEREN</button>
+    </div>
+
+    <!-- ── Server tab ── -->
+    <div id="admin-tab-server" class="admin-tab-content">
+      <div class="admin-section-title">Aktueller FRN-Server</div>
+      <div class="form-grid">
+        <div class="form-field" style="flex:2">
+          <label>Hostname / IP</label>
+          <input type="text" id="srv-host" placeholder="localhost">
+        </div>
+        <div class="form-field" style="flex:0 0 100px">
+          <label>Port</label>
+          <input type="number" id="srv-port" placeholder="10024" min="1" max="65535">
+        </div>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn-save" onclick="switchServer()">WECHSELN &amp; NEU VERBINDEN</button>
+        <a href="https://tools.freeradionetwork.de:43448/FRN_Browser/" target="_blank"
+           style="color:var(--accent);font-size:.8rem;text-decoration:none">
+          ↗ FRN Browser (Serverliste)
+        </a>
+      </div>
+      <div id="srv-msg" style="margin-top:10px;font-size:.8rem;color:var(--accent)"></div>
     </div>
 
   </div>
@@ -2379,6 +2403,45 @@ async function loadStatus() {
         ${room.tx_locked ? 'AKTIV' : 'Frei'}</span></td>`;
     tbody.appendChild(tr);
   });
+}
+
+// ── Server tab ─────────────────────────────────────────────────────────────
+async function loadServerTab() {
+  try {
+    const r = await adminFetch("/api/admin/server");
+    const d = await r.json();
+    document.getElementById("srv-host").value = d.frn_server || "";
+    document.getElementById("srv-port").value = d.frn_port  || 10024;
+    document.getElementById("srv-msg").textContent = "";
+  } catch(e) {
+    document.getElementById("srv-msg").textContent = "Fehler beim Laden: " + e;
+  }
+}
+
+async function switchServer() {
+  const host = document.getElementById("srv-host").value.trim();
+  const port = parseInt(document.getElementById("srv-port").value, 10);
+  const msg  = document.getElementById("srv-msg");
+  if (!host) { msg.textContent = "Bitte Hostname eingeben."; return; }
+  if (!port || port < 1 || port > 65535) { msg.textContent = "Ungültiger Port."; return; }
+  msg.textContent = "Wechsle Server …";
+  try {
+    const r = await adminFetch("/api/admin/server", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ frn_server: host, frn_port: port })
+    });
+    const d = await r.json();
+    if (d.error) { msg.textContent = "Fehler: " + d.error; return; }
+    if (d.status === "unchanged") {
+      msg.textContent = "Server unverändert.";
+    } else {
+      msg.textContent = `Verbinde alle Räume mit ${d.frn_server}:${d.frn_port} …`;
+      setTimeout(() => loadStatus(), 2500);
+    }
+  } catch(e) {
+    msg.textContent = "Fehler: " + e;
+  }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
