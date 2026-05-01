@@ -320,7 +320,7 @@ class FRNTXRoom:
             while self._connected:
                 await asyncio.sleep(KEEPALIVE_INTERVAL)
                 if self._writer and not self._writer.is_closing():
-                    self._writer.write(b"P\r\n")
+                    self._writer.write(b"\x00")  # MARKER_KEEPALIVE im Binary-Modus
                     await self._writer.drain()
         except asyncio.CancelledError:
             pass
