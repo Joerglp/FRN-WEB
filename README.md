@@ -6,11 +6,13 @@ Browser-basierter **PTT-Sender, Stream-Empfänger und Gesprächsarchiv** für da
 
 - **Mithören** — Icecast-Streams direkt im Browser (alle konfigurierten Räume)
 - **Senden (PTT)** — Push-to-Talk über Mikrofon, GSM 06.10 kodiert, in den FRN-Raum
-- **Schnell-Satz-Buttons** — vordefinierte Phrasen per Knopfdruck senden; eigene Sprachaufnahme pro Button (Mikrofon-Icon), grüner Punkt zeigt eigene Aufnahme an
+- **Schnell-Satz-Buttons** — vordefinierte Phrasen per Knopfdruck senden; eigene Sprachaufnahme pro Button, grüner Punkt zeigt eigene Aufnahme an
 - **Login** — mit lokalem Account (`tx_users.json`) oder direkt mit FRN-Zugangsdaten
-- **Admin-Panel** — Benutzer und Räume live verwalten ohne Server-Neustart
+- **Admin-Panel** — Benutzer, Räume und FRN-Server live verwalten ohne Server-Neustart
+- **FRN-Server wechseln** — direkt aus dem Browser auf einen anderen FRN-Server umschalten
+- **FRN-Konto registrieren** — neues FRN-Konto direkt aus dem Browser beantragen
 - **Auto-Discovery** — Räume automatisch vom FRN-Server lesen, keine feste Raumliste nötig
-- **Transkription** *(optional)* — Spracherkennung via [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CPU, kein GPU nötig)
+- **Transkription** *(optional)* — Spracherkennung via [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
 - **Funkarchiv** *(optional)* — Chat-Verlauf aller Übertragungen mit Audioplayer, durchsuchbar
 - **Komprimiertes Audio** — WAV-Aufnahmen werden als Opus gespeichert (~10× kleiner)
 - **Hintergrund-Audio** — 🔊-Button hält den Stream aktiv wenn der Bildschirm gesperrt wird
@@ -31,15 +33,13 @@ Browser-basierter **PTT-Sender, Stream-Empfänger und Gesprächsarchiv** für da
 git clone https://github.com/Joerglp/FRN-WEB.git
 cd FRN-WEB
 
-# 2. Konfiguration anpassen
-cp .env.example .env
+# 2. Benutzer und Räume konfigurieren
 cp config/tx_users.json.example config/tx_users.json
-# Ersten Admin-Benutzer anlegen:
-python3 server/tx_add_user.py admin "DL0XYZ"
+python3 tx_add_user.py admin "DL0XYZ"   # Ersten Admin anlegen
 
 # 3. config/config.json editieren
-#    → frn.server auf die Adresse des FRN_Server setzen
-#    → frn_stream_account mit FRN-Zugangsdaten füllen (für Auto-Discovery)
+#    → frn.server: Adresse des FRN_Server (host.docker.internal = lokaler Host)
+#    → frn_stream_account: FRN-Zugangsdaten für Auto-Discovery und Streams
 
 # 4. Starten (ohne Whisper)
 docker compose up -d
@@ -53,103 +53,20 @@ Danach erreichbar unter:
 - **Funkarchiv:** `http://localhost:8765/archive`
 - **Icecast:** `http://localhost:8000`
 
-## Whisper-Transkription (optional)
-
-Alle Übertragungen werden automatisch transkribiert und im **Funkarchiv** gespeichert.
-
-Es gibt zwei Betriebsmodi:
-
-| Modus | Vorteil | Nachteil |
-|-------|---------|----------|
-| **Lokal** (Pi/Server) | Kein externes Gerät nötig | Langsam auf ARM, nur `medium` |
-| **Extern** (GPU-Rechner) | `large-v3` auf CUDA, ~10× schneller, bessere Qualität | Separater Rechner nötig |
-
-### Option A: Lokal (CPU)
-
-```bash
-# In .env setzen:
-WITH_WHISPER=true
-
-# Neu bauen und starten:
-docker compose up -d --build
-```
-
-Beim ersten Start lädt der Server das Whisper-Modell herunter (~1,5 GB für `medium`) und speichert es im `whisper-cache` Docker-Volume.
-
-### Option B: Externer GPU-Rechner (empfohlen)
-
-Auf einem Rechner mit NVIDIA-GPU den Whisper-API-Server starten:
-
-```bash
-pip install faster-whisper flask
-python3 server/whisper_server.py
-# Oder mit anderem Modell/Port:
-WHISPER_MODEL=large-v3 WHISPER_DEVICE=cuda WHISPER_PORT=9001 python3 server/whisper_server.py
-```
-
-Dann in `config/config.json` eintragen:
-
-```json
-"whisper": {
-  "remote_url": "http://192.168.x.x:9001/transcribe"
-}
-```
-
-Oder per Umgebungsvariable (Docker):
-```bash
-WHISPER_REMOTE_URL=http://192.168.x.x:9001/transcribe docker compose up -d
-```
-
-Ist `remote_url` gesetzt, braucht der Pi/Docker-Container **kein** `WITH_WHISPER=true` — die Rechenarbeit liegt komplett auf dem GPU-Rechner. Bei Ausfall des externen Servers fällt das System automatisch auf das lokale `medium`-Modell zurück (sofern installiert).
-
-### Konfiguration (`config/config.json`)
-
-```json
-"whisper": {
-  "remote_url":     "",
-  "model":          "medium",
-  "language":       "de",
-  "initial_prompt": "CB-Funk, Kanal 74, ..."
-}
-```
-
-| Modell | Größe | Qualität | RAM (CPU) |
-|--------|-------|----------|-----------|
-| `tiny` | 75 MB | niedrig | ~400 MB |
-| `base` | 145 MB | mittel | ~600 MB |
-| `small` | 480 MB | gut | ~1 GB |
-| `medium` | 1,5 GB | sehr gut | ~2,5 GB |
-| `large-v3` | 3 GB | exzellent | ~5 GB / 3 GB VRAM |
-
-> **Raspberry Pi 5:** `medium` mit `int8` läuft stabil, benötigt aber ~3 GB RAM + Swap.  
-> **Empfehlung:** Externen GPU-Rechner mit `large-v3` nutzen für deutlich bessere Erkennungsqualität.
-
-### Funkarchiv
-
-Das Archiv ist unter `/archive` erreichbar und zeigt alle Übertragungen als Chat-Verlauf:
-
-- Filter nach Raum, Datum und Suchbegriff
-- Inline-Audioplayer (Opus, ~10× kleiner als WAV)
-- Auto-Refresh alle 30 Sekunden
-- Callsigns farblich unterschieden
-
-## Schnellstart (ohne Docker)
+## Schnellstart (ohne Docker / Raspberry Pi)
 
 ```bash
 pip install aiohttp numpy scipy
-# Optionales Whisper:
-pip install faster-whisper paho-mqtt
-
-# libgsm + ffmpeg installieren:
 apt install libgsm1 ffmpeg
 
-python3 server/frn_tx_server.py \
+# TX-Server starten
+python3 frn_tx_server.py \
     --config config/config.json \
     --users  config/tx_users.json \
     --rooms  config/tx_rooms.json
 
-# Streams (in separaten Terminals oder als systemd-Services):
-bash server/run_stream.sh "Quasel-Ecke" quasel TX-Quasel tx-q@local streampass
+# Streams starten (je Raum, oder via systemd — siehe unten)
+bash run_stream.sh "Quasel-Ecke" quasel TX-Quasel tx@example.com passwort
 ```
 
 ## Konfiguration
@@ -166,22 +83,19 @@ bash server/run_stream.sh "Quasel-Ecke" quasel TX-Quasel tx-q@local streampass
 | `frn_stream_account.email` | FRN-Zugangsdaten für TX und Room-Discovery |
 | `frn_stream_account.password` | Passwort des Stream-Accounts |
 | `ui.title` | Titel der Web-Oberfläche |
-| `transcription.enabled` | Transkription aktivieren (`yes`/`no`) |
-| `transcription.whisper_model` | Modellgröße (`tiny`/`base`/`small`/`medium`) |
-| `transcription.whisper_language` | Sprache (z.B. `de`, `en`) |
+| `whisper.remote_url` | URL des externen Whisper-Servers (leer = lokal) |
+| `whisper.model` | Modellgröße (`tiny`/`base`/`small`/`medium`) |
+| `whisper.language` | Sprache (z.B. `de`, `en`) |
 
 ### `config/tx_users.json`
 
 Web-Benutzer mit SHA-256-Passwort-Hashes. Neuen Admin-Benutzer anlegen:
 
 ```bash
-python3 server/tx_add_user.py <benutzername> <callsign>
+python3 tx_add_user.py <benutzername> <callsign>
 ```
 
 Oder über das Admin-Panel im Browser (⚙ ADMIN nach Login).
-
-> **Hinweis:** Der ⚙ ADMIN-Button erscheint nur bei Benutzern mit `"is_admin": true`.
-> FRN-Direktlogin erhält normalen Zugang (kein Admin).
 
 ### `config/tx_rooms.json` (optional)
 
@@ -194,9 +108,70 @@ Nach Login mit einem Admin-Account: **⚙ ADMIN**-Button oben rechts.
 
 | Tab | Funktion |
 |-----|---------|
-| BENUTZER | Web-Benutzer anlegen / löschen |
+| BENUTZER | Web-Benutzer anlegen / löschen / Passwort ändern |
 | RÄUME | TX-Räume hinzufügen / entfernen (live, kein Neustart) |
 | STATUS | FRN-Verbindungsstatus aller Räume + aktive Tokens |
+| SERVER | FRN-Server wechseln (inkl. Zugangsdaten) + neues FRN-Konto registrieren |
+
+### FRN-Konto registrieren
+
+Im SERVER-Tab können neue FRN-Konten direkt beim System-Manager `sysman.freeradionetwork.de` beantragt werden. Rufzeichen, Name, E-Mail und Stadt eingeben → **KONTO BEANTRAGEN** → Passwort kommt per E-Mail.
+
+## Whisper-Transkription (optional)
+
+Alle Übertragungen werden automatisch transkribiert und im **Funkarchiv** gespeichert.
+
+| Modus | Vorteil | Nachteil |
+|-------|---------|----------|
+| **Lokal** (Pi/Server) | Kein externes Gerät nötig | Langsam auf ARM |
+| **Extern** (GPU-Rechner) | `large-v3` auf CUDA, ~10× schneller | Separater Rechner nötig |
+
+### Option A: Lokal (CPU, Docker)
+
+```bash
+WITH_WHISPER=true docker compose up -d --build
+```
+
+Beim ersten Start lädt der Server das Whisper-Modell herunter (~1,5 GB für `medium`).
+
+### Option B: Externer GPU-Rechner
+
+Auf einem Rechner mit NVIDIA-GPU:
+
+```bash
+pip install faster-whisper flask
+WHISPER_MODEL=large-v3 WHISPER_DEVICE=cuda python3 -c "
+from faster_whisper import WhisperModel
+from flask import Flask, request, jsonify
+import tempfile, os
+app = Flask(__name__)
+model = WhisperModel(os.environ['WHISPER_MODEL'], device=os.environ['WHISPER_DEVICE'])
+@app.route('/transcribe', methods=['POST'])
+def transcribe():
+    f = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+    f.write(request.data); f.close()
+    segs, _ = model.transcribe(f.name, language='de')
+    os.unlink(f.name)
+    return jsonify({'text': ' '.join(s.text for s in segs)})
+app.run(host='0.0.0.0', port=9001)
+"
+```
+
+Dann in `config/config.json`:
+
+```json
+"whisper": {
+  "remote_url": "http://192.168.x.x:9001/transcribe"
+}
+```
+
+| Modell | Größe | Qualität | RAM (CPU) |
+|--------|-------|----------|-----------|
+| `tiny` | 75 MB | niedrig | ~400 MB |
+| `base` | 145 MB | mittel | ~600 MB |
+| `small` | 480 MB | gut | ~1 GB |
+| `medium` | 1,5 GB | sehr gut | ~2,5 GB |
+| `large-v3` | 3 GB | exzellent | ~5 GB / 3 GB VRAM |
 
 ## Architektur
 
@@ -214,19 +189,17 @@ frn_tx_server.py ──── TX0/TX1 ────► FRN_Server.jar :10024
   │            │ PCM pipe
   │            ▼
   │       ffmpeg (GSM → MP3)
-  │            │ Icecast source
+  │            │ Icecast source protocol
   │            ▼
   │       Icecast2 :8000
   │
-  ├── frn_transcription.py
-  │      │ faster-whisper (CPU)
+  ├── frn_transcription.py (faster-whisper, CPU oder remote GPU)
   │      ▼
-  │   frn_archive.py
-  │      │ SQLite + Opus
+  │   frn_archive.py (SQLite + Opus)
   │      ▼
   │   /archive  (Chat-Verlauf Web-UI)
   │
-  └── MQTT → Home Automation (optional)
+  └── (Docker) frn_stream_runner.py — startet alle Streams, Watchdog
 ```
 
 ## Systemd (ohne Docker)
@@ -234,7 +207,23 @@ frn_tx_server.py ──── TX0/TX1 ────► FRN_Server.jar :10024
 ```
 /etc/systemd/system/frn-tx-server.service   # Web TX Server
 /etc/systemd/system/frn-stream@.service     # Stream pro Raum (Template)
-/etc/systemd/system/icecast2.service        # Icecast (meist Paket-Standard)
+```
+
+Beispiel Stream-Service (`/etc/systemd/system/frn-stream@quasel.service`):
+
+```ini
+[Unit]
+Description=FRN Stream - %i
+After=network.target icecast2.service
+
+[Service]
+EnvironmentFile=/opt/FRN/stream/stream.env
+ExecStart=/opt/FRN/stream/run_stream.sh "Quasel-Ecke" %i TX-%i tx@example.com passwort
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
 ```
 
 ## Lizenz
