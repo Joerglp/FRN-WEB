@@ -538,18 +538,24 @@ class FRNTXRoom:
                 dead.add(ws)
         self._rx_clients -= dead
 
-    async def request_tx(self) -> bool:
+    async def request_tx(self, timeout: float = 30.0) -> bool:
         if not self._connected:
             await self.ensure_connected()
         self._tx_approved.clear()
         self._writer.write(b"TX0\r\n")
         await self._writer.drain()
         try:
-            await asyncio.wait_for(self._tx_approved.wait(), timeout=30.0)
+            await asyncio.wait_for(self._tx_approved.wait(), timeout=timeout)
             self._pcm_buf = b""
             return True
         except asyncio.TimeoutError:
-            log.warning("[%s] TX approve timeout (30s)", self.name)
+            log.warning("[%s] TX approve timeout (%.0fs)", self.name, timeout)
+            # Send RX0 to cancel the pending TX request on the server side
+            try:
+                self._writer.write(b"RX0\r\n")
+                await self._writer.drain()
+            except Exception:
+                pass
             return False
 
     async def send_pcm(self, pcm_chunk: bytes):
@@ -1811,70 +1817,79 @@ class TXServer:
                             nonlocal in_tx, waiting_tx, pre_buf, user_tx_conn, tx_conn
                             ok = False
                             try:
-                                # Eigene FRN-Verbindung aufbauen (lazy, Retry bei BLOCK)
-                                if frn_email and frn_password:
-                                    # Bestehende Verbindung für diesen Raum wiederverwenden
-                                    existing = self._user_tx_conns.get(user_key)
-                                    if existing and existing._connected:
-                                        user_tx_conn = existing
-                                        tx_conn = existing
-                                    else:
-                                        # Verbindungen für andere Räume (gleiche Email) trennen
-                                        for k in list(self._user_tx_conns):
-                                            if k[0] == frn_email and k != user_key:
-                                                old = self._user_tx_conns.pop(k)
-                                                try:
-                                                    await old.disconnect()
-                                                except Exception:
-                                                    pass
-                                                log.info("[%s] User-TX anderer Raum getrennt: %s",
-                                                         room.name, k[1])
-                                        for attempt in range(4):
-                                            try:
-                                                conn = FRNTXRoom(
-                                                    name=room.name,
-                                                    frn_server=room.server,
-                                                    frn_port=room.port,
-                                                    email=frn_email,
-                                                    password=frn_password,
-                                                    callsign=callsign,
-                                                )
-                                                await conn.ensure_connected()
-                                                user_tx_conn = conn
-                                                tx_conn = conn
-                                                self._user_tx_conns[user_key] = conn
-                                                log.info("[%s] User-TX verbunden: %s (%s)",
-                                                         room.name, info["user"], callsign)
-                                                break
-                                            except Exception as e:
-                                                if "BLOCK" in str(e) and attempt < 3:
-                                                    log.info("[%s] AL=BLOCK — warte 8s (Versuch %d/4)",
-                                                             room.name, attempt + 1)
-                                                    await asyncio.sleep(8)
-                                                else:
-                                                    log.warning("[%s] User-TX fehlgeschlagen (%s) — Fallback",
-                                                                room.name, e)
-                                                    break
-                                ok = await tx_conn.request_tx()
-                            finally:
-                                room._tx_lock.release()
-                                waiting_tx = False
-
-                            if ok:
-                                in_tx = True
-                                for chunk in pre_buf:
-                                    await tx_conn.send_pcm(chunk)
-                                pre_buf = []
                                 try:
-                                    await ws.send_json({"type": "tx_active", "beep": True})
+                                    # Eigene FRN-Verbindung aufbauen (lazy, Retry bei BLOCK)
+                                    if frn_email and frn_password:
+                                        # Bestehende Verbindung für diesen Raum wiederverwenden
+                                        existing = self._user_tx_conns.get(user_key)
+                                        if existing and existing._connected:
+                                            user_tx_conn = existing
+                                            tx_conn = existing
+                                        else:
+                                            # Verbindungen für andere Räume (gleiche Email) trennen
+                                            for k in list(self._user_tx_conns):
+                                                if k[0] == frn_email and k != user_key:
+                                                    old = self._user_tx_conns.pop(k)
+                                                    try:
+                                                        await old.disconnect()
+                                                    except Exception:
+                                                        pass
+                                                    log.info("[%s] User-TX anderer Raum getrennt: %s",
+                                                             room.name, k[1])
+                                            for attempt in range(4):
+                                                try:
+                                                    conn = FRNTXRoom(
+                                                        name=room.name,
+                                                        frn_server=room.server,
+                                                        frn_port=room.port,
+                                                        email=frn_email,
+                                                        password=frn_password,
+                                                        callsign=callsign,
+                                                    )
+                                                    await conn.ensure_connected()
+                                                    user_tx_conn = conn
+                                                    tx_conn = conn
+                                                    self._user_tx_conns[user_key] = conn
+                                                    log.info("[%s] User-TX verbunden: %s (%s)",
+                                                             room.name, info["user"], callsign)
+                                                    break
+                                                except Exception as e:
+                                                    if "BLOCK" in str(e) and attempt < 3:
+                                                        log.info("[%s] AL=BLOCK — warte 8s (Versuch %d/4)",
+                                                                 room.name, attempt + 1)
+                                                        await asyncio.sleep(8)
+                                                    else:
+                                                        log.warning("[%s] User-TX fehlgeschlagen (%s) — Fallback",
+                                                                    room.name, e)
+                                                        break
+                                    ok = await tx_conn.request_tx()
+                                finally:
+                                    room._tx_lock.release()
+                                    waiting_tx = False
+
+                                if ok:
+                                    in_tx = True
+                                    for chunk in pre_buf:
+                                        await tx_conn.send_pcm(chunk)
+                                    pre_buf = []
+                                    try:
+                                        await ws.send_json({"type": "tx_active", "beep": True})
+                                    except Exception:
+                                        # WS already closed — release TX immediately
+                                        await tx_conn.end_tx()
+                                        in_tx = False
+                                elif not asyncio.current_task().cancelled():
+                                    pre_buf = []
+                                    await ws.send_json({"type": "error",
+                                                        "msg": "TX nicht genehmigt (Kanal belegt)"})
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as e:
+                                log.warning("[%s] TX-Task Fehler: %s", room.name, e)
+                                try:
+                                    await ws.send_json({"type": "error", "msg": f"TX-Fehler: {e}"})
                                 except Exception:
-                                    # WS already closed — release TX immediately
-                                    await tx_conn.end_tx()
-                                    in_tx = False
-                            elif not asyncio.current_task().cancelled():
-                                pre_buf = []
-                                await ws.send_json({"type": "error",
-                                                    "msg": "TX nicht genehmigt (Kanal belegt)"})
+                                    pass
 
                         _tx_approval_task = asyncio.create_task(_request_and_notify())
 
@@ -1919,64 +1934,73 @@ class TXServer:
                             nonlocal in_tx, waiting_tx, user_tx_conn, tx_conn
                             ok = False
                             try:
-                                if frn_email and frn_password:
-                                    existing = self._user_tx_conns.get(user_key)
-                                    if existing and existing._connected:
-                                        user_tx_conn = existing
-                                        tx_conn = existing
-                                    else:
-                                        for k in list(self._user_tx_conns):
-                                            if k[0] == frn_email and k != user_key:
-                                                old = self._user_tx_conns.pop(k)
-                                                try:
-                                                    await old.disconnect()
-                                                except Exception:
-                                                    pass
-                                        for attempt in range(4):
-                                            try:
-                                                conn = FRNTXRoom(
-                                                    name=room.name,
-                                                    frn_server=room.server,
-                                                    frn_port=room.port,
-                                                    email=frn_email,
-                                                    password=frn_password,
-                                                    callsign=callsign,
-                                                )
-                                                await conn.ensure_connected()
-                                                user_tx_conn = conn
-                                                tx_conn = conn
-                                                self._user_tx_conns[user_key] = conn
-                                                break
-                                            except Exception as e:
-                                                if "BLOCK" in str(e) and attempt < 3:
-                                                    await asyncio.sleep(8)
-                                                else:
-                                                    break
-                                ok = await tx_conn.request_tx()
-                            finally:
-                                room._tx_lock.release()
-                                waiting_tx = False
-
-                            if ok:
-                                in_tx = True
-                                await ws.send_json({"type": "tx_active", "beep": True})
                                 try:
-                                    pcm = await self._get_clip_pcm(clip_id, ct, cl)
-                                    for i in range(0, len(pcm), PCM_PACKET_BYTES):
-                                        await tx_conn.send_pcm(pcm[i:i + PCM_PACKET_BYTES])
-                                except asyncio.CancelledError:
-                                    raise  # PTT_STOP übernimmt end_tx + tx_stopped
-                                except Exception as e:
-                                    log.warning("[%s] Clip-PCM-Fehler: %s", room.name, e)
+                                    if frn_email and frn_password:
+                                        existing = self._user_tx_conns.get(user_key)
+                                        if existing and existing._connected:
+                                            user_tx_conn = existing
+                                            tx_conn = existing
+                                        else:
+                                            for k in list(self._user_tx_conns):
+                                                if k[0] == frn_email and k != user_key:
+                                                    old = self._user_tx_conns.pop(k)
+                                                    try:
+                                                        await old.disconnect()
+                                                    except Exception:
+                                                        pass
+                                            for attempt in range(4):
+                                                try:
+                                                    conn = FRNTXRoom(
+                                                        name=room.name,
+                                                        frn_server=room.server,
+                                                        frn_port=room.port,
+                                                        email=frn_email,
+                                                        password=frn_password,
+                                                        callsign=callsign,
+                                                    )
+                                                    await conn.ensure_connected()
+                                                    user_tx_conn = conn
+                                                    tx_conn = conn
+                                                    self._user_tx_conns[user_key] = conn
+                                                    break
+                                                except Exception as e:
+                                                    if "BLOCK" in str(e) and attempt < 3:
+                                                        await asyncio.sleep(8)
+                                                    else:
+                                                        break
+                                    ok = await tx_conn.request_tx(timeout=10.0)
                                 finally:
-                                    if in_tx:
-                                        await tx_conn.end_tx()
-                                        in_tx = False
-                                if not asyncio.current_task().cancelled():
-                                    await ws.send_json({"type": "tx_stopped"})
-                            elif not asyncio.current_task().cancelled():
-                                await ws.send_json({"type": "error",
-                                                    "msg": "TX nicht genehmigt (Kanal belegt)"})
+                                    room._tx_lock.release()
+                                    waiting_tx = False
+
+                                if ok:
+                                    in_tx = True
+                                    await ws.send_json({"type": "tx_active", "beep": True})
+                                    try:
+                                        pcm = await self._get_clip_pcm(clip_id, ct, cl)
+                                        for i in range(0, len(pcm), PCM_PACKET_BYTES):
+                                            await tx_conn.send_pcm(pcm[i:i + PCM_PACKET_BYTES])
+                                    except asyncio.CancelledError:
+                                        raise  # PTT_STOP übernimmt end_tx + tx_stopped
+                                    except Exception as e:
+                                        log.warning("[%s] Clip-PCM-Fehler: %s", room.name, e)
+                                    finally:
+                                        if in_tx:
+                                            await tx_conn.end_tx()
+                                            in_tx = False
+                                    if not asyncio.current_task().cancelled():
+                                        await ws.send_json({"type": "tx_stopped"})
+                                elif not asyncio.current_task().cancelled():
+                                    await ws.send_json({"type": "error",
+                                                        "msg": "TX nicht genehmigt (Kanal belegt)"})
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as e:
+                                log.warning("[%s] Clip-Task Fehler: %s", room.name, e)
+                                try:
+                                    await ws.send_json({"type": "error", "msg": f"TX-Fehler: {e}"})
+                                except Exception:
+                                    pass
 
                         _tx_approval_task = asyncio.create_task(_play_clip_task())
 
