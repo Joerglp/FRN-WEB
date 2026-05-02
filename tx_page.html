@@ -871,6 +871,12 @@ audio {
         <span class="ptt-label">PTT</span>
       </button>
       <div id="tx-status"></div>
+      <div id="tot-wrap" style="display:none;margin-top:6px">
+        <div style="height:4px;background:var(--dim);border-radius:2px;margin:0 24px">
+          <div id="tot-bar" style="height:4px;background:var(--accent);border-radius:2px;width:100%;transition:width 1s linear"></div>
+        </div>
+        <div id="tot-label" style="text-align:center;font-family:'Share Tech Mono',monospace;font-size:0.7em;color:var(--muted);margin-top:3px">180s</div>
+      </div>
     </div>
     <div class="vu-wrap">
       <div class="vu-label">Audio Level</div>
@@ -1215,6 +1221,7 @@ async function loadUIConfig() {
   </div>
 </div>`;
     });
+    if (cfg.tx_timeout) _totTotal = cfg.tx_timeout;
   } catch(e) {
     // fallback: static cards already in HTML (none here, but graceful)
     console.warn("Could not load UI config:", e);
@@ -1230,6 +1237,7 @@ let workletNode = null, analyser = null;
 let txActive = false, levelTimer = null;
 let clientPollTimer = null;
 let clipActive = false;   // Clip wird gerade gesendet
+let _totTimer = null, _totRemaining = 0, _totTotal = 180;
 let iceHost = location.hostname;
 let icePort = 8000;
 
@@ -1669,6 +1677,40 @@ async function loadRoomClients(mount) {
   );
 }
 
+// ── TOT-Countdown ────────────────────────────────────────────────────────────
+function startTotCountdown(seconds) {
+  clearInterval(_totTimer);
+  _totRemaining = seconds;
+  document.getElementById("tot-wrap").style.display = "";
+  _updateTot();
+  _totTimer = setInterval(() => {
+    _totRemaining--;
+    _updateTot();
+    if (_totRemaining <= 0) {
+      clearInterval(_totTimer); _totTimer = null;
+      pttStop();
+    }
+  }, 1000);
+}
+
+function stopTotCountdown() {
+  clearInterval(_totTimer); _totTimer = null;
+  const wrap = document.getElementById("tot-wrap");
+  if (wrap) wrap.style.display = "none";
+}
+
+function _updateTot() {
+  const bar   = document.getElementById("tot-bar");
+  const label = document.getElementById("tot-label");
+  if (!bar || !label) return;
+  const pct   = Math.max(0, _totRemaining / _totTotal * 100);
+  const color = _totRemaining <= 30 ? "var(--red)" : _totRemaining <= 60 ? "var(--orange)" : "var(--accent)";
+  bar.style.width      = pct + "%";
+  bar.style.background = color;
+  label.style.color    = color;
+  label.textContent    = _totRemaining + "s";
+}
+
 function renderUserList(clients) {
   const ul = document.getElementById("user-list");
   if (!clients.length) {
@@ -1690,14 +1732,16 @@ window.addEventListener("DOMContentLoaded", () => {
   loadUIConfig();
   if (authToken) fetchRoomsAndShow();
   document.addEventListener("keydown", e => {
-    if (e.code === "Space" &&
+    if (e.code === "Space" && !e.repeat &&
         document.getElementById("tx-section").style.display === "block") {
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select" || tag === "button") return;
       e.preventDefault();
-      if (!txActive) pttStart();
+      if (!txActive && !clipActive) pttStart();
     }
   });
   document.addEventListener("keyup", e => {
-    if (e.code === "Space") pttStop();
+    if (e.code === "Space" && txActive) pttStop();
   });
   // Close admin on Escape
   document.addEventListener("keydown", e => {
@@ -1929,6 +1973,7 @@ function onWsMessage(evt) {
     if (!clipActive) {
       txActive = true;
       document.getElementById("ptt-btn").classList.add("active");
+      startTotCountdown(_totTotal);
     }
     _applyRxGain();
     document.getElementById("led-tx").className = "led tx";
@@ -1945,9 +1990,10 @@ function onWsMessage(evt) {
     }
     txActive = false;
     _applyRxGain();
+    stopTotCountdown();
     document.getElementById("ptt-btn").classList.remove("active");
     document.getElementById("led-tx").className = "led";
-    setStatus("BEREIT", ""); stopAudio();   // WS bleibt für Chat offen
+    setStatus("BEREIT", ""); stopAudio();
   } else if (msg.type === "error") {
     if (clipActive) {
       clipActive = false;
@@ -1956,17 +2002,22 @@ function onWsMessage(evt) {
     }
     txActive = false;
     _applyRxGain();
+    stopTotCountdown();
     document.getElementById("ptt-btn").classList.remove("active");
     document.getElementById("led-tx").className = "led";
-    setStatus("FEHLER: " + msg.msg, "error"); stopAudio();  // WS bleibt für Chat offen
+    setStatus("FEHLER: " + msg.msg, "error"); stopAudio();
   } else if (msg.type === "ready") {
     setStatus("BEREIT", "");
     window._myCallsign = msg.callsign || "";
-    // Chat-Panel einblenden sobald WS verbunden
     document.getElementById("chat-section-label").style.display = "";
     document.getElementById("chat-panel").style.display = "";
   } else if (msg.type === "chat") {
     appendChatMessage(msg.from, msg.text);
+  } else if (msg.type === "clients") {
+    renderUserList(msg.clients || []);
+    const cnt = (msg.clients || []).length;
+    document.getElementById("room-user-count").textContent = cnt ? `${cnt} QRV` : "";
+    document.getElementById("led-room").className = cnt ? "led active" : "led";
   }
 }
 

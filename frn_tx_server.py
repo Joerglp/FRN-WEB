@@ -491,6 +491,7 @@ class FRNTXRoom:
                         clients, new_buf = self._try_parse_clients(buf)
                         if clients is not None:
                             self._clients = clients
+                            asyncio.create_task(self._dispatch_clients())
                             buf = new_buf
                             progress = True
                         else:
@@ -510,6 +511,11 @@ class FRNTXRoom:
                                     if self.on_message:
                                         asyncio.create_task(
                                             self.on_message(sender, text, self.name))
+                                    if _ARCHIVE_AVAILABLE:
+                                        try:
+                                            _archive.add_chat_message(self.name, sender, text)
+                                        except Exception:
+                                            pass
                         else:
                             break                           # need more data
 
@@ -544,6 +550,21 @@ class FRNTXRoom:
     async def _dispatch_message(self, sender: str, text: str):
         """Broadcast an incoming FRN text message to all connected chat clients."""
         payload = {"type": "chat", "from": sender, "text": text}
+        dead = set()
+        for ws in list(self._chat_clients):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.add(ws)
+        self._chat_clients -= dead
+
+    async def _dispatch_clients(self):
+        """Broadcast current client list to all connected WS clients."""
+        clients = [
+            {"callsign": c.get("ON", "?"), "desc": c.get("DS", ""), "type": c.get("CL", "2")}
+            for c in self._clients
+        ]
+        payload = {"type": "clients", "clients": clients}
         dead = set()
         for ws in list(self._chat_clients):
             try:
@@ -1311,6 +1332,7 @@ class TXServer:
             "streams":      streams,
             "icecast_host": icecast.get("host", "localhost"),
             "icecast_port": icecast.get("port", 8000),
+            "tx_timeout":   self.cfg.get("frn", {}).get("tx_timeout", 180),
         })
 
     # ── Admin API handlers ─────────────────────────────────────────────────
@@ -2250,6 +2272,21 @@ class TXServer:
         return web.json_response({"entries": entries, "total": total, "rooms": rooms,
                                   "pending": pending})
 
+    async def handle_archive_chat_api(self, request):
+        if not _ARCHIVE_AVAILABLE:
+            return web.json_response({"error": "archive not available"}, status=503)
+        q      = request.rel_url.query
+        limit  = min(int(q.get("limit", 100)), 500)
+        offset = int(q.get("offset", 0))
+        room   = q.get("room",   "")
+        search = q.get("search", "")
+        loop = asyncio.get_running_loop()
+        messages, total = await loop.run_in_executor(
+            None, _archive.query_chat_messages, limit, offset, room, search
+        )
+        rooms = await loop.run_in_executor(None, _archive.get_chat_rooms)
+        return web.json_response({"messages": messages, "total": total, "rooms": rooms})
+
     async def handle_archive_audio(self, request):
         if not _ARCHIVE_AVAILABLE:
             return web.Response(status=503)
@@ -2306,6 +2343,7 @@ class TXServer:
         app.router.add_get("/archive",                        self.handle_archive_page)
         app.router.add_get("/api/archive",                    self.handle_archive_api)
         app.router.add_get("/api/archive/audio/{filename}",   self.handle_archive_audio)
+        app.router.add_get("/api/archive/chat",               self.handle_archive_chat_api)
 
         # Admin (require token + is_admin)
         app.router.add_get   ("/api/admin/users",           self.handle_admin_users_list)

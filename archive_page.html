@@ -424,6 +424,22 @@
   <div class="hdr-clock" id="hdr-clock">--:--:--</div>
 </header>
 
+<!-- TAB BAR -->
+<div style="background:var(--bg2);border-bottom:1px solid var(--border);padding:0 20px;display:flex;gap:0">
+  <button id="tab-audio" onclick="switchTab('audio')" style="
+    background:var(--bg3);border:none;border-bottom:2px solid var(--green);
+    color:var(--green);font-family:'Share Tech Mono',monospace;font-size:11px;
+    letter-spacing:0.1em;text-transform:uppercase;padding:8px 18px;cursor:pointer">
+    &#9654; AUDIO-ARCHIV
+  </button>
+  <button id="tab-chat" onclick="switchTab('chat')" style="
+    background:transparent;border:none;border-bottom:2px solid transparent;
+    color:var(--text-dim);font-family:'Share Tech Mono',monospace;font-size:11px;
+    letter-spacing:0.1em;text-transform:uppercase;padding:8px 18px;cursor:pointer">
+    &#9707; CHAT-VERLAUF
+  </button>
+</div>
+
 <!-- FILTER BAR -->
 <div class="filter-bar">
   <span class="filter-label">Filter:</span>
@@ -435,7 +451,7 @@
     <option value="">Alle Räume</option>
   </select>
 
-  <span class="filter-label">Von:</span>
+  <span class="filter-label" id="f-date-label">Von:</span>
   <input type="date" id="f-from">
   <span class="filter-label">Bis:</span>
   <input type="date" id="f-to">
@@ -483,7 +499,26 @@ let shownCount  = 0;
 let isLoading   = false;
 let refreshTimer = null;
 let allRooms    = [];
+let currentTab  = 'audio';
 const LIMIT     = 50;
+
+// ── Tab switcher ───────────────────────────────────────────────────────────
+function switchTab(tab) {
+  currentTab = tab;
+  const isAudio = tab === 'audio';
+  document.getElementById('tab-audio').style.cssText +=
+    isAudio ? ';border-bottom-color:var(--green);color:var(--green);background:var(--bg3)'
+            : ';border-bottom-color:transparent;color:var(--text-dim);background:transparent';
+  document.getElementById('tab-chat').style.cssText +=
+    !isAudio ? ';border-bottom-color:var(--green);color:var(--green);background:var(--bg3)'
+             : ';border-bottom-color:transparent;color:var(--text-dim);background:transparent';
+  // Datums-Filter nur für Audio relevant
+  document.getElementById('f-date-label').style.display = isAudio ? '' : 'none';
+  document.getElementById('f-from').style.display       = isAudio ? '' : 'none';
+  document.getElementById('f-to').style.display         = isAudio ? '' : 'none';
+  cancelRefresh();
+  loadEntries(false);
+}
 
 // ── Clock ──────────────────────────────────────────────────────────────────
 function updateClock() {
@@ -560,6 +595,25 @@ function esc(s) {
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// ── Render one chat message ────────────────────────────────────────────────
+function renderChatMsg(m) {
+  const color = csColor(m.callsign || '?');
+  const rc    = roomColor(m.room || '');
+  const label = dateDivider(m.time);
+  let html    = '';
+  if (label) html += `<div class="date-divider">${label}</div>`;
+  html += `
+  <div class="msg" style="border-left-color:${color}40">
+    <div class="msg-header">
+      <span class="msg-callsign" style="color:${color}">${esc(m.callsign || '—')}</span>
+      <span class="msg-room" style="color:${rc};border-color:${rc}40">${esc(m.room || '?')}</span>
+      <span class="msg-time">${esc(m.time.slice(11,19))}</span>
+    </div>
+    <div class="msg-text" style="font-size:14px">${esc(m.text)}</div>
+  </div>`;
+  return html;
+}
+
 // ── Load entries ───────────────────────────────────────────────────────────
 async function loadEntries(append = false) {
   if (isLoading) return;
@@ -577,76 +631,115 @@ async function loadEntries(append = false) {
   if (!append) {
     offset = 0;
     lastDateLabel = null;
-    if (!filterActive) scheduleRefresh();
+    if (!filterActive && currentTab === 'audio') scheduleRefresh();
     else cancelRefresh();
   }
 
-  const params = new URLSearchParams({
-    limit:  LIMIT,
-    offset: offset,
-    ...(search ? {search} : {}),
-    ...(room   ? {room}   : {}),
-    ...(dfrom  ? {from: dfrom} : {}),
-    ...(dto    ? {to: dto}     : {}),
-  });
-
   setStatus('EMPFANGE…', false);
   try {
-    const resp = await fetch('/api/archive?' + params);
-    if (!resp.ok) throw new Error(resp.status);
-    const data = await resp.json();
-
-    // Populate rooms dropdown once
-    if (data.rooms && data.rooms.length > allRooms.length) {
-      allRooms = data.rooms;
-      const sel = document.getElementById('f-room');
-      const cur = sel.value;
-      sel.innerHTML = '<option value="">Alle Räume</option>';
-      allRooms.forEach(r => {
-        const o = document.createElement('option');
-        o.value = r; o.textContent = r;
-        if (r === cur) o.selected = true;
-        sel.appendChild(o);
+    let data;
+    if (currentTab === 'chat') {
+      const params = new URLSearchParams({
+        limit: LIMIT, offset,
+        ...(search ? {search} : {}),
+        ...(room   ? {room}   : {}),
       });
-    }
-
-    totalCount = data.total || 0;
-    document.getElementById('stat-total').textContent = totalCount;
-
-    const pending = data.pending || 0;
-    document.getElementById('stat-pending').textContent = pending;
-    document.getElementById('stat-pending-item').style.display = pending > 0 ? '' : 'none';
-
-    const container = document.getElementById('main-content');
-
-    if (!append) {
-      container.innerHTML = '';
-      shownCount = 0;
-    }
-    // Remove old load-more button
-    const oldLM = document.getElementById('load-more-wrap');
-    if (oldLM) oldLM.remove();
-
-    if (data.entries.length === 0 && !append) {
-      container.innerHTML = `
-        <div class="empty">
-          <div class="empty-icon">📻</div>
-          <div class="empty-text">KEINE EINTRÄGE GEFUNDEN</div>
-        </div>`;
+      const resp = await fetch('/api/archive/chat?' + params);
+      if (!resp.ok) throw new Error(resp.status);
+      data = await resp.json();
+      // Populate room dropdown from chat rooms
+      if (data.rooms && data.rooms.length) {
+        const sel = document.getElementById('f-room');
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">Alle Räume</option>';
+        data.rooms.forEach(r => {
+          const o = document.createElement('option');
+          o.value = r; o.textContent = r;
+          if (r === cur) o.selected = true;
+          sel.appendChild(o);
+        });
+      }
+      totalCount = data.total || 0;
+      document.getElementById('stat-total').textContent = totalCount;
+      document.getElementById('stat-pending-item').style.display = 'none';
+      const container = document.getElementById('main-content');
+      if (!append) { container.innerHTML = ''; shownCount = 0; }
+      const oldLM = document.getElementById('load-more-wrap');
+      if (oldLM) oldLM.remove();
+      if ((data.messages || []).length === 0 && !append) {
+        container.innerHTML = `<div class="empty"><div class="empty-icon">&#9707;</div><div class="empty-text">KEINE CHAT-NACHRICHTEN</div></div>`;
+      } else {
+        let html = '';
+        (data.messages || []).forEach(m => { html += renderChatMsg(m); });
+        container.insertAdjacentHTML('beforeend', html);
+        shownCount += (data.messages || []).length;
+        offset     += (data.messages || []).length;
+        if (offset < totalCount) {
+          container.insertAdjacentHTML('beforeend', `
+            <div class="load-more-wrap" id="load-more-wrap">
+              <button class="btn-load-more" onclick="loadMore()">
+                &#9660; Weitere laden (${totalCount - offset} verbleibend)
+              </button>
+            </div>`);
+        }
+      }
     } else {
-      let html = '';
-      data.entries.forEach(e => { html += renderMsg(e); });
-      container.insertAdjacentHTML('beforeend', html);
-      shownCount += data.entries.length;
-      offset     += data.entries.length;
+      const params = new URLSearchParams({
+        limit:  LIMIT,
+        offset: offset,
+        ...(search ? {search} : {}),
+        ...(room   ? {room}   : {}),
+        ...(dfrom  ? {from: dfrom} : {}),
+        ...(dto    ? {to: dto}     : {}),
+      });
+      const resp = await fetch('/api/archive?' + params);
+      if (!resp.ok) throw new Error(resp.status);
+      data = await resp.json();
 
-      if (offset < totalCount) {
-        container.insertAdjacentHTML('beforeend', `
-          <div class="load-more-wrap" id="load-more-wrap">
-            <button class="btn-load-more" onclick="loadMore()">
-              ▼ Weitere laden (${totalCount - offset} verbleibend)
-            </button>
-          </div>`);
+      if (data.rooms && data.rooms.length > allRooms.length) {
+        allRooms = data.rooms;
+        const sel = document.getElementById('f-room');
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">Alle Räume</option>';
+        allRooms.forEach(r => {
+          const o = document.createElement('option');
+          o.value = r; o.textContent = r;
+          if (r === cur) o.selected = true;
+          sel.appendChild(o);
+        });
+      }
+
+      totalCount = data.total || 0;
+      document.getElementById('stat-total').textContent = totalCount;
+      const pending = data.pending || 0;
+      document.getElementById('stat-pending').textContent = pending;
+      document.getElementById('stat-pending-item').style.display = pending > 0 ? '' : 'none';
+
+      const container = document.getElementById('main-content');
+      if (!append) { container.innerHTML = ''; shownCount = 0; }
+      const oldLM = document.getElementById('load-more-wrap');
+      if (oldLM) oldLM.remove();
+
+      if (data.entries.length === 0 && !append) {
+        container.innerHTML = `
+          <div class="empty">
+            <div class="empty-icon">&#128251;</div>
+            <div class="empty-text">KEINE EINTRÄGE GEFUNDEN</div>
+          </div>`;
+      } else {
+        let html = '';
+        data.entries.forEach(e => { html += renderMsg(e); });
+        container.insertAdjacentHTML('beforeend', html);
+        shownCount += data.entries.length;
+        offset     += data.entries.length;
+        if (offset < totalCount) {
+          container.insertAdjacentHTML('beforeend', `
+            <div class="load-more-wrap" id="load-more-wrap">
+              <button class="btn-load-more" onclick="loadMore()">
+                &#9660; Weitere laden (${totalCount - offset} verbleibend)
+              </button>
+            </div>`);
+        }
       }
     }
 

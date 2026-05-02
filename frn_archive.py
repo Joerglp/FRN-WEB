@@ -51,6 +51,17 @@ def init_db():
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_room ON transmissions(room)
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL    NOT NULL,
+                room      TEXT    NOT NULL DEFAULT '',
+                callsign  TEXT    NOT NULL DEFAULT '',
+                text      TEXT    NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_ts   ON chat_messages(timestamp DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_room ON chat_messages(room)")
     log.info("FRN Archive DB bereit: %s", DB_PATH)
 
 
@@ -235,6 +246,66 @@ def query_entries(
             "has_audio":  bool(r["audio_file"]),
         })
     return result, total
+
+
+def add_chat_message(room: str, callsign: str, text: str, timestamp: float | None = None) -> None:
+    """Speichert eine FRN-Textnachricht im Archiv."""
+    if timestamp is None:
+        timestamp = time.time()
+    try:
+        with _get_conn() as conn:
+            conn.execute(
+                "INSERT INTO chat_messages (timestamp, room, callsign, text) VALUES (?, ?, ?, ?)",
+                (timestamp, room, callsign, text)
+            )
+    except Exception as e:
+        log.warning("Chat-DB-Fehler: %s", e)
+
+
+def query_chat_messages(
+    limit: int = 100,
+    offset: int = 0,
+    room: str = "",
+    search: str = "",
+) -> tuple[list[dict], int]:
+    clauses, params = [], []
+    if room:
+        clauses.append("room = ?")
+        params.append(room)
+    if search:
+        clauses.append("(text LIKE ? OR callsign LIKE ?)")
+        params.extend([f"%{search}%", f"%{search}%"])
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    count_params = params[:]
+    params.extend([limit, offset])
+    with _get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT id, timestamp, room, callsign, text FROM chat_messages "
+            f"{where} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            params
+        ).fetchall()
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM chat_messages {where}", count_params
+        ).fetchone()[0]
+    return [
+        {
+            "id":        r["id"],
+            "timestamp": r["timestamp"],
+            "time":      datetime.fromtimestamp(r["timestamp"]).strftime("%Y-%m-%d %H:%M:%S"),
+            "room":      r["room"],
+            "callsign":  r["callsign"],
+            "text":      r["text"],
+        }
+        for r in rows
+    ], total
+
+
+def get_chat_rooms() -> list[str]:
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT room FROM chat_messages ORDER BY room"
+        ).fetchall()
+    return [r[0] for r in rows if r[0]]
 
 
 def get_rooms() -> list[str]:
