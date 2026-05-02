@@ -805,6 +805,10 @@ audio {
         <span class="rx-bar-label" id="rx-label">RX</span>
       </div>
       <div class="rx-vu-segs" id="rx-vu-segments"></div>
+      <input type="range" id="rx-vol-slider" min="0" max="1" step="0.05"
+        title="Lautstärke"
+        style="width:70px;accent-color:var(--accent);cursor:pointer;vertical-align:middle"
+        oninput="setRxVolume(this.value)">
       <button class="rx-mute-btn" id="rx-mute-btn" onclick="toggleRxMute()" title="Stummschalten">🔇</button>
     </div>
     <div class="user-list-header">Verbundene Benutzer</div>
@@ -1236,8 +1240,11 @@ let ws = null, audioCtx = null, micSource = null;
 let workletNode = null, analyser = null;
 let txActive = false, levelTimer = null;
 let clientPollTimer = null;
-let clipActive = false;   // Clip wird gerade gesendet
+let clipActive = false;
 let _totTimer = null, _totRemaining = 0, _totTotal = 180;
+let _rxVolume = parseFloat(localStorage.getItem("frn_rx_volume") || "1.0");
+const _origTitle = document.title;
+let _tabAlertTimer = null;
 let iceHost = location.hostname;
 let icePort = 8000;
 
@@ -1578,8 +1585,37 @@ function toggleRxMute() {
 
 function _applyRxGain() {
   if (!rxGainNode) return;
-  const target = (rxMuted || txActive) ? 0.0 : 1.0;
+  const target = (rxMuted || txActive) ? 0.0 : _rxVolume;
   rxGainNode.gain.setTargetAtTime(target, rxAudioCtx.currentTime, 0.01);
+}
+
+function setRxVolume(val) {
+  _rxVolume = parseFloat(val);
+  localStorage.setItem("frn_rx_volume", _rxVolume);
+  _applyRxGain();
+  const btn = document.getElementById("rx-mute-btn");
+  if (_rxVolume === 0) { rxMuted = true;  btn.textContent = "🔈"; btn.classList.add("muted"); }
+  else                 { rxMuted = false; btn.textContent = "🔇"; btn.classList.remove("muted"); }
+}
+
+// ── Tab-Titel & Browser-Benachrichtigungen ────────────────────────────────────
+function _setTabAlert(label) {
+  document.title = "● " + label + " — " + _origTitle;
+  clearTimeout(_tabAlertTimer);
+  _tabAlertTimer = setTimeout(() => { document.title = _origTitle; }, 8000);
+}
+window.addEventListener("focus", () => { document.title = _origTitle; clearTimeout(_tabAlertTimer); });
+
+async function _requestNotifPermission() {
+  if ("Notification" in window && Notification.permission === "default") {
+    await Notification.requestPermission();
+  }
+}
+
+function _notify(title, body) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (!document.hidden) return;
+  try { new Notification(title, { body, silent: true }); } catch {}
 }
 
 function setRxLed(on) {
@@ -1588,13 +1624,23 @@ function setRxLed(on) {
 }
 
 let _lastRxLit = -1;
+let _rxWasActive = false;
 function updateRxLevel() {
   if (!rxAnalyser) return;
   const data = new Uint8Array(rxAnalyser.frequencyBinCount);
   rxAnalyser.getByteFrequencyData(data);
   const avg = data.reduce((a, b) => a + b, 0) / data.length;
   const lit = Math.round(Math.min(1, avg / 40) * VU_COUNT);
-  if (lit === _lastRxLit) return;   // kein DOM-Update wenn sich nichts ändert
+  // Benachrichtigung wenn Empfang beginnt (und nicht eigenes TX)
+  if (lit > 0 && !_rxWasActive && !txActive) {
+    const room = document.getElementById("room-select")?.selectedOptions[0]?.text || "FRN";
+    _setTabAlert("RX");
+    _notify("FRN Empfang", room);
+    _rxWasActive = true;
+  } else if (lit === 0) {
+    _rxWasActive = false;
+  }
+  if (lit === _lastRxLit) return;
   _lastRxLit = lit;
   for (let i = 0; i < VU_COUNT; i++) {
     const s = document.getElementById("rxvu-" + i);
@@ -1838,6 +1884,10 @@ function showTxPanel(rooms, defaultRoom = "") {
   document.getElementById("rx-section-label").style.display = "none";
   document.getElementById("tx-info").textContent = callsign;
   document.getElementById("admin-btn").style.display = isAdmin ? "block" : "none";
+  // Lautstärke-Slider initialisieren
+  const slider = document.getElementById("rx-vol-slider");
+  if (slider) slider.value = _rxVolume;
+  _requestNotifPermission();
 
   adminRooms = {};
   const sel = document.getElementById("room-select");
@@ -1849,10 +1899,13 @@ function showTxPanel(rooms, defaultRoom = "") {
     sel.appendChild(opt);
   }
 
-  // Standard-Raum vorwählen (falls gesetzt und vorhanden)
-  const startMount = (defaultRoom && adminRooms[defaultRoom])
-    ? defaultRoom
-    : (rooms[0]?.mount || "");
+  // URL-Parameter ?room=... hat Vorrang vor defaultRoom
+  const urlRoom = new URLSearchParams(location.search).get("room") || "";
+  const startMount = (urlRoom && adminRooms[urlRoom])
+    ? urlRoom
+    : (defaultRoom && adminRooms[defaultRoom])
+      ? defaultRoom
+      : (rooms[0]?.mount || "");
   if (startMount) sel.value = startMount;
 
   if (startMount) {
@@ -2013,6 +2066,8 @@ function onWsMessage(evt) {
     document.getElementById("chat-panel").style.display = "";
   } else if (msg.type === "chat") {
     appendChatMessage(msg.from, msg.text);
+    _setTabAlert("CHAT");
+    _notify("FRN Chat", msg.from + ": " + msg.text);
   } else if (msg.type === "clients") {
     renderUserList(msg.clients || []);
     const cnt = (msg.clients || []).length;

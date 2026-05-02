@@ -62,6 +62,15 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_ts   ON chat_messages(timestamp DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_room ON chat_messages(room)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS comments (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id   INTEGER NOT NULL REFERENCES transmissions(id) ON DELETE CASCADE,
+                timestamp  REAL    NOT NULL,
+                text       TEXT    NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_entry ON comments(entry_id)")
     log.info("FRN Archive DB bereit: %s", DB_PATH)
 
 
@@ -314,3 +323,76 @@ def get_rooms() -> list[str]:
             "SELECT DISTINCT room FROM transmissions ORDER BY room"
         ).fetchall()
     return [r[0] for r in rows if r[0]]
+
+
+# ── Statistiken ───────────────────────────────────────────────────────────────
+
+def get_stats(days: int = 30) -> dict:
+    """Liefert Archiv-Statistiken für das Dashboard."""
+    since = time.time() - days * 86400
+    with _get_conn() as conn:
+        total_tx = conn.execute("SELECT COUNT(*) FROM transmissions").fetchone()[0]
+        total_dur = conn.execute(
+            "SELECT COALESCE(SUM(duration_s),0) FROM transmissions"
+        ).fetchone()[0]
+        total_chat = conn.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0]
+
+        # Übertragungen pro Tag (letzte `days` Tage)
+        rows = conn.execute("""
+            SELECT date(timestamp,'unixepoch','localtime') AS d, COUNT(*) AS n,
+                   COALESCE(SUM(duration_s),0) AS dur
+            FROM transmissions WHERE timestamp >= ?
+            GROUP BY d ORDER BY d
+        """, (since,)).fetchall()
+        per_day = [{"date": r["d"], "count": r["n"], "duration_s": round(r["dur"], 1)}
+                   for r in rows]
+
+        # Top-Rufzeichen
+        top_cs = conn.execute("""
+            SELECT callsign, COUNT(*) AS n, COALESCE(SUM(duration_s),0) AS dur
+            FROM transmissions WHERE callsign != ''
+            GROUP BY callsign ORDER BY n DESC LIMIT 10
+        """).fetchall()
+        top_callsigns = [{"callsign": r["callsign"], "count": r["n"],
+                          "duration_s": round(r["dur"], 1)} for r in top_cs]
+
+        # Top-Räume
+        top_rm = conn.execute("""
+            SELECT room, COUNT(*) AS n, COALESCE(SUM(duration_s),0) AS dur
+            FROM transmissions WHERE room != ''
+            GROUP BY room ORDER BY n DESC LIMIT 10
+        """).fetchall()
+        top_rooms = [{"room": r["room"], "count": r["n"],
+                      "duration_s": round(r["dur"], 1)} for r in top_rm]
+
+    return {
+        "total_transmissions": total_tx,
+        "total_duration_s":    round(total_dur, 1),
+        "total_chat_messages": total_chat,
+        "per_day":             per_day,
+        "top_callsigns":       top_callsigns,
+        "top_rooms":           top_rooms,
+    }
+
+
+# ── Kommentare ────────────────────────────────────────────────────────────────
+
+def get_comments(entry_id: int) -> list[dict]:
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, timestamp, text FROM comments WHERE entry_id = ? ORDER BY timestamp",
+            (entry_id,)
+        ).fetchall()
+    return [{"id": r["id"],
+             "time": datetime.fromtimestamp(r["timestamp"]).strftime("%H:%M"),
+             "text": r["text"]} for r in rows]
+
+
+def add_comment(entry_id: int, text: str) -> int:
+    ts = time.time()
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO comments (entry_id, timestamp, text) VALUES (?, ?, ?)",
+            (entry_id, ts, text.strip())
+        )
+        return cur.lastrowid

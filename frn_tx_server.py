@@ -2272,6 +2272,39 @@ class TXServer:
         return web.json_response({"entries": entries, "total": total, "rooms": rooms,
                                   "pending": pending})
 
+    async def handle_archive_stats(self, request):
+        if not _ARCHIVE_AVAILABLE:
+            return web.json_response({"error": "archive not available"}, status=503)
+        days = int(request.rel_url.query.get("days", 30))
+        loop = asyncio.get_running_loop()
+        stats = await loop.run_in_executor(None, _archive.get_stats, days)
+        return web.json_response(stats)
+
+    async def handle_archive_comments_get(self, request):
+        if not _ARCHIVE_AVAILABLE:
+            return web.json_response({"error": "archive not available"}, status=503)
+        entry_id = int(request.match_info["id"])
+        loop = asyncio.get_running_loop()
+        comments = await loop.run_in_executor(None, _archive.get_comments, entry_id)
+        return web.json_response({"comments": comments})
+
+    async def handle_archive_comments_post(self, request):
+        if not _ARCHIVE_AVAILABLE:
+            return web.json_response({"error": "archive not available"}, status=503)
+        entry_id = int(request.match_info["id"])
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        text = str(body.get("text", "")).strip()
+        if not text:
+            return web.json_response({"error": "text required"}, status=400)
+        if len(text) > 500:
+            return web.json_response({"error": "text too long (max 500)"}, status=400)
+        loop = asyncio.get_running_loop()
+        cid = await loop.run_in_executor(None, _archive.add_comment, entry_id, text)
+        return web.json_response({"ok": True, "id": cid})
+
     async def handle_archive_chat_api(self, request):
         if not _ARCHIVE_AVAILABLE:
             return web.json_response({"error": "archive not available"}, status=503)
@@ -2344,6 +2377,9 @@ class TXServer:
         app.router.add_get("/api/archive",                    self.handle_archive_api)
         app.router.add_get("/api/archive/audio/{filename}",   self.handle_archive_audio)
         app.router.add_get("/api/archive/chat",               self.handle_archive_chat_api)
+        app.router.add_get("/api/archive/stats",              self.handle_archive_stats)
+        app.router.add_get ("/api/archive/{id}/comments",    self.handle_archive_comments_get)
+        app.router.add_post("/api/archive/{id}/comments",    self.handle_archive_comments_post)
 
         # Admin (require token + is_admin)
         app.router.add_get   ("/api/admin/users",           self.handle_admin_users_list)

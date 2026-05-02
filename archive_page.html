@@ -438,6 +438,12 @@
     letter-spacing:0.1em;text-transform:uppercase;padding:8px 18px;cursor:pointer">
     &#9707; CHAT-VERLAUF
   </button>
+  <button id="tab-stats" onclick="switchTab('stats')" style="
+    background:transparent;border:none;border-bottom:2px solid transparent;
+    color:var(--text-dim);font-family:'Share Tech Mono',monospace;font-size:11px;
+    letter-spacing:0.1em;text-transform:uppercase;padding:8px 18px;cursor:pointer">
+    &#9641; STATISTIK
+  </button>
 </div>
 
 <!-- FILTER BAR -->
@@ -505,19 +511,150 @@ const LIMIT     = 50;
 // ── Tab switcher ───────────────────────────────────────────────────────────
 function switchTab(tab) {
   currentTab = tab;
+  const tabs = ['audio','chat','stats'];
+  tabs.forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if (!el) return;
+    const active = t === tab;
+    el.style.borderBottomColor = active ? 'var(--green)' : 'transparent';
+    el.style.color             = active ? 'var(--green)'  : 'var(--text-dim)';
+    el.style.background        = active ? 'var(--bg3)'    : 'transparent';
+  });
   const isAudio = tab === 'audio';
-  document.getElementById('tab-audio').style.cssText +=
-    isAudio ? ';border-bottom-color:var(--green);color:var(--green);background:var(--bg3)'
-            : ';border-bottom-color:transparent;color:var(--text-dim);background:transparent';
-  document.getElementById('tab-chat').style.cssText +=
-    !isAudio ? ';border-bottom-color:var(--green);color:var(--green);background:var(--bg3)'
-             : ';border-bottom-color:transparent;color:var(--text-dim);background:transparent';
-  // Datums-Filter nur für Audio relevant
   document.getElementById('f-date-label').style.display = isAudio ? '' : 'none';
   document.getElementById('f-from').style.display       = isAudio ? '' : 'none';
   document.getElementById('f-to').style.display         = isAudio ? '' : 'none';
+  // Filter-Bar bei Stats ausblenden
+  document.querySelector('.filter-bar').style.display = tab === 'stats' ? 'none' : '';
+  document.querySelector('.stats-bar').style.display  = tab === 'stats' ? 'none' : '';
   cancelRefresh();
-  loadEntries(false);
+  if (tab === 'stats') loadStats();
+  else loadEntries(false);
+}
+
+// ── Statistiken ────────────────────────────────────────────────────────────
+async function loadStats() {
+  const container = document.getElementById('main-content');
+  container.innerHTML = '<div class="loader">LADE STATISTIKEN…</div>';
+  try {
+    const resp = await fetch('/api/archive/stats?days=30');
+    if (!resp.ok) throw new Error(resp.status);
+    const d = await resp.json();
+    const maxDay = Math.max(1, ...d.per_day.map(x => x.count));
+    const maxCS  = Math.max(1, ...(d.top_callsigns.map(x => x.count)));
+    const maxRM  = Math.max(1, ...(d.top_rooms.map(x => x.count)));
+    const fmtDur = s => s >= 3600
+      ? (s/3600).toFixed(1) + ' h'
+      : s >= 60 ? (s/60).toFixed(0) + ' min' : s + ' s';
+
+    container.innerHTML = `
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px">
+  ${stat_card('Übertragungen', d.total_transmissions, '')}
+  ${stat_card('Gesamtdauer', fmtDur(d.total_duration_s), '')}
+  ${stat_card('Chat-Nachrichten', d.total_chat_messages, '')}
+</div>
+<div class="date-divider">ÜBERTRAGUNGEN PRO TAG (30 Tage)</div>
+<div style="margin:12px 0 24px">
+${d.per_day.length ? d.per_day.map(r => `
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:11px">
+    <span style="color:var(--text-dim);width:82px;flex-shrink:0">${r.date.slice(5)}</span>
+    <div style="flex:1;background:var(--border);border-radius:2px;height:14px;position:relative">
+      <div style="width:${(r.count/maxDay*100).toFixed(1)}%;height:100%;background:var(--green-dim);border-radius:2px;
+                  transition:width .3s"></div>
+    </div>
+    <span style="color:var(--green);width:28px;text-align:right">${r.count}</span>
+    <span style="color:var(--text-dim);width:52px">${fmtDur(r.duration_s)}</span>
+  </div>`).join('') : '<div class="empty"><div class="empty-text">KEINE DATEN</div></div>'}
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
+  <div>
+    <div class="date-divider">TOP RUFZEICHEN</div>
+    ${d.top_callsigns.map(r => bar_row(r.callsign, r.count, maxCS, csColor(r.callsign))).join('')}
+  </div>
+  <div>
+    <div class="date-divider">TOP RÄUME</div>
+    ${d.top_rooms.map(r => bar_row(r.room, r.count, maxRM, roomColor(r.room))).join('')}
+  </div>
+</div>`;
+  } catch(e) {
+    container.innerHTML = '<div class="empty"><div class="empty-text">FEHLER BEIM LADEN</div></div>';
+  }
+}
+
+function stat_card(label, value, unit) {
+  return `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:2px;
+    padding:16px;text-align:center">
+    <div style="font-size:22px;color:var(--green);font-family:'Orbitron',sans-serif;font-weight:700">${value}${unit}</div>
+    <div style="font-size:10px;color:var(--text-dim);letter-spacing:.1em;margin-top:6px;text-transform:uppercase">${label}</div>
+  </div>`;
+}
+
+function bar_row(label, count, max, color) {
+  return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:11px">
+    <span style="color:${color};width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0">${esc(label)}</span>
+    <div style="flex:1;background:var(--border);border-radius:2px;height:12px">
+      <div style="width:${(count/max*100).toFixed(1)}%;height:100%;background:${color}40;border-radius:2px"></div>
+    </div>
+    <span style="color:var(--green);width:28px;text-align:right">${count}</span>
+  </div>`;
+}
+
+// ── Kommentare ─────────────────────────────────────────────────────────────
+async function toggleComments(entryId) {
+  const box = document.getElementById('cmts-' + entryId);
+  if (!box) return;
+  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+  box.style.display = '';
+  if (box.dataset.loaded) return;
+  box.dataset.loaded = '1';
+  box.innerHTML = '<span style="color:var(--text-dim);font-size:11px">Lade…</span>';
+  try {
+    const resp = await fetch('/api/archive/' + entryId + '/comments');
+    const d    = await resp.json();
+    renderComments(entryId, d.comments || []);
+  } catch { box.innerHTML = '<span style="color:var(--red)">Fehler</span>'; }
+}
+
+function renderComments(entryId, comments) {
+  const box = document.getElementById('cmts-' + entryId);
+  if (!box) return;
+  box.innerHTML = comments.map(c => `
+    <div style="padding:4px 0;border-bottom:1px solid var(--border);font-size:11px">
+      <span style="color:var(--text-dim)">${esc(c.time)}</span>
+      <span style="margin-left:8px">${esc(c.text)}</span>
+    </div>`).join('') +
+    `<div style="display:flex;gap:6px;margin-top:8px">
+      <input id="ci-${entryId}" type="text" maxlength="500" placeholder="Kommentar…"
+        style="flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);
+               font-family:'Share Tech Mono',monospace;font-size:11px;padding:4px 8px;border-radius:2px"
+        onkeydown="if(event.key==='Enter') submitComment(${entryId})">
+      <button onclick="submitComment(${entryId})" style="
+        background:var(--bg3);border:1px solid var(--green-dim);color:var(--green);
+        font-family:'Share Tech Mono',monospace;font-size:10px;padding:4px 10px;
+        cursor:pointer;border-radius:2px">OK</button>
+    </div>`;
+}
+
+async function submitComment(entryId) {
+  const inp  = document.getElementById('ci-' + entryId);
+  const text = inp?.value.trim();
+  if (!text) return;
+  inp.value = '';
+  try {
+    const resp = await fetch('/api/archive/' + entryId + '/comments', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text})
+    });
+    const d = await resp.json();
+    if (d.ok) {
+      const box = document.getElementById('cmts-' + entryId);
+      delete box.dataset.loaded;
+      const r2 = await fetch('/api/archive/' + entryId + '/comments');
+      const d2 = await r2.json();
+      renderComments(entryId, d2.comments || []);
+    }
+  } catch {}
 }
 
 // ── Clock ──────────────────────────────────────────────────────────────────
@@ -585,6 +722,15 @@ function renderMsg(e) {
     </div>
     <div class="msg-text">${esc(e.text)}</div>
     ${(audioTag || dur) ? `<div class="msg-footer">${audioTag}${dur}</div>` : ''}
+    <div style="margin-top:6px">
+      <button onclick="toggleComments(${e.id})" style="
+        background:transparent;border:1px solid var(--border);color:var(--text-dim);
+        font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:.08em;
+        padding:3px 10px;cursor:pointer;border-radius:2px;text-transform:uppercase"
+        title="Kommentare anzeigen / hinzufügen">&#9707; Kommentar</button>
+    </div>
+    <div id="cmts-${e.id}" style="display:none;margin-top:8px;padding:8px;
+         background:var(--bg);border:1px solid var(--border);border-radius:2px"></div>
   </div>`;
   return html;
 }
