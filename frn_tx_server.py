@@ -1606,19 +1606,82 @@ class TXServer:
         if not callsign or not name or not email or not city:
             return web.json_response({"error": "callsign, name, email und city sind Pflichtfelder"}, status=400)
 
-        # Prüfe ob die Email-Domain per IPv4 erreichbar ist (Sysman unterstützt nur IPv4)
+        # Prüfe ob die MX-Server der Email-Domain per IPv4 erreichbar sind (Sysman ist IPv4-only)
         email_domain = email.split("@")[-1]
         ipv4_warning = None
         try:
-            import socket as _socket
-            results = _socket.getaddrinfo(email_domain, 25,
-                                          family=_socket.AF_INET, type=_socket.SOCK_STREAM)
-            if not results:
-                ipv4_warning = f"'{email_domain}' hat keinen IPv4-Mailserver"
+            import socket as _socket, struct as _struct
+
+            def _dns_mx(domain):
+                """Minimaler DNS-MX-Query (UDP, kein dnspython nötig)."""
+                header = b'\xab\xcd\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+                qname = b''.join(bytes([len(p)]) + p.encode() for p in domain.split('.')) + b'\x00'
+                s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+                s.settimeout(3)
+                try:
+                    s.sendto(header + qname + b'\x00\x0f\x00\x01', ('8.8.8.8', 53))
+                    resp = s.recv(512)
+                finally:
+                    s.close()
+                # Antwort parsen: Labels nach den Antwort-RRs lesen
+                offset = 12  # Header überspringen
+                # Question überspringen
+                while resp[offset] != 0:
+                    offset += resp[offset] + 1
+                offset += 5  # 0x00 + QTYPE + QCLASS
+                # Antwort-RRs lesen
+                hosts = []
+                ancount = _struct.unpack('>H', resp[6:8])[0]
+                for _ in range(ancount):
+                    if offset >= len(resp):
+                        break
+                    # Name (ggf. pointer)
+                    if resp[offset] & 0xC0 == 0xC0:
+                        offset += 2
+                    else:
+                        while resp[offset] != 0:
+                            offset += resp[offset] + 1
+                        offset += 1
+                    rtype, _, _, rdlen = _struct.unpack('>HHIH', resp[offset:offset+10])
+                    offset += 10
+                    if rtype == 15:  # MX
+                        pref_end = offset + 2
+                        # MX-Hostname dekodieren (mit pointer support)
+                        name, pos = [], pref_end
+                        while pos < len(resp) and resp[pos] != 0:
+                            if resp[pos] & 0xC0 == 0xC0:
+                                ptr = _struct.unpack('>H', resp[pos:pos+2])[0] & 0x3FFF
+                                pos = ptr
+                            else:
+                                length = resp[pos]
+                                name.append(resp[pos+1:pos+1+length].decode())
+                                pos += 1 + length
+                        hosts.append('.'.join(name))
+                    offset += rdlen
+                return hosts
+
+            mx_hosts = []
+            try:
+                mx_hosts = _dns_mx(email_domain)
+            except Exception:
+                pass
+            if not mx_hosts:
+                mx_hosts = [email_domain]
+            has_ipv4 = False
+            for mx in mx_hosts:
+                try:
+                    if _socket.getaddrinfo(mx.rstrip('.'), 25, family=_socket.AF_INET,
+                                           type=_socket.SOCK_STREAM):
+                        has_ipv4 = True
+                        break
+                except Exception:
+                    pass
+            if not has_ipv4:
+                ipv4_warning = (f"'{email_domain}' hat keine IPv4-Mailserver — "
+                                "der FRN-Sysman kann dort keine E-Mail zustellen. "
+                                "Bitte Gmail, iCloud oder einen anderen großen Anbieter verwenden.")
         except Exception:
-            ipv4_warning = (f"'{email_domain}' ist per IPv4 nicht erreichbar — "
-                            "der FRN-Sysman kann dort keine E-Mail zustellen. "
-                            "Bitte Gmail oder einen anderen großen Anbieter verwenden.")
+            pass  # Im Zweifel keine Warnung
 
         sysman_host = "sysman.freeradionetwork.de"
         sysman_port = 10025
