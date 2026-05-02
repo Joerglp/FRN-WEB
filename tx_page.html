@@ -1111,7 +1111,13 @@ audio {
       <div class="admin-section-title">FRN-Konto registrieren</div>
       <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">
         Noch kein FRN-Konto? Hier neues Konto beim System-Manager beantragen.<br>
-        Das Passwort wird an die angegebene E-Mail-Adresse gesendet.
+        Das Passwort wird per E-Mail gesendet.
+      </div>
+      <div style="font-size:.75rem;background:rgba(255,180,0,.08);border:1px solid rgba(255,180,0,.3);
+                  border-radius:6px;padding:7px 10px;margin-bottom:10px;color:#f0b429;line-height:1.5">
+        ⚠ Bitte eine bekannte E-Mail-Adresse verwenden (z.&thinsp;B. Gmail).<br>
+        Selbst gehostete oder kleine Domains erhalten die Bestätigungs-E-Mail
+        vom FRN-Sysman oft nicht, da dieser nur IPv4 unterstützt.
       </div>
       <div class="form-grid">
         <div class="form-field" style="flex:2">
@@ -2618,6 +2624,10 @@ async function registerFRN() {
     } else {
       msg.style.color = "#2ecc71";
       msg.textContent = "Passwort wurde an " + email + " gesendet. Bitte E-Mail prüfen.";
+      if (d.warning) {
+        msg.textContent += " ⚠ " + d.warning;
+        msg.style.color = "#e67e22";
+      }
     }
   } catch(e) {
     msg.style.color = "#e74c3c";

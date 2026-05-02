@@ -1606,6 +1606,20 @@ class TXServer:
         if not callsign or not name or not email or not city:
             return web.json_response({"error": "callsign, name, email und city sind Pflichtfelder"}, status=400)
 
+        # Prüfe ob die Email-Domain per IPv4 erreichbar ist (Sysman unterstützt nur IPv4)
+        email_domain = email.split("@")[-1]
+        ipv4_warning = None
+        try:
+            import socket as _socket
+            results = _socket.getaddrinfo(email_domain, 25,
+                                          family=_socket.AF_INET, type=_socket.SOCK_STREAM)
+            if not results:
+                ipv4_warning = f"'{email_domain}' hat keinen IPv4-Mailserver"
+        except Exception:
+            ipv4_warning = (f"'{email_domain}' ist per IPv4 nicht erreichbar — "
+                            "der FRN-Sysman kann dort keine E-Mail zustellen. "
+                            "Bitte Gmail oder einen anderen großen Anbieter verwenden.")
+
         sysman_host = "sysman.freeradionetwork.de"
         sysman_port = 10025
         msg = self._build_frn_register_msg(callsign, name, email, city)
@@ -1626,7 +1640,10 @@ class TXServer:
         resp_text = response.strip().decode(errors="replace")
         log.info("FRN-Sysman Antwort: %r", resp_text)
         if resp_text.upper() == "OK":
-            return web.json_response({"status": "ok", "email": email})
+            result = {"status": "ok", "email": email}
+            if ipv4_warning:
+                result["warning"] = ipv4_warning
+            return web.json_response(result)
         elif resp_text.upper() == "NOK":
             return web.json_response({
                 "error": "Sysman hat abgelehnt (NOK). Mögliche Ursachen: "
