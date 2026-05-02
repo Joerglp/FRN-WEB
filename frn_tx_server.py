@@ -1629,8 +1629,10 @@ class TXServer:
             return web.json_response({"status": "ok", "email": email})
         elif resp_text.upper() == "NOK":
             return web.json_response({
-                "error": "E-Mail-Adresse bereits registriert — bitte E-Mail-Postfach prüfen, "
-                         "das Passwort wurde schon gesendet."
+                "error": "Sysman hat abgelehnt (NOK). Mögliche Ursachen: "
+                         "Rufzeichen oder E-Mail bereits vergeben, IP-Sperre nach vorheriger Registrierung, "
+                         "oder der Account ist gerade online. "
+                         "Bitte direkt auf freeradionetwork.de registrieren."
             }, status=400)
         else:
             return web.json_response({"error": resp_text or "Unbekannte Sysman-Antwort"}, status=400)
