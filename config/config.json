@@ -6,7 +6,8 @@
   },
   "frn": {
     "server": "host.docker.internal",
-    "port": 10024
+    "port": 10024,
+    "tx_timeout": 180
   },
   "icecast": {
     "host": "icecast",
@@ -20,8 +21,8 @@
   },
   "frn_stream_account": {
     "_comment": "Zugangsdaten für die Icecast-Stream-Clients (frn_stream_runner). Leer = aus tx_rooms.json.",
-    "email":           "",
-    "password":        "",
+    "email":           "deine@email.de",
+    "password":        "DEIN_FRN_PASSWORT",
     "callsign_prefix": "WEB"
   },
   "whisper": {
