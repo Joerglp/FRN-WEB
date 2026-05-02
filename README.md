@@ -20,6 +20,12 @@ Browser-basierter **PTT-Sender, Stream-Empfänger und Gesprächsarchiv** für da
 - **Leertaste PTT** — Leerzeichen als Tastaturkürzel für Push-to-Talk (Desktop)
 - **TOT-Countdown** — visueller Countdown beim Senden, auto-stop wenn Zeit abläuft
 - **Online-Nutzer live** — Stationsliste wird per WebSocket in Echtzeit aktualisiert
+- **RX-Lautstärke** — Schieberegler, Wert bleibt dauerhaft gespeichert
+- **Browser-Benachrichtigungen** — Notification bei Empfang/Chat wenn Tab im Hintergrund
+- **Tab-Titel-Indikator** — `● RX` / `● CHAT` im Browser-Tab bei Aktivität
+- **Raum per URL** — `?room=<mount>` wählt Raum automatisch nach Login
+- **Archiv-Statistiken** — Balkendiagramm, Top-Rufzeichen und -Räume, Gesamtzahlen
+- **Kommentare** — Notizen zu einzelnen Archiv-Einträgen hinzufügen
 - **Docker-Support** — kompletter Stack mit `docker compose up`
 
 ## Voraussetzungen
@@ -119,12 +125,13 @@ Nach Login mit einem Admin-Account: **⚙ ADMIN**-Button oben rechts.
 
 ## Funkarchiv
 
-Erreichbar unter `/archive`. Zwei Tabs:
+Erreichbar unter `/archive`. Drei Tabs:
 
 | Tab | Inhalt |
 |-----|--------|
-| AUDIO-ARCHIV | Alle Sprachübertragungen mit Transkription und Audioplayer |
+| AUDIO-ARCHIV | Alle Sprachübertragungen mit Transkription und Audioplayer; Kommentare pro Eintrag |
 | CHAT-VERLAUF | Alle FRN-Textnachrichten (SQLite, durchsuchbar nach Text/Rufzeichen/Raum) |
+| STATISTIK | Übertragungen pro Tag (Balkendiagramm), Top-Rufzeichen, Top-Räume, Gesamtzahlen |
 
 Chat-Nachrichten werden automatisch gespeichert sobald sie im FRN-Raum eingehen — unabhängig von der Transkription.
 
