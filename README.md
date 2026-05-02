@@ -13,10 +13,13 @@ Browser-basierter **PTT-Sender, Stream-Empfänger und Gesprächsarchiv** für da
 - **FRN-Konto registrieren** — neues FRN-Konto direkt aus dem Browser beantragen
 - **Auto-Discovery** — Räume automatisch vom FRN-Server lesen, keine feste Raumliste nötig
 - **Transkription** *(optional)* — Spracherkennung via [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
-- **Funkarchiv** *(optional)* — Chat-Verlauf aller Übertragungen mit Audioplayer, durchsuchbar
+- **Funkarchiv** *(optional)* — Alle Übertragungen mit Audioplayer, durchsuchbar; separater **Chat-Verlauf**-Tab
 - **Komprimiertes Audio** — WAV-Aufnahmen werden als Opus gespeichert (~10× kleiner)
 - **Hintergrund-Audio** — 🔊-Button hält den Stream aktiv wenn der Bildschirm gesperrt wird
 - **WakeLock** — ☀️-Button verhindert das automatische Abdunkeln des Displays
+- **Leertaste PTT** — Leerzeichen als Tastaturkürzel für Push-to-Talk (Desktop)
+- **TOT-Countdown** — visueller Countdown beim Senden, auto-stop wenn Zeit abläuft
+- **Online-Nutzer live** — Stationsliste wird per WebSocket in Echtzeit aktualisiert
 - **Docker-Support** — kompletter Stack mit `docker compose up`
 
 ## Voraussetzungen
@@ -77,6 +80,7 @@ bash run_stream.sh "Quasel-Ecke" quasel TX-Quasel tx@example.com passwort
 |-----------|-------------|
 | `frn.server` | Adresse des FRN_Server.jar |
 | `frn.port` | Port des FRN_Server (Standard: 10024) |
+| `frn.tx_timeout` | Max. Sendezeit in Sekunden, TOT-Countdown (Standard: 180) |
 | `icecast.host` | Icecast-Adresse |
 | `icecast.source_password` | Passwort für Stream-Einspeisung |
 | `auth.mode` | `local` / `frn` / `both` — Login-Methode |
@@ -112,6 +116,17 @@ Nach Login mit einem Admin-Account: **⚙ ADMIN**-Button oben rechts.
 | RÄUME | TX-Räume hinzufügen / entfernen (live, kein Neustart) |
 | STATUS | FRN-Verbindungsstatus aller Räume + aktive Tokens |
 | SERVER | FRN-Server wechseln (inkl. Zugangsdaten) + neues FRN-Konto registrieren |
+
+## Funkarchiv
+
+Erreichbar unter `/archive`. Zwei Tabs:
+
+| Tab | Inhalt |
+|-----|--------|
+| AUDIO-ARCHIV | Alle Sprachübertragungen mit Transkription und Audioplayer |
+| CHAT-VERLAUF | Alle FRN-Textnachrichten (SQLite, durchsuchbar nach Text/Rufzeichen/Raum) |
+
+Chat-Nachrichten werden automatisch gespeichert sobald sie im FRN-Raum eingehen — unabhängig von der Transkription.
 
 ### FRN-Konto registrieren
 
