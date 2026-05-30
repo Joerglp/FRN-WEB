@@ -538,14 +538,33 @@ class FRNTXRoom:
             self._connected = False
 
     async def _broadcast_rx(self, pcm: bytes):
-        """Send decoded PCM bytes to all connected RX WebSocket listeners."""
-        dead = set()
-        for ws in list(self._rx_clients):
+        """Send decoded PCM bytes to all connected RX WebSocket listeners.
+
+        Sends run concurrently with a per-client timeout: a stalled listener
+        (e.g. an iOS device frozen on lock screen with a full write buffer)
+        would otherwise block on send_bytes without ever raising, piling up
+        hanging tasks. On timeout/error the client is dropped and closed.
+        """
+        clients = list(self._rx_clients)
+        if not clients:
+            return
+
+        async def _send(ws):
             try:
-                await ws.send_bytes(pcm)
+                await asyncio.wait_for(ws.send_bytes(pcm), timeout=2.0)
+                return None
             except Exception:
-                dead.add(ws)
-        self._rx_clients -= dead
+                return ws
+
+        results = await asyncio.gather(*(_send(ws) for ws in clients))
+        dead = {ws for ws in results if ws is not None}
+        if dead:
+            self._rx_clients -= dead
+            for ws in dead:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
 
     async def _dispatch_message(self, sender: str, text: str):
         """Broadcast an incoming FRN text message to all connected chat clients."""
@@ -625,11 +644,38 @@ class FRNTXRoom:
 
 # ── Auth helpers ─────────────────────────────────────────────────────────────
 
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+_PBKDF2_ITERATIONS = 240_000   # OWASP-Empfehlung für PBKDF2-HMAC-SHA256
 
-def hmac_compare(a: str, b: str) -> bool:
-    return secrets.compare_digest(a.encode(), b.encode())
+def hash_password(password: str) -> str:
+    """Hash a password as 'pbkdf2_sha256$<iterations>$<salt_hex>$<hash_hex>'."""
+    salt = secrets.token_bytes(16)
+    dk   = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, _PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${salt.hex()}${dk.hex()}"
+
+def verify_password(password: str, stored: str) -> bool:
+    """Constant-time verify. Accepts new PBKDF2 hashes and legacy bare SHA-256."""
+    if not stored:
+        return False
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iters_s, salt_hex, hash_hex = stored.split("$")
+            dk = hashlib.pbkdf2_hmac(
+                "sha256", password.encode(), bytes.fromhex(salt_hex), int(iters_s))
+            return secrets.compare_digest(dk.hex(), hash_hex)
+        except (ValueError, TypeError):
+            return False
+    # Legacy: ungesalzenes SHA-256 (wird bei erfolgreichem Login migriert)
+    legacy = hashlib.sha256(password.encode()).hexdigest()
+    return secrets.compare_digest(legacy, stored)
+
+def needs_rehash(stored: str) -> bool:
+    """True wenn der gespeicherte Hash nicht das aktuelle PBKDF2-Format hat."""
+    if not stored or not stored.startswith("pbkdf2_sha256$"):
+        return True
+    try:
+        return int(stored.split("$")[1]) < _PBKDF2_ITERATIONS
+    except (ValueError, IndexError):
+        return True
 
 
 # ── Server ───────────────────────────────────────────────────────────────────
@@ -1241,7 +1287,12 @@ class TXServer:
         # ── 1. Lokale Authentifizierung ──────────────────────────────────
         if auth_mode in ("local", "both"):
             user = self.users.get(username)
-            if user and user.get("password_hash") and hmac_compare(hash_password(password), user["password_hash"]):
+            if user and verify_password(password, user.get("password_hash", "")):
+                # Legacy-SHA256-Hashes bei erfolgreichem Login auf PBKDF2 migrieren
+                if needs_rehash(user.get("password_hash", "")):
+                    user["password_hash"] = hash_password(password)
+                    self._save_users()
+                    log.info("Passwort-Hash für '%s' auf PBKDF2 migriert", username)
                 token = self._token_for(username)
                 rooms = [{"mount": m, "name": r.name} for m, r in self.rooms.items()]
                 return web.json_response({

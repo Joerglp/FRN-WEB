@@ -1271,6 +1271,7 @@ let rxScheduleTime = 0;     // Nächster Wiedergabe-Zeitpunkt im AudioContext
 // wie eine Musik-App im Hintergrund abspielen.
 let _bgAudioEl   = null;
 let _bgAudioMount = null;
+let _bgRecoverTimer = null;
 
 // Minimales stilles WAV (44 Byte, 0 Samples) als Data-URI zum Primen der iOS-Audio-Session
 const _SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
@@ -1280,30 +1281,61 @@ function _initBgAudio() {
   _bgAudioEl = document.createElement("audio");
   _bgAudioEl.setAttribute("playsinline", "");
   _bgAudioEl.setAttribute("x-webkit-airplay", "allow");
-  _bgAudioEl.preload = "none";
+  _bgAudioEl.preload = "auto";
   _bgAudioEl.volume  = 1.0;
+  _bgAudioEl.loop    = true;          // Stilles WAV in Dauerschleife
   document.body.appendChild(_bgAudioEl);
-  // iOS-Audio-Session während der User-Geste primen: kurz stilles Audio abspielen,
-  // damit play() später beim Bildschirmsperren ohne User-Geste erlaubt ist.
+  // iOS-Audio-Session während der User-Geste aktivieren UND aktiv halten:
+  // Das stille WAV läuft durchgehend leise weiter. Solange ein <audio>-Element
+  // spielt, bleibt die iOS-Audio-Session aktiv — nur dann darf beim Sperren
+  // ohne neue User-Geste auf den Live-Stream umgeschaltet werden.
   _bgAudioEl.src = _SILENT_WAV;
-  _bgAudioEl.play().then(() => { _bgAudioEl.pause(); _bgAudioEl.src = ""; }).catch(() => {});
+  _bgAudioEl.play().catch(() => {});
+
+  // Auto-Recovery: bricht die Icecast-Mount ab (z. B. wenn der Capture-Stream
+  // serverseitig neu startet), feuert das Element 'error'/'ended'/'stalled' und
+  // bleibt sonst still stehen — im gesperrten Zustand unbemerkt. Solange wir im
+  // Hintergrund sind und ein Live-Mount aktiv ist, erneut verbinden.
+  const _bgRecover = () => {
+    if (document.visibilityState === "hidden" && _bgAudioMount && _bgAudioEnabled) {
+      clearTimeout(_bgRecoverTimer);
+      _bgRecoverTimer = setTimeout(() => {
+        if (document.visibilityState === "hidden" && _bgAudioMount) {
+          console.log("BgAudio: Stream abgerissen — reconnect", _bgAudioMount);
+          _bgAudioEl.src = `/stream/${encodeURIComponent(_bgAudioMount)}.mp3`;
+          _bgAudioEl.play().catch(() => {});
+        }
+      }, 1500);
+    }
+  };
+  _bgAudioEl.addEventListener("error",   _bgRecover);
+  _bgAudioEl.addEventListener("ended",   _bgRecover);
+  _bgAudioEl.addEventListener("stalled", _bgRecover);
 }
 
 function _startBgAudio(mount) {
   _initBgAudio();
+  const wantSrc = `/stream/${encodeURIComponent(mount)}.mp3`;
   if (_bgAudioMount === mount && !_bgAudioEl.paused) return;
-  _bgAudioMount      = mount;
-  _bgAudioEl.src     = `/stream/${encodeURIComponent(mount)}.mp3`;
+  _bgAudioMount   = mount;
+  _bgAudioEl.loop = false;
+  _bgAudioEl.src  = wantSrc;
+  // Kein neuer load()-Aufruf nötig — src-Wechsel auf einem bereits spielenden
+  // Element wird von iOS als Fortsetzung der aktiven Session behandelt.
   _bgAudioEl.play().catch(e => console.warn("BgAudio play:", e));
   console.log("BgAudio: Icecast gestartet →", mount);
 }
 
 function _stopBgAudio() {
-  if (!_bgAudioEl || _bgAudioEl.paused) return;
-  _bgAudioEl.pause();
-  _bgAudioEl.src = "";
-  _bgAudioMount  = null;
-  console.log("BgAudio: gestoppt");
+  if (!_bgAudioEl) return;
+  _bgAudioMount   = null;
+  // NICHT pausieren — sonst stirbt die iOS-Session und der nächste Lock-Screen
+  // kann den Stream nicht mehr ohne User-Geste starten. Stattdessen zurück auf
+  // das stille WAV in Dauerschleife, damit die Session warm bleibt.
+  _bgAudioEl.loop = true;
+  _bgAudioEl.src  = _SILENT_WAV;
+  _bgAudioEl.play().catch(() => {});
+  console.log("BgAudio: zurück auf Stille (Session bleibt aktiv)");
 }
 
 function ensureRxAudioCtx() {
@@ -1368,6 +1400,12 @@ document.addEventListener("visibilitychange", () => {
     if (mount && authToken && _bgAudioEnabled) {
       _startBgAudio(mount);
     }
+
+    // rxWs schließen: im Hintergrund liefert Icecast das Audio. Bliebe der
+    // WebSocket offen, würde iOS das JS einfrieren, der Server aber weiter PCM
+    // senden → toter Socket, der serverseitig nicht als tot erkannt wird und
+    // hängende Broadcast-Tasks anhäuft. Auf 'visible' wird ohnehin neu verbunden.
+    disconnectRxWs();
   } else {
     // Display an / App wieder sichtbar
     _stopBgAudio();   // Icecast-Fallback stoppen
@@ -1388,10 +1426,9 @@ document.addEventListener("visibilitychange", () => {
 
     if (mount && authToken) {
       if (!clientPollTimer) loadRoomClients(mount);
-      // Immer neu verbinden → live einsteigen, kein Replay alter Pakete
+      // Immer neu verbinden → live einsteigen, kein Replay alter Pakete.
+      // connectRxWs → ensureRxAudioCtx startet auch den rxLevelTimer neu.
       connectRxWs(mount);
-      if (rxAnalyser && !rxLevelTimer)
-        rxLevelTimer = setInterval(updateRxLevel, 100);
     }
   }
 });
@@ -1532,7 +1569,6 @@ function connectRxWs(mount) {
     rxScheduleTime += buf.duration;  // 200 ms pro FRN-Paket
   };
 
-  let _rxReconnectDelay = 3000;
   rxWs.onclose = (evt) => {
     setRxLed(false);
     clearRxVu();
@@ -1555,7 +1591,7 @@ function connectRxWs(mount) {
     setTimeout(() => {
       const m = document.getElementById("room-select")?.value;
       if (m && authToken) {
-        _rxReconnectDelay = 3000;   // Reset nach erfolgreichem Reconnect
+        // Reset des Backoffs erfolgt erst bei erfolgreichem onopen, nicht hier
         connectRxWs(m);
       }
     }, delay);
