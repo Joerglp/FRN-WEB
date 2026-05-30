@@ -234,11 +234,10 @@ def query_entries(
             params
         ).fetchall()
 
+        # params ohne die angehängten limit/offset für die COUNT-Abfrage
         total = conn.execute(
             f"SELECT COUNT(*) FROM transmissions {where}",
             params[:-2]
-        ).scalar() if clauses else conn.execute(
-            "SELECT COUNT(*) FROM transmissions"
         ).fetchone()[0]
 
     result = []
