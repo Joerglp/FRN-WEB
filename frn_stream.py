@@ -539,7 +539,12 @@ class RoomRecorder:
     def _save(self, pcm_data: bytes, callsign: str, ts: float):
         from datetime import datetime
         dt   = datetime.fromtimestamp(ts)
-        name = dt.strftime("frn-%Y%m%d-%H%M%S")
+        # Raum in den Dateinamen aufnehmen: alle Raum-Dienste schreiben ins
+        # selbe wav_dir. Ohne Raum kollidieren Übertragungen, die in zwei
+        # Räumen in derselben Sekunde starten — eine Aufnahme würde die andere
+        # überschreiben (Datenverlust). safe_room wie in frn_archive.add_entry.
+        safe_room = re.sub(r"[^A-Za-z0-9_-]", "_", self.room_name) or "room"
+        name = dt.strftime(f"frn-%Y%m%d-%H%M%S-{safe_room}")
         wav_path  = self.wav_dir / f"{name}.wav"
         meta_path = self.wav_dir / f"{name}.meta"
 
