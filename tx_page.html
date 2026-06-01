@@ -1429,7 +1429,20 @@ document.addEventListener("visibilitychange", () => {
       // Immer neu verbinden → live einsteigen, kein Replay alter Pakete.
       // connectRxWs → ensureRxAudioCtx startet auch den rxLevelTimer neu.
       connectRxWs(mount);
+      // Haupt-/Chat-WS ebenfalls neu verbinden — sie reißt im Standby ab und
+      // der setTimeout-Reconnect greift bei eingefrorenen Hintergrund-Tabs nicht.
+      connectChatWs(mount);
     }
+  }
+});
+
+// Netzwerk wieder online (z.B. WLAN-Wechsel) → beide WebSockets neu verbinden
+window.addEventListener("online", () => {
+  const mount = document.getElementById("room-select")?.value;
+  if (mount && authToken && document.visibilityState === "visible") {
+    connectChatWs(mount);
+    connectRxWs(mount);
+    if (!clientPollTimer) loadRoomClients(mount);
   }
 });
 
