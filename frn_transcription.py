@@ -337,6 +337,11 @@ class TranscriptionPipeline:
                 await asyncio.sleep(30)
             except Exception as e:
                 log.warning("[%s] Whisper-Fehler für %s: %r", room, Path(wav_path).name, e)
+                # WAV inzwischen weg (z.B. vom Cleanup gelöscht) → permanent, nicht retryen
+                if not Path(wav_path).exists():
+                    log.warning("[%s] WAV %s existiert nicht mehr — übersprungen",
+                                room, Path(wav_path).name)
+                    return
                 if not remote_url:
                     break  # lokaler Fehler → überspringen
                 log.warning("Warte 30s und versuche erneut …")
