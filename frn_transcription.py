@@ -313,9 +313,15 @@ class TranscriptionPipeline:
         model_size = self.cfg.get("whisper_model", "medium")
         language   = self.cfg.get("whisper_language", "de")
 
-        # Bei konfiguriertem Remote-Server: bei Fehler warten und erneut versuchen
+        # Bei konfiguriertem Remote-Server: bei Fehler warten und erneut versuchen.
+        # Server-weg (Health-Check) zählt NICHT als Fehlversuch. Echte Timeouts/Fehler
+        # bei der Transkription werden gezählt — nach MAX_FAILS wird die Datei
+        # übersprungen, damit eine einzelne kaputte/zu große Datei nicht die ganze
+        # Warteschlange dauerhaft blockiert.
+        MAX_FAILS = 3
         remote_url = _get_whisper_remote_url()
-        text = ""
+        text  = ""
+        fails = 0
         while True:
             if remote_url:
                 loop = asyncio.get_event_loop()
@@ -333,7 +339,12 @@ class TranscriptionPipeline:
                 log.warning("[%s] Whisper-Timeout für %s", room, Path(wav_path).name)
                 if not remote_url:
                     break  # lokaler Fehler → überspringen
-                log.warning("Warte 30s und versuche erneut …")
+                fails += 1
+                if fails >= MAX_FAILS:
+                    log.warning("[%s] %s nach %d Timeouts übersprungen",
+                                room, Path(wav_path).name, fails)
+                    return
+                log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
                 await asyncio.sleep(30)
             except Exception as e:
                 log.warning("[%s] Whisper-Fehler für %s: %r", room, Path(wav_path).name, e)
@@ -344,7 +355,12 @@ class TranscriptionPipeline:
                     return
                 if not remote_url:
                     break  # lokaler Fehler → überspringen
-                log.warning("Warte 30s und versuche erneut …")
+                fails += 1
+                if fails >= MAX_FAILS:
+                    log.warning("[%s] %s nach %d Fehlern übersprungen",
+                                room, Path(wav_path).name, fails)
+                    return
+                log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
                 await asyncio.sleep(30)
 
         if not text:
