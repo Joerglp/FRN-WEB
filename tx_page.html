@@ -1282,20 +1282,15 @@ function _initBgAudio() {
   _bgAudioEl.setAttribute("playsinline", "");
   _bgAudioEl.setAttribute("x-webkit-airplay", "allow");
   _bgAudioEl.preload = "auto";
-  _bgAudioEl.volume  = 1.0;
-  _bgAudioEl.loop    = true;          // Stilles WAV in Dauerschleife
+  _bgAudioEl.volume  = 0;             // Vordergrund stumm — der Low-Latency-WS ist hörbar
+  _bgAudioEl.loop    = true;
   document.body.appendChild(_bgAudioEl);
-  // iOS-Audio-Session während der User-Geste aktivieren UND aktiv halten:
-  // Das stille WAV läuft durchgehend leise weiter. Solange ein <audio>-Element
-  // spielt, bleibt die iOS-Audio-Session aktiv — nur dann darf beim Sperren
-  // ohne neue User-Geste auf den Live-Stream umgeschaltet werden.
+  // Stiller Loop hält die iOS-Audio-Session ab der ersten User-Geste, bis ein
+  // Raum aktiv ist und _bgSetMount() den Icecast-Stream auflegt.
   _bgAudioEl.src = _SILENT_WAV;
   _bgAudioEl.play().catch(() => {});
 
-  // MediaSession an _bgAudioEl koppeln — das ist das einzige durchgehend
-  // spielende <audio>-Element (Stille im Vordergrund, Icecast im Hintergrund).
-  // Play steuert genau dieses Element, Pause wird blockiert, damit iOS die
-  // Session nicht beendet.
+  // MediaSession an _bgAudioEl koppeln (einziges durchgehend spielendes Element).
   if ("mediaSession" in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
       title:  "FRN Webstream",
@@ -1304,61 +1299,71 @@ function _initBgAudio() {
     try {
       navigator.mediaSession.setActionHandler("play",  () => _bgAudioEl.play().catch(() => {}));
       navigator.mediaSession.setActionHandler("pause", () => {});  // Pause blockieren
-    } catch (e) { /* ältere Browser: nicht alle Actions unterstützt */ }
+    } catch (e) { /* ältere Browser */ }
   }
 
-  // Auto-Recovery: bricht die Icecast-Mount ab (z. B. wenn der Capture-Stream
-  // serverseitig neu startet), feuert das Element 'error'/'ended'/'stalled' und
-  // bleibt sonst still stehen — im gesperrten Zustand unbemerkt. Solange wir im
-  // Hintergrund sind und ein Live-Mount aktiv ist, erneut verbinden.
+  // Auto-Recovery: reißt die Icecast-Mount ab (z. B. Capture-Stream-Neustart),
+  // feuert 'error'/'ended'/'stalled' → neu verbinden, Lautstärke je nach Modus.
   const _bgRecover = () => {
-    if (document.visibilityState === "hidden" && _bgAudioMount && _bgAudioEnabled) {
-      clearTimeout(_bgRecoverTimer);
-      _bgRecoverTimer = setTimeout(() => {
-        if (document.visibilityState === "hidden" && _bgAudioMount) {
-          console.log("BgAudio: Stream abgerissen — reconnect", _bgAudioMount);
-          _bgAudioEl.src = `/stream/${encodeURIComponent(_bgAudioMount)}.mp3`;
-          _bgAudioEl.play().catch(() => {});
-        }
-      }, 1500);
-    }
+    if (!_bgAudioMount || !_bgAudioEnabled) return;
+    clearTimeout(_bgRecoverTimer);
+    _bgRecoverTimer = setTimeout(() => {
+      if (!_bgAudioMount) return;
+      _bgAudioEl.src    = `/stream/${encodeURIComponent(_bgAudioMount)}.mp3`;
+      _bgAudioEl.volume = (document.visibilityState === "hidden") ? 1 : 0;
+      _bgAudioEl.play().catch(() => {});
+    }, 1500);
   };
   _bgAudioEl.addEventListener("error",   _bgRecover);
   _bgAudioEl.addEventListener("ended",   _bgRecover);
   _bgAudioEl.addEventListener("stalled", _bgRecover);
 }
 
-function _startBgAudio(mount) {
+// Icecast-Stream eines Raums DURCHGEHEND auf _bgAudioEl legen — im Vordergrund
+// stumm (volume 0), im Hintergrund hörbar. src/play() MUSS innerhalb einer
+// User-Geste laufen (Raumwahl / erster Tap). Danach wird beim Sperren NUR die
+// Lautstärke umgeschaltet — kein src-Wechsel, kein play() → die iOS-Session
+// bricht nicht mehr ab (das war die Ursache des "Stop/---"-Flackerns).
+function _bgSetMount(mount) {
   _initBgAudio();
-  const wantSrc = `/stream/${encodeURIComponent(mount)}.mp3`;
-  if (_bgAudioMount === mount && !_bgAudioEl.paused) return;
-  _bgAudioMount   = mount;
-  _bgAudioEl.loop = false;
-  _bgAudioEl.src  = wantSrc;
-  // Kein neuer load()-Aufruf nötig — src-Wechsel auf einem bereits spielenden
-  // Element wird von iOS als Fortsetzung der aktiven Session behandelt.
-  _bgAudioEl.play().catch(e => console.warn("BgAudio play:", e));
+  if (!_bgAudioEnabled || !mount) return;
+  const tail = `${encodeURIComponent(mount)}.mp3`;
+  if (_bgAudioMount === mount && _bgAudioEl.src.indexOf(tail) >= 0 && !_bgAudioEl.paused)
+    return;
+  _bgAudioMount     = mount;
+  _bgAudioEl.loop   = false;
+  _bgAudioEl.src    = `/stream/${tail}`;
+  _bgAudioEl.volume = (document.visibilityState === "hidden") ? 1 : 0;
+  _bgAudioEl.play().catch(e => console.warn("BgAudio:", e));
   if ("mediaSession" in navigator) {
     const roomName = document.getElementById("room-select")?.selectedOptions[0]?.text || mount;
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title:  roomName,
-      artist: "FRN Webstream",
-    });
+    navigator.mediaSession.metadata = new MediaMetadata({ title: roomName, artist: "FRN Webstream" });
     navigator.mediaSession.playbackState = "playing";
   }
-  console.log("BgAudio: Icecast gestartet →", mount);
+  console.log("BgAudio: Icecast (stumm) gesetzt →", mount);
 }
 
-function _stopBgAudio() {
+// Vordergrund: Icecast stumm (WS liefert hörbares Low-Latency-Audio).
+function _bgMute() {
+  if (_bgAudioEl) _bgAudioEl.volume = 0;
+}
+
+// Hintergrund: Icecast hörbar (läuft schon — nur Lautstärke hoch, kein src/play-Wechsel).
+function _bgUnmute() {
+  if (!_bgAudioEl || !_bgAudioMount) return;
+  _bgAudioEl.volume = 1;
+  _bgAudioEl.play().catch(() => {});   // falls iOS angehalten hat
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+}
+
+// Hintergrund-Audio abschalten → zurück auf stillen Loop (hält nur die Session).
+function _bgDisable() {
+  _bgAudioMount = null;
   if (!_bgAudioEl) return;
-  _bgAudioMount   = null;
-  // NICHT pausieren — sonst stirbt die iOS-Session und der nächste Lock-Screen
-  // kann den Stream nicht mehr ohne User-Geste starten. Stattdessen zurück auf
-  // das stille WAV in Dauerschleife, damit die Session warm bleibt.
-  _bgAudioEl.loop = true;
-  _bgAudioEl.src  = _SILENT_WAV;
+  _bgAudioEl.loop   = true;
+  _bgAudioEl.src    = _SILENT_WAV;
+  _bgAudioEl.volume = 0;
   _bgAudioEl.play().catch(() => {});
-  console.log("BgAudio: zurück auf Stille (Session bleibt aktiv)");
 }
 
 function ensureRxAudioCtx() {
@@ -1399,9 +1404,11 @@ document.addEventListener("visibilitychange", () => {
     clearTimeout(clientPollTimer); clientPollTimer = null;
     clearRxVu();
 
-    // Auf Icecast-Stream umschalten — überlebt iOS Display-Aus (nur wenn aktiv)
+    // Icecast (läuft im Vordergrund stumm mit) hörbar schalten — kein src/play-
+    // Wechsel, nur Lautstärke hoch. Überlebt iOS-Sperre.
     if (mount && authToken && _bgAudioEnabled) {
-      _startBgAudio(mount);
+      if (_bgAudioMount !== mount) _bgSetMount(mount);  // Geste lief beim Verbinden
+      _bgUnmute();
     }
 
     // rxWs schließen: im Hintergrund liefert Icecast das Audio. Bliebe der
@@ -1411,7 +1418,7 @@ document.addEventListener("visibilitychange", () => {
     disconnectRxWs();
   } else {
     // Display an / App wieder sichtbar
-    _stopBgAudio();   // Icecast-Fallback stoppen
+    _bgMute();   // Icecast wieder stumm — der WebSocket liefert das Audio
 
     // AudioContext schließen und neu erstellen — verwirft alle Audio-Pakete die
     // während der Bildschirmsperre im rxScheduleTime-Buffer aufgelaufen sind.
@@ -1457,12 +1464,14 @@ function toggleBgAudio() {
     btn.classList.add("active");
     btn.textContent = "🔊";
     btn.title = "Stream läuft weiter bei Bildschirmsperre — tippen zum Deaktivieren";
-    _initBgAudio();   // stillen Keep-Alive-Loop sicherstellen (hält iOS-Session)
+    // Klick ist eine User-Geste → Icecast-Stream (stumm) für aktuellen Raum auflegen.
+    const mount = document.getElementById("room-select")?.value;
+    if (mount) _bgSetMount(mount); else _initBgAudio();
   } else {
     btn.classList.remove("active");
     btn.textContent = "🔇";
     btn.title = "Stream stoppt bei Bildschirmsperre — tippen zum Aktivieren";
-    _stopBgAudio();
+    _bgDisable();
   }
 }
 
@@ -1515,12 +1524,19 @@ document.addEventListener("visibilitychange", async () => {
 document.addEventListener("pointerdown", () => {
   ensureRxAudioCtx();
   _initBgAudio();
+  // Innerhalb dieser Geste den Icecast-Stream (stumm) auflegen, damit iOS die
+  // Hintergrund-Wiedergabe später erlaubt (Lautstärke wird dann nur getoggelt).
+  const mount = document.getElementById("room-select")?.value;
+  if (mount && authToken && _bgAudioEnabled) _bgSetMount(mount);
 }, { once: true });
 
 function connectRxWs(mount) {
   disconnectRxWs();
   if (!authToken || !mount) return;
   ensureRxAudioCtx();
+  // Hintergrund-Icecast (stumm) auf diesen Raum legen — bei Raumwechsel läuft das
+  // innerhalb der User-Geste, sodass iOS die spätere Hintergrund-Wiedergabe erlaubt.
+  if (_bgAudioEnabled) _bgSetMount(mount);
 
   const proto = location.protocol === "https:" ? "wss" : "ws";
   rxWs = new WebSocket(`${proto}://${location.host}/rx?token=${authToken}&room=${encodeURIComponent(mount)}`);
