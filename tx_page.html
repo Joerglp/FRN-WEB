@@ -1257,8 +1257,6 @@ const RX_SAMPLE_RATE = 8000;
 let rxAudioCtx    = null;
 let rxGainNode    = null;   // Lautstärke-Steuerung (TX-Mute + User-Mute)
 let rxAnalyser    = null;
-let rxMsdNode     = null;   // MediaStreamDestinationNode → iOS-Background-Audio
-let rxAudioEl     = null;   // unsichtbares <audio>-Element für iOS Lock-Screen
 let rxWs              = null;   // WebSocket zur /rx Endpoint
 let _rxReconnectDelay = 3000;   // Exponentieller Backoff (ms)
 let rxMuted       = false;  // User-Mute-Status
@@ -1294,6 +1292,21 @@ function _initBgAudio() {
   _bgAudioEl.src = _SILENT_WAV;
   _bgAudioEl.play().catch(() => {});
 
+  // MediaSession an _bgAudioEl koppeln — das ist das einzige durchgehend
+  // spielende <audio>-Element (Stille im Vordergrund, Icecast im Hintergrund).
+  // Play steuert genau dieses Element, Pause wird blockiert, damit iOS die
+  // Session nicht beendet.
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title:  "FRN Webstream",
+      artist: "Free Radio Network",
+    });
+    try {
+      navigator.mediaSession.setActionHandler("play",  () => _bgAudioEl.play().catch(() => {}));
+      navigator.mediaSession.setActionHandler("pause", () => {});  // Pause blockieren
+    } catch (e) { /* ältere Browser: nicht alle Actions unterstützt */ }
+  }
+
   // Auto-Recovery: bricht die Icecast-Mount ab (z. B. wenn der Capture-Stream
   // serverseitig neu startet), feuert das Element 'error'/'ended'/'stalled' und
   // bleibt sonst still stehen — im gesperrten Zustand unbemerkt. Solange wir im
@@ -1325,6 +1338,14 @@ function _startBgAudio(mount) {
   // Kein neuer load()-Aufruf nötig — src-Wechsel auf einem bereits spielenden
   // Element wird von iOS als Fortsetzung der aktiven Session behandelt.
   _bgAudioEl.play().catch(e => console.warn("BgAudio play:", e));
+  if ("mediaSession" in navigator) {
+    const roomName = document.getElementById("room-select")?.selectedOptions[0]?.text || mount;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title:  roomName,
+      artist: "FRN Webstream",
+    });
+    navigator.mediaSession.playbackState = "playing";
+  }
   console.log("BgAudio: Icecast gestartet →", mount);
 }
 
@@ -1355,31 +1376,11 @@ function ensureRxAudioCtx() {
     rxAnalyser.fftSize = 256;
     rxGainNode.connect(rxAnalyser);
     rxAnalyser.connect(rxAudioCtx.destination);
-
-    // iOS Background Audio: Web-Audio-Graph über MediaStreamDestinationNode an
-    // ein natives <audio>-Element koppeln. iOS registriert das als aktive
-    // Mediasession und lässt Audio + Netzwerk auch bei gesperrtem Bildschirm laufen.
-    if (typeof rxAudioCtx.createMediaStreamDestination === "function") {
-      rxMsdNode = rxAudioCtx.createMediaStreamDestination();
-      rxGainNode.connect(rxMsdNode);
-      rxAudioEl = document.createElement("audio");
-      rxAudioEl.srcObject = rxMsdNode.stream;
-      rxAudioEl.setAttribute("playsinline", "");
-      rxAudioEl.setAttribute("autoplay", "");
-      rxAudioEl.muted = false;
-      // Nicht in DOM hängen nötig, aber Safari braucht play()-Aufruf
-      rxAudioEl.play().catch(() => {});
-    }
-
-    // Lock-Screen / Control-Center Anzeige (iOS 15+, Chrome Android)
-    if ("mediaSession" in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title:  "FRN Webstream",
-        artist: "Free Radio Network",
-      });
-      navigator.mediaSession.setActionHandler("play",  () => rxAudioCtx?.resume());
-      navigator.mediaSession.setActionHandler("pause", () => {});  // Pause blockieren
-    }
+    // Kein MediaStreamDestination/<audio> mehr: iOS suspendiert den AudioContext
+    // beim Sperren ohnehin, der Trick hielt nichts am Leben und konkurrierte mit
+    // _bgAudioEl um die MediaSession (Lock-Screen sprang auf Stop). Das
+    // Hintergrund-Audio UND die MediaSession laufen jetzt ausschließlich über
+    // _bgAudioEl (siehe _initBgAudio).
 
     clearInterval(rxLevelTimer);
     rxLevelTimer = setInterval(updateRxLevel, 100);
@@ -1420,8 +1421,6 @@ document.addEventListener("visibilitychange", () => {
       rxAudioCtx = null;
       rxGainNode = null;
       rxAnalyser = null;
-      rxMsdNode  = null;
-      if (rxAudioEl) { rxAudioEl.pause(); rxAudioEl.src = ""; rxAudioEl = null; }
     }
     rxScheduleTime = 0;
     clearInterval(rxLevelTimer); rxLevelTimer = null;
@@ -1531,17 +1530,15 @@ function connectRxWs(mount) {
   rxWs.onopen = () => {
     _rxReconnectDelay = 3000;   // Backoff zurücksetzen
     setRxLed(true);
-    // Lock-Screen-Anzeige mit aktuellem Raumnamen aktualisieren
+    // Lock-Screen-Titel mit aktuellem Raumnamen aktualisieren (MediaSession wird
+    // sonst von _bgAudioEl getragen).
     if ("mediaSession" in navigator) {
       const roomName = document.getElementById("room-select")?.selectedOptions[0]?.text || mount;
       navigator.mediaSession.metadata = new MediaMetadata({
         title:  roomName,
         artist: "FRN Webstream",
       });
-      navigator.mediaSession.playbackState = "playing";
     }
-    // iOS: sicherstellen dass <audio>-Element weiterläuft
-    rxAudioEl?.play().catch(() => {});
   };
 
   rxWs.onmessage = (evt) => {
@@ -1573,7 +1570,9 @@ function connectRxWs(mount) {
   rxWs.onclose = (evt) => {
     setRxLed(false);
     clearRxVu();
-    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none";
+    // playbackState NICHT auf "none" setzen: die MediaSession gehört _bgAudioEl.
+    // Bei WS-Abriss im Hintergrund würde das sonst den laufenden Icecast-Stream
+    // auf dem Lock-Screen auf Stop setzen.
 
     if (!authToken) return;
 
