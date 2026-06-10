@@ -1328,7 +1328,9 @@ function _initBgAudio() {
 // bricht nicht mehr ab (das war die Ursache des "Stop/---"-Flackerns).
 function _bgSetMount(mount) {
   _initBgAudio();
-  if (!_bgAudioEnabled || !mount) return;
+  // _userPaused: WS-Reconnects (connectRxWs bei Sichtbarwerden) dürfen die
+  // klebrige Pause nicht aufheben — Resume-Pfade löschen das Flag vorher.
+  if (!_bgAudioEnabled || !mount || _userPaused) return;
   const tail = `${encodeURIComponent(mount)}.mp3`;
   if (_bgAudioMount === mount && _bgAudioEl.src.indexOf(tail) >= 0 && !_bgAudioEl.paused)
     return;
@@ -1369,17 +1371,20 @@ function _bgDisable() {
 }
 
 // ── Klebrige Pause (Lock-Screen / „echtes" Stoppen) ──────────────────────────
-// Hält ALLES an: Icecast-Hintergrund-Audio wird auf den stillen Keep-Alive-Loop
-// gelegt (so bleibt die iOS-Session + der Lock-Screen-Play-Knopf erhalten) und
-// das Vordergrund-WS-Audio auf gain 0. Der Zustand ist klebrig: weder die
+// Hält ALLES an: das Hintergrund-Element wird WIRKLICH pausiert und das
+// Vordergrund-WS-Audio auf gain 0 gelegt. Der Zustand ist klebrig: weder die
 // Auto-Recovery noch das erneute Sperren/Sichtbarwerden nimmt die Wiedergabe
 // wieder auf — erst ein bewusstes Play/Unmute (Lock-Screen oder in der App).
+// WICHTIG: echtes _bgAudioEl.pause() — iOS leitet den Lock-Screen-Zustand vom
+// Element ab, nicht von playbackState. Ein weiterlaufender stiller Loop zeigte
+// dort weiter „spielt", der Play-Knopf erschien nie und man kam vom Sperr-
+// bildschirm nicht mehr aus der Pause raus.
 function _pauseAll() {
   _userPaused  = true;
   _pausedMount = _bgAudioMount
               || document.getElementById("room-select")?.value
               || _pausedMount;
-  _bgDisable();      // Icecast lösen → stiller Loop (Session bleibt warm)
+  if (_bgAudioEl) _bgAudioEl.pause();
   _applyRxGain();    // Vordergrund-WS-Audio auf 0
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   console.log("Pause: alles stumm (klebrig)");
@@ -1390,7 +1395,10 @@ function _resumeAll() {
   const mount = _pausedMount || document.getElementById("room-select")?.value;
   _pausedMount = null;
   // Lock-Screen-Play zählt als User-Geste → Icecast darf wieder auflegen.
+  // _bgSetMount greift hier immer (Element ist pausiert → kein Early-Return)
+  // und steigt frisch live ein statt alten Puffer nachzuspielen.
   if (mount && _bgAudioEnabled) _bgSetMount(mount);
+  else if (_bgAudioEl) _bgAudioEl.play().catch(() => {});  // stiller Loop weiter
   if (document.visibilityState === "hidden") _bgUnmute(); else _bgMute();
   _applyRxGain();    // Vordergrund-WS-Audio wieder frei
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
