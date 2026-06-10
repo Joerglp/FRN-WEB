@@ -1015,6 +1015,59 @@ class TXServer:
             return xff.split(",")[0].strip()
         return request.remote or "?"
 
+    def _mqtt_cfg(self) -> dict | None:
+        """MQTT-Zugangsdaten aus config.ini [transcription] (gleiche Quelle wie
+        die Transkription — kein doppeltes Passwort). Einmal gecacht."""
+        if hasattr(self, "_mqtt_cfg_cache"):
+            return self._mqtt_cfg_cache
+        cfg = None
+        try:
+            import configparser
+            ini = Path(__file__).parent / "config.ini"
+            if ini.exists():
+                cp = configparser.ConfigParser()
+                cp.read(ini)
+                if cp.has_section("transcription") and cp.has_option("transcription", "mqtt_broker"):
+                    t = cp["transcription"]
+                    cfg = {
+                        "broker":   t.get("mqtt_broker", "localhost"),
+                        "port":     t.getint("mqtt_port", 1883),
+                        "user":     t.get("mqtt_user", ""),
+                        "password": t.get("mqtt_password", ""),
+                        "prefix":   t.get("mqtt_topic_prefix", "Home/FRN").rstrip("/"),
+                    }
+        except Exception as e:
+            log.warning("MQTT-Config lesen fehlgeschlagen: %s", e)
+        self._mqtt_cfg_cache = cfg
+        return cfg
+
+    async def _notify_new_user(self, username: str, callsign: str, ip: str, how: str):
+        """Bei Neuanmeldung eine MQTT-Nachricht auf <prefix>/new_login posten.
+        Nicht-blockierend (Publish läuft im ThreadPool). Fehler werden nur
+        geloggt — eine Anmeldung darf daran nie scheitern."""
+        m = self._mqtt_cfg()
+        if not m:
+            return
+        try:
+            import paho.mqtt.publish as publish
+            payload = json.dumps({
+                "user":     username,
+                "callsign": callsign,
+                "ip":       ip,
+                "auth":     how,   # "local" | "frn"
+                "time":     time.strftime("%Y-%m-%d %H:%M:%S"),
+            }, ensure_ascii=False)
+            topic = f"{m['prefix']}/new_login"
+            auth  = {"username": m["user"], "password": m["password"]} if m["user"] else None
+            loop  = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: publish.single(topic, payload=payload, hostname=m["broker"],
+                                       port=m["port"], auth=auth, qos=0, retain=False))
+            log.info("Neuanmeldung gemeldet → MQTT %s: %s (%s)", topic, username, ip)
+        except Exception as e:
+            log.warning("Neuanmeldung-MQTT fehlgeschlagen: %s", e)
+
     # ── FRN authentication ─────────────────────────────────────────────────
 
     async def _fetch_frn_networks(self, email: str, password: str) -> list:
@@ -1371,6 +1424,8 @@ class TXServer:
                     self._save_users()
                     log.info("FRN auto-created user '%s' (%s)", username, callsign)
                     prefs = self.users[username]
+                    # Neuanmeldung melden → du entscheidest, ob abgesichert wird.
+                    await self._notify_new_user(username, callsign, ip, "frn")
                 token = secrets.token_hex(24)
                 self.tokens[token] = {
                     "user":         username,
