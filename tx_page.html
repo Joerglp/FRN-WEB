@@ -1581,7 +1581,9 @@ function connectRxWs(mount) {
   if (_bgAudioEnabled) _bgSetMount(mount);
 
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  rxWs = new WebSocket(`${proto}://${location.host}/rx?token=${authToken}&room=${encodeURIComponent(mount)}`);
+  // Token als Subprotocol, NICHT in der URL — Query-Params landen im Access-Log.
+  rxWs = new WebSocket(`${proto}://${location.host}/rx?room=${encodeURIComponent(mount)}`,
+                       ["frn", "frn.token." + authToken]);
   rxWs.binaryType = "arraybuffer";
   rxScheduleTime  = 0;
 
@@ -1783,7 +1785,8 @@ function connectChatWs(room) {
   clearTimeout(_chatWsReconnectTimer);
   _chatWsRoom = room;
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws?token=${authToken}&room=${encodeURIComponent(room)}`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(room)}`,
+                   ["frn", "frn.token." + authToken]);
   ws.binaryType = "arraybuffer";
   ws.onmessage = onWsMessage;
   ws.onerror   = () => {};
@@ -1804,7 +1807,7 @@ async function loadRoomClients(mount) {
   if (!authToken || !mount) return;
   const ul = document.getElementById("user-list");
   try {
-    const resp = await fetch(`${TX_BASE}/api/rooms/${mount}/clients?token=${authToken}`);
+    const resp = await fetch(`${TX_BASE}/api/rooms/${mount}/clients`, { headers: { "X-Token": authToken } });
     if (!resp.ok) { renderUserList([]); return; }
     const data = await resp.json();
     renderUserList(data.clients || []);
@@ -1935,7 +1938,7 @@ async function doLogin() {
 
 async function fetchRoomsAndShow() {
   try {
-    const resp = await fetch(`${TX_BASE}/api/rooms?token=${authToken}`);
+    const resp = await fetch(`${TX_BASE}/api/rooms`, { headers: { "X-Token": authToken } });
     if (!resp.ok) { doLogout(); return; }
     const data = await resp.json();
     showTxPanel(data.rooms, localStorage.getItem("frn_default_room") || "");
@@ -2336,9 +2339,9 @@ async function saveRecording() {
   btn.disabled = true; btn.textContent = "Speichert...";
   try {
     const r = await fetch(
-      `${TX_BASE}/api/clips/${encodeURIComponent(_recClipId)}/recording?token=${authToken}`,
+      `${TX_BASE}/api/clips/${encodeURIComponent(_recClipId)}/recording`,
       { method: "POST",
-        headers: { "Content-Type": _recBlob.type || "audio/webm" },
+        headers: { "Content-Type": _recBlob.type || "audio/webm", "X-Token": authToken },
         body: _recBlob });
     const d = await r.json();
     if (r.ok) {
@@ -2361,8 +2364,8 @@ async function saveRecording() {
 async function deleteRecording() {
   if (!_recClipId) return;
   await fetch(
-    `${TX_BASE}/api/clips/${encodeURIComponent(_recClipId)}/recording?token=${authToken}`,
-    { method: "DELETE" }).catch(() => {});
+    `${TX_BASE}/api/clips/${encodeURIComponent(_recClipId)}/recording`,
+    { method: "DELETE", headers: { "X-Token": authToken } }).catch(() => {});
   const b = document.querySelector(`.clip-btn[data-id="${_recClipId}"]`);
   if (b) b.classList.remove("has-recording");
   document.getElementById("rec-del-btn").style.display = "none";
@@ -2376,7 +2379,7 @@ window._activeClipLabel = "";
 async function loadClips() {
   if (!authToken) return;
   try {
-    const r = await fetch(`${TX_BASE}/api/clips?token=${authToken}`);
+    const r = await fetch(`${TX_BASE}/api/clips`, { headers: { "X-Token": authToken } });
     if (!r.ok) return;
     const data = await r.json();
     renderClips(data.clips || []);
@@ -2426,7 +2429,8 @@ async function sendClip(id, label) {
 
   // Öffne frische WS-Verbindung (kein Audio-Worklet nötig)
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws?token=${authToken}&room=${encodeURIComponent(room)}`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(room)}`,
+                   ["frn", "frn.token." + authToken]);
   ws.binaryType = "arraybuffer";
   ws.onmessage  = onWsMessage;
   ws.onerror    = () => {
@@ -2525,8 +2529,8 @@ function showAdminTab(name) {
 }
 
 function adminFetch(url, opts = {}) {
-  const sep = url.includes("?") ? "&" : "?";
-  return fetch(`${TX_BASE}${url}${sep}token=${authToken}`, opts);
+  opts.headers = Object.assign({}, opts.headers, { "X-Token": authToken });
+  return fetch(`${TX_BASE}${url}`, opts);
 }
 
 // ── Users ──────────────────────────────────────────────────────────────────

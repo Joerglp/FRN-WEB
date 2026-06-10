@@ -694,6 +694,8 @@ class TXServer:
         self._rooms_path: Path | None = None
         self._tokens_path: Path = Path(__file__).parent / "tx_tokens.json"
         self._load_tokens()
+        # Brute-Force-Schutz: Login-Fehlversuche pro Client-IP (Zeitstempel)
+        self._login_fails: dict[str, list[float]] = {}
 
     # ── Token Persistenz ───────────────────────────────────────────────────
 
@@ -719,6 +721,7 @@ class TXServer:
             self._tokens_path.write_text(
                 json.dumps(safe, indent=2), encoding="utf-8"
             )
+            self._tokens_path.chmod(0o600)   # Session-Tokens: nicht world-readable
         except Exception as e:
             log.warning("Token-Save fehlgeschlagen: %s", e)
 
@@ -865,6 +868,7 @@ class TXServer:
         with open(self._users_path, "w") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
+        Path(self._users_path).chmod(0o600)   # Passwort-Hashes: nicht world-readable
 
     def _save_rooms(self):
         if not self._rooms_path:
@@ -984,6 +988,32 @@ class TXServer:
         # Sliding window — Token bei jeder Nutzung verlängern
         info["expires"] = time.time() + self.TOKEN_LIFETIME
         return info
+
+    @staticmethod
+    def _token_from(request) -> str:
+        """Token aus X-Token-Header (bevorzugt) oder WS-Subprotocol holen.
+
+        Tokens gehören NICHT in die URL: Query-Params landen im Traefik-
+        Access-Log. Browser-WebSockets können keine Header setzen — dort
+        schickt das Frontend das Token als Subprotocol 'frn.token.<hex>'.
+        Der Query-Param bleibt als Legacy-Fallback (alte offene Tabs).
+        """
+        tok = request.headers.get("X-Token", "")
+        if tok:
+            return tok
+        for p in request.headers.get("Sec-WebSocket-Protocol", "").split(","):
+            p = p.strip()
+            if p.startswith("frn.token."):
+                return p[len("frn.token."):]
+        return request.rel_url.query.get("token", "")
+
+    def _client_ip(self, request) -> str:
+        """Echte Client-IP: hinter Traefik ist request.remote nur die
+        Docker-Gateway-IP — die echte IP steht in X-Forwarded-For."""
+        xff = request.headers.get("X-Forwarded-For", "")
+        if xff:
+            return xff.split(",")[0].strip()
+        return request.remote or "?"
 
     # ── FRN authentication ─────────────────────────────────────────────────
 
@@ -1244,7 +1274,7 @@ class TXServer:
                 pass
 
     async def _require_admin(self, request) -> tuple[dict | None, web.Response | None]:
-        token = request.rel_url.query.get("token", "")
+        token = self._token_from(request)
         info  = self._validate_token(token)
         if not info:
             return None, web.json_response({"error": "unauthorized"}, status=401)
@@ -1283,6 +1313,20 @@ class TXServer:
         password = body.get("password", "")
         # auth_mode: "local" | "frn" | "both" (default: "both")
         auth_mode = self.cfg.get("auth", {}).get("mode", "both")
+
+        # Rate-Limit: max. 5 Fehlversuche pro IP und Minute. Die 1s-Verzögerung
+        # unten gilt nur pro Request — parallele Versuche umgehen sie sonst.
+        # Wichtig auch, weil der FRN-Auth-Pfad Credentials ans Sysman durchreicht
+        # (sonst Passwort-Orakel für fremde FRN-Konten).
+        ip  = self._client_ip(request)
+        now = time.time()
+        fails = [t for t in self._login_fails.get(ip, ()) if now - t < 60]
+        self._login_fails[ip] = fails
+        if len(fails) >= 5:
+            log.warning("Login rate-limit für %s (user=%r)", ip, username)
+            return web.json_response(
+                {"error": "Zu viele Fehlversuche — bitte eine Minute warten"},
+                status=429)
 
         # ── 1. Lokale Authentifizierung ──────────────────────────────────
         if auth_mode in ("local", "both"):
@@ -1346,6 +1390,12 @@ class TXServer:
                     "rooms":        rooms,
                 })
 
+        self._login_fails[ip].append(time.time())
+        if len(self._login_fails) > 1000:   # Speicher begrenzen (alte IPs raus)
+            cutoff = time.time() - 60
+            self._login_fails = {k: [t for t in v if t > cutoff]
+                                 for k, v in self._login_fails.items()}
+            self._login_fails = {k: v for k, v in self._login_fails.items() if v}
         await asyncio.sleep(1)
         return web.json_response(
             {"error": "Ungültiger Benutzername oder Passwort"}, status=401)
@@ -1362,7 +1412,7 @@ class TXServer:
 
 
     async def handle_rooms(self, request):
-        token = request.rel_url.query.get("token", "")
+        token = self._token_from(request)
         if not self._validate_token(token):
             return web.json_response({"error": "unauthorized"}, status=401)
         rooms = [{"mount": m, "name": r.name} for m, r in self.rooms.items()]
@@ -1792,7 +1842,7 @@ class TXServer:
 
     async def handle_clips(self, request):
         """Return list of configured quick-send clips (requires valid token)."""
-        token = request.rel_url.query.get("token", "")
+        token = self._token_from(request)
         if not self._validate_token(token):
             return web.json_response({"error": "unauthorized"}, status=401)
         return web.json_response({"clips": self._load_clips()})
@@ -1800,7 +1850,7 @@ class TXServer:
     async def handle_clip_recording_upload(self, request):
         """POST /api/clips/{id}/recording — save custom audio for a clip."""
         import re as _re
-        token = request.rel_url.query.get("token", "")
+        token = self._token_from(request)
         if not self._validate_token(token):
             return web.json_response({"error": "unauthorized"}, status=401)
 
@@ -1840,7 +1890,7 @@ class TXServer:
     async def handle_clip_recording_delete(self, request):
         """DELETE /api/clips/{id}/recording — remove custom recording, fall back to TTS."""
         import re as _re
-        token = request.rel_url.query.get("token", "")
+        token = self._token_from(request)
         if not self._validate_token(token):
             return web.json_response({"error": "unauthorized"}, status=401)
 
@@ -1860,7 +1910,7 @@ class TXServer:
         Uses the configured ``frn_stream_account`` credentials to query the FRN
         server, or falls back to the names of already-loaded rooms.
         """
-        token = request.rel_url.query.get("token", "")
+        token = self._token_from(request)
         if not self._validate_token(token):
             return web.json_response({"error": "unauthorized"}, status=401)
 
@@ -1909,7 +1959,7 @@ class TXServer:
         Triggers a FRN connection for the room if it is not yet connected,
         so the client list arrives as soon as possible.
         """
-        token = request.rel_url.query.get("token", "")
+        token = self._token_from(request)
         if not self._validate_token(token):
             return web.json_response({"error": "unauthorized"}, status=401)
         mount = request.match_info["mount"]
@@ -1949,7 +1999,7 @@ class TXServer:
         200 ms per frame). Use Web Audio API on the browser side to schedule
         and play the buffers.
         """
-        token = request.rel_url.query.get("token", "")
+        token = self._token_from(request)
         if not self._validate_token(token):
             return web.Response(status=401, text="Unauthorized")
 
@@ -1961,7 +2011,7 @@ class TXServer:
         if room._gsm_dec is None:
             return web.Response(status=503, text="GSM decoder not available")
 
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(protocols=("frn",))
         await ws.prepare(request)
 
         if not room._connected:
@@ -1987,7 +2037,7 @@ class TXServer:
     # ── WebSocket ──────────────────────────────────────────────────────────
 
     async def handle_ws(self, request):
-        token = request.rel_url.query.get("token", "")
+        token = self._token_from(request)
         info  = self._validate_token(token)
         if not info:
             return web.Response(status=401, text="Unauthorized")
@@ -1997,7 +2047,7 @@ class TXServer:
         if not room:
             return web.Response(status=404, text=f"Room '{mount}' not found")
 
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(protocols=("frn",))
         await ws.prepare(request)
         callsign = info["callsign"]
         log.info("WS connected: user=%s room=%s", info["user"], mount)
@@ -2391,7 +2441,7 @@ class TXServer:
             return web.Response(headers={
                 "Access-Control-Allow-Origin":  "*",
                 "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type",
+                "Access-Control-Allow-Headers": "Content-Type, X-Token",
             })
         resp = await handler(request)
         resp.headers["Access-Control-Allow-Origin"] = "*"
