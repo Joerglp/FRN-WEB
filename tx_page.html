@@ -1355,9 +1355,76 @@ function _bgMute() {
 // Hintergrund: Icecast hörbar (läuft schon — nur Lautstärke hoch, kein src/play-Wechsel).
 function _bgUnmute() {
   if (!_bgAudioEl || !_bgAudioMount || _userPaused) return;
+  if (_bgAudioEl.src.indexOf("/stream/") < 0) {
+    // Watchdog hatte auf den stillen Loop geschaltet → Stream wieder auflegen
+    _bgAudioEl.loop = false;
+    _bgAudioEl.src  = `/stream/${encodeURIComponent(_bgAudioMount)}.mp3`;
+  }
   _bgAudioEl.volume = 1;
   _bgAudioEl.play().catch(() => {});   // falls iOS angehalten hat
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+}
+
+// ── Hintergrund-Watchdog ──────────────────────────────────────────────────────
+// Netzwechsel unterwegs (WLAN→LTE) reißt den Icecast-Stream oft OHNE
+// error/stalled-Event ab — das Element steht einfach still. Und sobald kein
+// Audio mehr spielt, friert iOS den Tab ein: kein Timer, kein Reconnect mehr
+// (so geschehen 2026-06-11 ~05:25, ab da keine Verbindung mehr im Log).
+// Der Watchdog prüft im Hintergrund alle 3 s, ob currentTime fortschreitet.
+// Wenn nicht: Stream neu aufsetzen; zieht das nicht, hält der stille
+// Daten-URI-Loop (braucht KEIN Netz) Session + JS am Leben, und alle ~9 s
+// wird der Stream erneut probiert, bis das Netz wieder da ist.
+let _bgWatchTimer = null;
+let _bgWatchLast  = -1;
+let _bgWatchStall = 0;
+
+function _bgStartWatchdog() {
+  if (_bgWatchTimer) return;
+  _bgWatchLast = -1; _bgWatchStall = 0;
+  _bgWatchTimer = setInterval(_bgWatchTick, 3000);
+}
+
+function _bgStopWatchdog() {
+  clearInterval(_bgWatchTimer);
+  _bgWatchTimer = null;
+}
+
+function _bgRetryStream(cacheBust) {
+  _bgAudioEl.loop   = false;
+  _bgAudioEl.src    = `/stream/${encodeURIComponent(_bgAudioMount)}.mp3`
+                    + (cacheBust ? `?r=${Date.now()}` : "");
+  _bgAudioEl.volume = 1;
+  _bgAudioEl.play().catch(() => {});
+}
+
+function _bgWatchTick() {
+  if (!_bgAudioEl || !_bgAudioMount || !_bgAudioEnabled || _userPaused) return;
+  if (document.visibilityState !== "hidden") return;
+  const onStream    = _bgAudioEl.src.indexOf("/stream/") >= 0;
+  const t           = _bgAudioEl.currentTime;
+  const progressing = onStream && !_bgAudioEl.paused && t > 0 && t !== _bgWatchLast;
+  _bgWatchLast = t;
+  if (progressing) { _bgWatchStall = 0; return; }
+  _bgWatchStall++;
+  if (onStream && _bgWatchStall === 2) {
+    // ~6 s kein Fortschritt → Stream einmal direkt neu aufsetzen
+    console.warn("BgWatchdog: Stream steht — Reconnect");
+    _bgRetryStream(true);
+  } else if (onStream && _bgWatchStall >= 4) {
+    // Reconnect zieht nicht (Netz weg) → stiller Loop hält Session + JS am
+    // Leben, sonst friert iOS den Tab ein und nichts läuft je wieder an.
+    console.warn("BgWatchdog: Netz weg — stiller Loop hält Session");
+    _bgAudioEl.loop   = true;
+    _bgAudioEl.src    = _SILENT_WAV;
+    _bgAudioEl.volume = 0;
+    _bgAudioEl.play().catch(() => {});
+    _bgWatchStall = 0;
+  } else if (!onStream && _bgWatchStall >= 3) {
+    // alle ~9 s aus dem Silent-Modus heraus den Stream erneut versuchen
+    console.warn("BgWatchdog: Stream-Retry");
+    _bgRetryStream(true);
+    _bgWatchStall = 0;
+  }
 }
 
 // Hintergrund-Audio abschalten → zurück auf stillen Loop (hält nur die Session).
@@ -1385,6 +1452,7 @@ function _pauseAll() {
               || document.getElementById("room-select")?.value
               || _pausedMount;
   if (_bgAudioEl) _bgAudioEl.pause();
+  _bgStopWatchdog();   // pausiert ist kein Stillstand — nicht "reparieren"
   _applyRxGain();    // Vordergrund-WS-Audio auf 0
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   console.log("Pause: alles stumm (klebrig)");
@@ -1399,7 +1467,8 @@ function _resumeAll() {
   // und steigt frisch live ein statt alten Puffer nachzuspielen.
   if (mount && _bgAudioEnabled) _bgSetMount(mount);
   else if (_bgAudioEl) _bgAudioEl.play().catch(() => {});  // stiller Loop weiter
-  if (document.visibilityState === "hidden") _bgUnmute(); else _bgMute();
+  if (document.visibilityState === "hidden") { _bgUnmute(); _bgStartWatchdog(); }
+  else _bgMute();
   _applyRxGain();    // Vordergrund-WS-Audio wieder frei
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
   console.log("Resume: Wiedergabe frei →", mount);
@@ -1449,6 +1518,7 @@ document.addEventListener("visibilitychange", () => {
     if (mount && authToken && _bgAudioEnabled && !_userPaused) {
       if (_bgAudioMount !== mount) _bgSetMount(mount);  // Geste lief beim Verbinden
       _bgUnmute();
+      _bgStartWatchdog();   // überwacht Netzabrisse unterwegs (WLAN→LTE)
     }
 
     // rxWs schließen: im Hintergrund liefert Icecast das Audio. Bliebe der
@@ -1458,6 +1528,7 @@ document.addEventListener("visibilitychange", () => {
     disconnectRxWs();
   } else {
     // Display an / App wieder sichtbar
+    _bgStopWatchdog();
     _bgMute();   // Icecast wieder stumm — der WebSocket liefert das Audio
 
     // AudioContext schließen und neu erstellen — verwirft alle Audio-Pakete die
