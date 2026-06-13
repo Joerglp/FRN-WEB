@@ -250,6 +250,24 @@ RestartSec=30
 WantedBy=multi-user.target
 ```
 
+## Bekannte Einschränkungen / Hilfe gesucht
+
+### Sprecher-Zuordnung im Archiv (client_idx-Semantik unbekannt)
+
+Jedes Audio-Paket im FRN-Protokoll enthält einen 2-Byte-`client_idx`, der laut Protokollstruktur den sendenden Client identifizieren soll. Der FRN-Server sendet außerdem regelmäßig eine `MARKER_CLIENTS`-Liste mit allen verbundenen Stationen.
+
+**Problem:** Der empfangene `client_idx` zeigt in unseren Tests konstant auf Position 0 der Clientliste — unabhängig davon, welche Station tatsächlich sendet. Es ist unklar ob:
+
+- `client_idx` ein direkter Array-Index in die empfangene Clientliste ist (was nicht funktioniert),
+- oder ob der Server eine interne Slot-Nummer vergibt, die nicht mit der Sortierung der `MARKER_CLIENTS`-Liste übereinstimmt,
+- oder ob die Semantik noch anders ist (z. B. Connection-ID, Ring-Buffer-Position o. ä.).
+
+Da das FRN-Protokoll proprietär und nicht öffentlich dokumentiert ist, ist die genaue Bedeutung von `client_idx` unbekannt.
+
+**Relevant in [`frn_stream.py`](frn_stream.py), Funktion `_parse_client_list()` und `MARKER_SOUND`-Handler.**
+
+Wer Einblick in die FRN-Protokollspezifikation hat oder den Java-Client analysiert hat — ein Hinweis als Issue wäre sehr willkommen!
+
 ## Lizenz
 
 MIT
