@@ -762,7 +762,8 @@ class TXServer:
             }
             if not entry["frn_only"]:
                 entry["password_hash"] = u["password_hash"]
-            self.users[u["username"]] = entry
+            # E-Mail-Adressen case-insensitiv behandeln (sonst Duplikate Jkuphal/jkuphal)
+            self.users[u["username"].lower()] = entry
         log.info("Loaded %d users", len(self.users))
 
     async def _handle_frn_command(self, sender: str, text: str, room_name: str):
@@ -796,7 +797,7 @@ class TXServer:
             if len(parts) < 4:
                 await reply("Verwendung: !web adduser <email> <callsign>")
                 return
-            email, callsign = parts[2], parts[3]
+            email, callsign = parts[2].lower(), parts[3]
             if email in self.users:
                 await reply(f"{email} existiert bereits.")
                 return
@@ -808,7 +809,7 @@ class TXServer:
             if len(parts) < 3:
                 await reply("Verwendung: !web deluser <email>")
                 return
-            email = parts[2]
+            email = parts[2].lower()
             if email not in self.users:
                 await reply(f"{email} nicht gefunden.")
                 return
@@ -1362,7 +1363,7 @@ class TXServer:
         except Exception:
             return web.json_response({"error": "bad request"}, status=400)
 
-        username = body.get("username", "").strip()
+        username = body.get("username", "").strip().lower()
         password = body.get("password", "")
         # auth_mode: "local" | "frn" | "both" (default: "both")
         auth_mode = self.cfg.get("auth", {}).get("mode", "both")
@@ -1515,7 +1516,7 @@ class TXServer:
         except Exception:
             return web.json_response({"error": "bad request"}, status=400)
 
-        username = body.get("username", "").strip()
+        username = body.get("username", "").strip().lower()
         callsign = body.get("callsign", "").strip()
         password = body.get("password", "")
         is_admin = bool(body.get("is_admin", False))
@@ -1546,7 +1547,7 @@ class TXServer:
         _, err = await self._require_admin(request)
         if err:
             return err
-        username = request.match_info["username"]
+        username = request.match_info["username"].lower()
         if username not in self.users:
             return web.json_response({"error": "not found"}, status=404)
         try:
@@ -1576,7 +1577,7 @@ class TXServer:
         info, err = await self._require_admin(request)
         if err:
             return err
-        username = request.match_info["username"]
+        username = request.match_info["username"].lower()
         if username == info["user"]:
             return web.json_response({"error": "Eigenen Account nicht löschbar"}, status=400)
         if username not in self.users:

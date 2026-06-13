@@ -747,13 +747,11 @@ audio {
   border-radius: 4px; color: var(--muted); font-size: 0.65em;
   cursor: pointer; padding: 0; line-height: 1;
   display: flex; align-items: center; justify-content: center;
-  opacity: 0; transition: opacity 0.15s, border-color 0.15s, color 0.15s;
+  opacity: 0.6; transition: opacity 0.15s, border-color 0.15s, color 0.15s;
   z-index: 2;
 }
 .clip-item:hover .clip-rec-btn { opacity: 1; }
 .clip-rec-btn:hover { border-color: var(--accent); color: var(--accent); }
-/* Touch-Geräte: immer sichtbar */
-@media (hover: none) { .clip-rec-btn { opacity: 0.6; } }
 
 /* ── Responsive ── */
 @media (min-width: 480px) {

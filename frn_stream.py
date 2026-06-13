@@ -263,12 +263,19 @@ class FRNClient:
                         idx_bytes = self._consume(2)
                         client_idx = struct.unpack(">H", bytes(idx_bytes))[0]
                         gsm_data = self._consume(AUDIO_PACKET_SIZE)
-                        # Callsign aus Client-Liste
-                        callsign = ""
+                        # HINWEIS: Die Sprecher-Zuordnung über client_idx ist in
+                        # diesem Setup unzuverlässig — der Index zeigt konstant auf
+                        # Position 0 der Client-Liste (= Recorder selbst bzw. eine
+                        # eingeloggte Web-TX-Verbindung), nie auf den echten Sprecher.
+                        # Daher KEIN Sprechername, statt einen falschen zu speichern.
+                        # (Wieder aktivieren erst, wenn die Index-Semantik live mit
+                        # echtem Funkverkehr verifiziert ist — siehe debug-Ausgabe.)
+                        resolved = ""
                         if 0 <= client_idx < len(self.clients):
-                            callsign = self.clients[client_idx].get("ON", "")
+                            resolved = self.clients[client_idx].get("ON", "")
                         if debug:
-                            log.debug("SOUND idx=%d callsign=%s", client_idx, callsign)
+                            log.debug("SOUND idx=%d resolved=%s (nicht gespeichert)", client_idx, resolved)
+                        callsign = ""
                         # Decode each of the 5 WAV49 pairs individually
                         for i in range(WAV49_BLOCKS_PER_PACKET):
                             pair = gsm_data[i * WAV49_BLOCK_SIZE :
