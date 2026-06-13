@@ -7,4 +7,5 @@ clips/
 
 env.*
 config.json
+config/config.json
 tx_users.json
