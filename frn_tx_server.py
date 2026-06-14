@@ -2330,6 +2330,7 @@ class TXServer:
                                         pcm = await self._get_clip_pcm(clip_id, ct, cl)
                                         for i in range(0, len(pcm), PCM_PACKET_BYTES):
                                             await tx_conn.send_pcm(pcm[i:i + PCM_PACKET_BYTES])
+                                            await asyncio.sleep(PCM_PACKET_BYTES / (8000 * 2))
                                     except asyncio.CancelledError:
                                         raise  # PTT_STOP übernimmt end_tx + tx_stopped
                                     except Exception as e:
