@@ -103,8 +103,22 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
         if peak > 1.0:
             audio = audio / peak
 
-    HALLUCINATIONS = {"", ".", "...", "vielen dank.", "danke.", "tschüss.",
-                      "untertitel", "♪", "musik", "[musik]", "[applaus]"}
+    HALLUCINATIONS = {
+        "", ".", "..", "...", "…",
+        "vielen dank.", "danke.", "tschüss.", "auf wiedersehen.",
+        "untertitel", "untertitelung", "untertitel:",
+        "untertitel des zdf", "untertitel: zdf", "untertitel zdf",
+        "untertitel von zdf", "untertitel im ersten",
+        "untertitel der ard", "untertitel: ard",
+        "untertitel ndr", "untertitel: ndr",
+        "untertitel wdr", "untertitel: wdr",
+        "untertitel mdr", "untertitel: mdr",
+        "untertitel br", "untertitel: br",
+        "untertitelung des zdf", "untertitelung der ard",
+        "copyright", "www.", "alle rechte vorbehalten.",
+        "♪", "♫", "musik", "[musik]", "[applaus]", "[gelächter]",
+        "[stille]", "(stille)", "[no audio]",
+    }
     segments, _ = _local_model.transcribe(
         audio, language=language, beam_size=5,
         condition_on_previous_text=False,
@@ -112,9 +126,20 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
         vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 200},
         no_speech_threshold=0.8,
     )
+    HALLUCINATION_SUBSTRINGS = (
+        "untertitel", "untertitelung", "zdf 20", "ndr 20", "ard 20",
+        "wdr 20", "mdr 20", "br 20",
+    )
+
+    def _is_hallucination(text: str) -> bool:
+        t = text.lower()
+        if t in HALLUCINATIONS:
+            return True
+        return any(sub in t for sub in HALLUCINATION_SUBSTRINGS)
+
     parts = [s.text.strip() for s in segments
              if getattr(s, "no_speech_prob", 0.0) <= 0.8
-             and s.text.strip().lower() not in HALLUCINATIONS]
+             and not _is_hallucination(s.text.strip())]
     return _remove_repetitions(" ".join(parts).strip())
 
 
