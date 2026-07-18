@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import ctypes
 import ctypes.util
+import difflib
 import hashlib
 import json
 import logging
@@ -696,6 +697,15 @@ class TXServer:
         self._load_tokens()
         # Brute-Force-Schutz: Login-Fehlversuche pro Client-IP (Zeitstempel)
         self._login_fails: dict[str, list[float]] = {}
+        # Auto-Antwort: Zeitpunkt des letzten Vorschlags pro Raum+User (Cooldown)
+        self._auto_reply_last: dict[str, float] = {}
+        # Chat-WS → Benutzername (für gezielte Auto-Antwort-Zustellung)
+        self._ws_users: dict[int, str] = {}
+        # KI-Funker: Transkript-Verlauf, Echo-Schutz und Belegt-Flag pro Raum
+        self._room_hist: dict[str, list] = {}       # Raum → [(ts, wer, text), …]
+        self._bot_last_reply: dict[str, float] = {} # Raum → Zeit letzter Bot-Sendung
+        self._bot_own_tx: dict[str, list] = {}      # Raum → [(t0, t1, text), …]
+        self._bot_busy: set[str] = set()
 
     # ── Token Persistenz ───────────────────────────────────────────────────
 
@@ -762,6 +772,8 @@ class TXServer:
             }
             if not entry["frn_only"]:
                 entry["password_hash"] = u["password_hash"]
+            if u.get("voice"):
+                entry["voice"] = u["voice"]
             # E-Mail-Adressen case-insensitiv behandeln (sonst Duplikate Jkuphal/jkuphal)
             self.users[u["username"].lower()] = entry
         log.info("Loaded %d users", len(self.users))
@@ -864,6 +876,8 @@ class TXServer:
             }
             if not info.get("frn_only"):
                 row["password_hash"] = info["password_hash"]
+            if info.get("voice"):
+                row["voice"] = info["voice"]
             rows.append(row)
         data = {"users": rows}
         with open(self._users_path, "w") as f:
@@ -967,6 +981,805 @@ class TXServer:
         )
         pcm, _ = await ffm.communicate(input=wav_data)
         return pcm
+
+    @staticmethod
+    def _speaker_id(username: str) -> str:
+        """Benutzername → Sprecher-ID für den Voice-Server (a-z0-9_-)."""
+        return re.sub(r"[^a-z0-9_\-]", "_", username.lower())[:40]
+
+    def _user_speaker(self, username: str) -> str:
+        """Sprecher-ID des Users, wenn er ein eigenes Sample hat, sonst default."""
+        info = self.users.get((username or "").lower())
+        if info and info.get("voice", {}).get("sample"):
+            return self._speaker_id(username)
+        return "default"
+
+    async def _get_voice_pcm(self, text: str, lang: str = "de",
+                             speaker: str = "default") -> bytes:
+        """Ruft den Voice-Clone-TTS-Dienst (XTTS) und liefert 8 kHz mono s16le PCM.
+
+        Der Dienst gibt ein WAV (24 kHz) in der Stimme des Sprechers zurück;
+        ffmpeg wandelt es auf das FRN-Format (8 kHz mono s16le) herunter.
+        """
+        vcfg = self.cfg.get("voice", {})
+        url  = (vcfg.get("remote_url") or "").strip()
+        if not vcfg.get("enabled", False) or not url:
+            raise RuntimeError("Voice-Funktion ist deaktiviert")
+        payload = {"text": text, "language": lang, "speaker": speaker or "default"}
+        timeout = aiohttp.ClientTimeout(total=120)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f"TTS-Dienst {resp.status}: {body[:120]}")
+                wav_bytes = await resp.read()
+        ffm = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-i", "pipe:0",
+            "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        pcm, _ = await ffm.communicate(input=wav_bytes)
+        return pcm
+
+    # ── Auto-Antwort bei Namensnennung ─────────────────────────────────────
+
+    async def on_transcript(self, room_name: str, callsign: str,
+                            text: str, ts: float):
+        """Von der Transkriptions-Pipeline nach jedem Transkript gerufen.
+
+        Prüft die Automatik jedes Benutzers (eigene Trigger-Wörter, eigene
+        Persona, eigene Stimme). Existiert keine Benutzer-Konfiguration,
+        greift die globale auto_reply-Konfiguration (Alt-Verhalten).
+        """
+        try:
+            ar_g = self.cfg.get("voice", {}).get("auto_reply", {})
+            low = text.lower()
+            # Eigene Sendungen/Parrot nicht beantworten (sonst Endlosschleife)
+            cs = (callsign or "").lower()
+            for pref in ar_g.get("ignore_callsigns",
+                                 ["tx-", "stream-", "web-", "audio test"]):
+                if cs.startswith(pref.lower()):
+                    return
+            room = next((r for r in self.rooms.values()
+                         if r.name == room_name), None)
+            if room is None:
+                return
+
+            # KI-Funker beobachtet jeden Durchgang (unabhängig von der
+            # Namens-Automatik) und antwortet ggf. selbstständig.
+            try:
+                self._bot_observe(room, room_name, callsign, text, ts, low)
+            except Exception as e:
+                log.warning("KI-Funker: %s", e)
+
+            if not ar_g.get("enabled", False):
+                return  # Hauptschalter der Namens-Automatik
+
+            # Kandidaten: Benutzer mit eigener Automatik, deren Wörter passen
+            candidates: list[tuple[str | None, dict]] = []
+            for uname, info in self.users.items():
+                uar = info.get("voice", {}).get("auto_reply", {})
+                if not uar.get("enabled"):
+                    continue
+                names = [n.lower() for n in uar.get("names", []) if n.strip()]
+                if names and any(n in low for n in names):
+                    candidates.append((uname, uar))
+            # Fallback: globale Konfiguration (kein Benutzer hat gepasst)
+            if not candidates:
+                g_names = [n.lower() for n in ar_g.get("names", [])]
+                if g_names and any(n in low for n in g_names):
+                    candidates.append((None, ar_g))
+
+            cooldown = float(ar_g.get("cooldown_s", 90))
+            now = time.time()
+            for uname, uar in candidates:
+                key = f"{room_name}:{uname or '_global'}"
+                if now - self._auto_reply_last.get(key, 0.0) < cooldown:
+                    continue
+                self._auto_reply_last[key] = now
+                asyncio.create_task(self._handle_auto_reply(
+                    room, room_name, uname, uar, text, callsign))
+        except Exception as e:
+            log.warning("Auto-Antwort-Fehler: %s", e)
+
+    async def _handle_auto_reply(self, room: "FRNTXRoom", room_name: str,
+                                 uname: str | None, uar: dict,
+                                 heard: str, from_cs: str):
+        """Vorschlag generieren und (je nach auto_send) senden oder vorschlagen.
+
+        uname=None = globale Fallback-Konfiguration (Standard-Stimme).
+        """
+        try:
+            ar_g    = self.cfg.get("voice", {}).get("auto_reply", {})
+            persona = (uar.get("persona") or ar_g.get("persona") or "").strip()
+            suggestion = await self._ollama_suggest(heard, persona)
+            if not suggestion:
+                return
+
+            speaker   = self._user_speaker(uname) if uname else "default"
+            auto_send = bool(uar.get("auto_send"))
+            # Ohne eigenes Stimm-Sample darf nur ein Admin die Standard-Stimme
+            # automatisch senden (die Standard-Stimme gehört dem Betreiber).
+            if auto_send and speaker == "default" and uname is not None:
+                if not self.users.get(uname, {}).get("is_admin"):
+                    auto_send = False
+
+            if auto_send:
+                log.info("[%s] Auto-SENDEN für %s (gehört: %.50s): %.70s",
+                         room_name, uname or "global", heard, suggestion)
+                sent = await self._auto_send_voice(room, suggestion, speaker)
+                payload = {"type": "voice_autosent", "room": room_name,
+                           "from": from_cs or "?", "heard": heard,
+                           "text": suggestion, "ok": sent}
+            else:
+                log.info("[%s] Auto-Vorschlag für %s (gehört: %.50s): %.70s",
+                         room_name, uname or "alle", heard, suggestion)
+                payload = {"type": "voice_suggest", "room": room_name,
+                           "from": from_cs or "?", "heard": heard,
+                           "suggestion": suggestion}
+
+            # Zustellung: gezielt an die Sessions des Benutzers, sonst an alle
+            dead = set()
+            for ws in list(room._chat_clients):
+                if uname and self._ws_users.get(id(ws)) != uname:
+                    continue
+                try:
+                    await ws.send_json(payload)
+                except Exception:
+                    dead.add(ws)
+            room._chat_clients -= dead
+        except Exception as e:
+            log.warning("[%s] Auto-Antwort (%s): %s", room_name, uname, e)
+
+    async def _auto_send_voice(self, room: "FRNTXRoom", text: str,
+                               speaker: str = "default") -> bool:
+        """Synthetisiert Text und sendet ihn direkt in den Raum (ohne WS-Client).
+
+        Gleicher Ablauf wie SPEAK_VOICE: erst Stimme erzeugen, dann Sender
+        tasten (kein toter Träger), Echtzeit-Sendeloop, sauberes end_tx.
+        """
+        try:
+            vcfg = self.cfg.get("voice", {})
+            pcm  = await self._get_voice_pcm(text, vcfg.get("language", "de"),
+                                             speaker)
+        except Exception as e:
+            log.warning("[%s] Auto-Senden: TTS fehlgeschlagen: %s", room.name, e)
+            return False
+        try:
+            async with room._tx_lock:
+                await room.ensure_connected()
+                ok = await room.request_tx(timeout=10.0)
+                if not ok:
+                    log.info("[%s] Auto-Senden: TX nicht genehmigt (Kanal belegt)",
+                             room.name)
+                    return False
+                try:
+                    for i in range(0, len(pcm), PCM_PACKET_BYTES):
+                        await room.send_pcm(pcm[i:i + PCM_PACKET_BYTES])
+                        await asyncio.sleep(PCM_PACKET_BYTES / (8000 * 2))
+                finally:
+                    await room.end_tx()
+            return True
+        except Exception as e:
+            log.warning("[%s] Auto-Senden fehlgeschlagen: %s", room.name, e)
+            return False
+
+    async def _ollama_suggest(self, heard: str, persona: str = "") -> str:
+        """Kurzen Antwortvorschlag von Ollama holen (keep_alive=0 → GPU
+        wird nach der Generierung sofort wieder freigegeben)."""
+        ar    = self.cfg.get("voice", {}).get("auto_reply", {})
+        url   = (ar.get("ollama_url", "http://192.0.0.17:11434")).rstrip("/")
+        model = ar.get("ollama_model", "llama3.2:3B")
+        persona = (persona or ar.get("persona") or
+                   "Du bist Jörg, ein CB-Funker aus Eickelborn (Kanal 74).").strip()
+        prompt = (
+            f"{persona}\n"
+            f'Im Funk wurde gerade gesagt: "{heard}"\n'
+            "Du wurdest angesprochen. Antworte kurz und locker in "
+            "1-2 Sätzen, wie man im CB-Funk spricht. Immer Du-Form, nie Sie. "
+            "Erfinde keine Details (keine Kanalnummern, Namen oder Orte, die "
+            "nicht genannt wurden). "
+            "Nur die Antwort selbst, keine Anführungszeichen, keine Erklärungen."
+        )
+        body = {"model": model, "prompt": prompt, "stream": False,
+                "keep_alive": 0,
+                "options": {"num_predict": 60, "temperature": 0.7}}
+        try:
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(f"{url}/api/generate", json=body) as resp:
+                    if resp.status != 200:
+                        log.warning("Ollama HTTP %d: %s", resp.status,
+                                    (await resp.text())[:120])
+                        return ""
+                    data = await resp.json()
+            return (data.get("response") or "").strip().strip('"')
+        except Exception as e:
+            log.warning("Ollama nicht erreichbar (%s): %s", url, e)
+            return ""
+
+    # ── KI-Funker (autonomer Gesprächspartner) ─────────────────────────────
+
+    _BOT_DEFAULTS = {
+        "enabled":  False,
+        "name":     "Robert",
+        "trigger":  ["robert", "roboter", "funk-roboter"],
+        "speaker":  "damien_black",
+        "persona":  ("Du bist Robert, ein freundlicher Funk-Roboter mit "
+                     "künstlicher Intelligenz auf einem CB-Funk-Kanal in "
+                     "Eickelborn. Du hörst rund um die Uhr mit und plauderst "
+                     "gern kurz über Funk, Technik und das Wetter."),
+        "cooldown_s": 20,
+        "conversation_window_s": 180,
+        "history_len": 10,
+        "ollama_url": "",
+        "ollama_model": "qwen3:14b",
+        "rooms": [],
+    }
+
+    # Allgemeine Anrufe, auf die der Bot auch ohne Namensnennung reagiert
+    _BOT_CALL_RE = re.compile(
+        r"\bqrv\b|\bcq\b"
+        r"|jemand\s+(da|dran|drauf|erreichbar|zu\s*h[öo]ren"
+        r"|auf\s+dem\s+kanal|auf\s+der\s+frequenz)"
+        r"|h[öo]rt\s+(mich|da)\s+(irgend)?(je|wer)mand"
+        r"|(ist|is)\s+(da|hier)\s+(irgend)?(je|wer)mand"
+        r"|(einer|wer|keiner|niemand)\s+(da|qrv|auf\s+dem\s+kanal)")
+
+    def _bot_cfg(self) -> dict:
+        return {**self._BOT_DEFAULTS,
+                **self.cfg.get("voice", {}).get("bot", {})}
+
+    def _bot_is_own(self, room_name: str, text: str, ts: float) -> bool:
+        """Eigene Sendung im Transkript wiedererkennen (Echo-Schutz):
+        Aufnahmezeit fällt in ein eigenes Sendefenster ODER der Text ähnelt
+        stark dem zuletzt selbst Gesagten."""
+        low = text.lower()
+        for t0, t1, sent in self._bot_own_tx.get(room_name, []):
+            if t0 - 3.0 <= ts <= t1 + 3.0:
+                return True
+            if sent and difflib.SequenceMatcher(
+                    None, low, sent.lower()).ratio() > 0.7:
+                return True
+        return False
+
+    def bot_archive_callsign(self, room: str, callsign: str, ts: float,
+                             text: str) -> str:
+        """Eigene Bot-Sendungen in Log + Archiv unter dem Bot-Namen führen.
+
+        Greift nur, wenn die Aufnahme kein Rufzeichen hat (Normalfall, die
+        Sprecher-Zuordnung ist deaktiviert)."""
+        if not callsign and self._bot_is_own(room, text, ts):
+            return self._bot_cfg().get("name") or "Robert"
+        return callsign
+
+    def _bot_observe(self, room: "FRNTXRoom", room_name: str, callsign: str,
+                     text: str, ts: float, low: str):
+        """Verlauf pflegen und entscheiden, ob der KI-Funker antworten soll.
+
+        Vorfilter (Name/allgemeiner Anruf/laufendes Gespräch) spart Ollama-
+        Aufrufe; die eigentliche Entscheidung trifft das Modell (SKIP-Option).
+        """
+        bot  = self._bot_cfg()
+        name = bot.get("name") or "Robert"
+        own  = self._bot_is_own(room_name, text, ts)
+        hist = self._room_hist.setdefault(room_name, [])
+        hist.append((ts, f"{name} (du)" if own else (callsign or "Funker"),
+                     text))
+        del hist[:-max(4, int(bot.get("history_len", 10)))]
+        if own or not bot.get("enabled"):
+            return
+        rooms = bot.get("rooms") or []
+        if rooms and room_name not in rooms:
+            return
+        now  = time.time()
+        last = self._bot_last_reply.get(room_name, 0.0)
+        if now - last < float(bot.get("cooldown_s", 20)):
+            return
+        in_conv  = (now - last) < float(bot.get("conversation_window_s", 180))
+        triggers = [t.lower() for t in bot.get("trigger", []) if t.strip()]
+        triggers.append(name.lower())
+        if not (in_conv or any(t in low for t in triggers)
+                or self._BOT_CALL_RE.search(low)):
+            return
+        asyncio.create_task(self._bot_reply(room, room_name, bot))
+
+    async def _bot_reply(self, room: "FRNTXRoom", room_name: str, bot: dict):
+        """Antwort generieren und senden (höchstens ein Lauf pro Raum)."""
+        if room_name in self._bot_busy:
+            return
+        self._bot_busy.add(room_name)
+        try:
+            hist   = list(self._room_hist.get(room_name, []))
+            answer = await self._bot_ollama(bot, hist)
+            if not answer:
+                log.info("[%s] KI-Funker: nicht gemeint (SKIP)", room_name)
+                return
+            log.info("[%s] KI-Funker antwortet: %.80s", room_name, answer)
+            t0   = time.time()
+            sent = await self._auto_send_voice(room, answer,
+                                               bot.get("speaker") or "default")
+            t1   = time.time()
+            if not sent:
+                return
+            self._bot_last_reply[room_name] = t1
+            own = self._bot_own_tx.setdefault(room_name, [])
+            own.append((t0, t1, answer))
+            del own[:-6]
+            name = bot.get("name") or "Robert"
+            self._room_hist.setdefault(room_name, []).append(
+                (t1, f"{name} (du)", answer))
+            payload = {"type": "voice_autosent", "room": room_name,
+                       "from": "KI-Funker", "text": answer, "ok": True,
+                       "heard": hist[-1][2] if hist else ""}
+            dead = set()
+            for ws in list(room._chat_clients):
+                try:
+                    await ws.send_json(payload)
+                except Exception:
+                    dead.add(ws)
+            room._chat_clients -= dead
+        except Exception as e:
+            log.warning("[%s] KI-Funker-Antwort fehlgeschlagen: %s",
+                        room_name, e)
+        finally:
+            self._bot_busy.discard(room_name)
+
+    async def _bot_ollama(self, bot: dict, hist: list) -> str:
+        """Entscheidung + Antwort des KI-Funkers in einem Ollama-Chat-Aufruf.
+
+        Das Modell sieht den Gesprächsverlauf (eigene Sendungen als
+        assistant-Rolle) und darf mit SKIP schweigen — das ist die
+        eigentliche »Intelligenz« hinter dem Vorfilter.
+        Liefert "" wenn der Bot nicht antworten soll."""
+        ar    = self.cfg.get("voice", {}).get("auto_reply", {})
+        url   = (bot.get("ollama_url") or ar.get("ollama_url")
+                 or "http://192.0.0.17:11434").rstrip("/")
+        model = bot.get("ollama_model") or "qwen3:14b"
+        name  = bot.get("name") or "Robert"
+        own_tag = f"{name} (du)"
+        system = (
+            f"{(bot.get('persona') or '').strip()}\n"
+            f"Du heißt {name}. Die Nachrichten des Benutzers sind mitgehörte "
+            "Funk-Durchgänge im Format 'Rufzeichen: Text'; deine früheren "
+            "eigenen Sendungen erscheinen als deine eigenen Nachrichten.\n"
+            "Entscheide beim letzten Durchgang, ob DU gemeint bist. Du bist "
+            f"IMMER gemeint, wenn dein Name {name} fällt, wenn jemand "
+            "allgemein fragt, ob jemand QRV/da ist oder zuhört, oder wenn "
+            "jemand einen allgemeinen Anruf (CQ) macht — genau dafür bist du "
+            "da. Du bist auch gemeint, wenn du mitten in einem Gespräch "
+            "steckst und der Durchgang es fortsetzt. Reden dagegen zwei "
+            "andere Funker miteinander, bist du NICHT gemeint.\n"
+            "Bist du NICHT gemeint, antworte exakt mit dem Wort SKIP.\n"
+            "Bist du gemeint: Antworte kurz und locker in 1-2 Sätzen, wie man "
+            "im CB-Funk spricht. Immer Du-Form, nie Sie. Erfinde keine "
+            "Fakten: Du hast keine Sensoren und kein Internet — Wetter oder "
+            "Ähnliches kennst du nicht und gibst das charmant zu. Wenn dich "
+            "jemand fragt, wer oder was du bist, sag ehrlich, dass du ein "
+            "Funk-Roboter mit künstlicher Intelligenz bist.\n"
+            "Gib NUR den gesprochenen Text aus — kein Rufzeichen-Präfix, "
+            "keine Anführungszeichen, keine Erklärungen, keine Emojis oder "
+            "Smileys (der Text wird vorgelesen).")
+        messages = [{"role": "system", "content": system}]
+        for _, who, txt in hist[-int(bot.get("history_len", 10)):]:
+            if who == own_tag:
+                messages.append({"role": "assistant", "content": txt})
+            else:
+                messages.append({"role": "user", "content": f"{who}: {txt}"})
+        body = {"model": model, "messages": messages, "stream": False,
+                "keep_alive": 0,
+                "options": {"num_predict": 150, "temperature": 0.7}}
+        if "qwen3" in model.lower() or "deepseek-r1" in model.lower():
+            body["think"] = False   # Thinking-Modelle: Grübel-Block abschalten
+        try:
+            timeout = aiohttp.ClientTimeout(total=180)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(f"{url}/api/chat", json=body) as resp:
+                    if resp.status != 200:
+                        log.warning("KI-Funker Ollama HTTP %d: %s", resp.status,
+                                    (await resp.text())[:120])
+                        return ""
+                    data = await resp.json()
+        except Exception as e:
+            log.warning("KI-Funker: Ollama nicht erreichbar (%s): %s", url, e)
+            return ""
+        ans = (data.get("message", {}).get("content") or "").strip()
+        ans = re.sub(r"<think>.*?</think>", "", ans, flags=re.S)
+        ans = ans.strip().strip('"')
+        if not ans or ans.upper().startswith("SKIP"):
+            return ""
+        return ans
+
+    async def handle_voice_auto_reply(self, request):
+        """GET: Automatik-Status; POST {enabled}: ein/aus (persistiert)."""
+        token = self._token_from(request)
+        if not self._validate_token(token):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        ar = self.cfg.setdefault("voice", {}).setdefault("auto_reply", {})
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+            ar["enabled"] = bool(body.get("enabled"))
+            try:
+                if not self.args.config:
+                    raise RuntimeError("kein --config Pfad")
+                cfg_path = Path(self.args.config)
+                disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+                disk.setdefault("voice", {}).setdefault(
+                    "auto_reply", {})["enabled"] = ar["enabled"]
+                cfg_path.write_text(
+                    json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+            except Exception as e:
+                log.warning("auto_reply-Toggle nicht gespeichert: %s", e)
+            log.info("Auto-Antwort %s",
+                     "aktiviert" if ar["enabled"] else "deaktiviert")
+        return web.json_response({"enabled": bool(ar.get("enabled", False))})
+
+    def _voice_server_base(self) -> str:
+        """Basis-URL des Voice-Servers (remote_url ohne /tts)."""
+        url = (self.cfg.get("voice", {}).get("remote_url") or "").strip()
+        return re.sub(r"/tts/?$", "", url)
+
+    async def handle_voice_my_settings(self, request):
+        """GET/POST: persönliche Automatik-Einstellungen des angemeldeten Users."""
+        token = self._token_from(request)
+        info  = self._validate_token(token)
+        if not info:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        uname = info["user"].lower()
+        user  = self.users.get(uname)
+        if not user:
+            return web.json_response({"error": "unbekannter Benutzer"}, status=404)
+        vb = user.setdefault("voice", {})
+        ar = vb.setdefault("auto_reply", {})
+
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+
+            def _strlist(v):
+                if isinstance(v, str):
+                    v = v.split(",")
+                return [s.strip() for s in v if isinstance(s, str) and s.strip()]
+
+            if "enabled" in body:
+                ar["enabled"] = bool(body["enabled"])
+            if "auto_send" in body:
+                ar["auto_send"] = bool(body["auto_send"])
+            if "names" in body:
+                ar["names"] = _strlist(body["names"])
+            if "persona" in body and isinstance(body["persona"], str):
+                ar["persona"] = body["persona"].strip()
+            self._save_users()
+            log.info("Automatik-Einstellungen von %s gespeichert: names=%s "
+                     "auto_send=%s", uname, ar.get("names"), ar.get("auto_send"))
+
+        return web.json_response({
+            "enabled":    bool(ar.get("enabled", False)),
+            "auto_send":  bool(ar.get("auto_send", False)),
+            "names":      ar.get("names", []),
+            "persona":    ar.get("persona", ""),
+            "has_sample": bool(vb.get("sample")),
+            "speaker":    self._user_speaker(uname),
+        })
+
+    async def handle_voice_sample_upload(self, request):
+        """POST: eigenes Stimm-Sample hochladen (Browser-Aufnahme, webm/wav).
+
+        Wird auf 24 kHz mono normalisiert, lokal gespeichert und an den
+        Voice-Server übertragen (dort: Latents-Cache-Invalidierung).
+        """
+        token = self._token_from(request)
+        info  = self._validate_token(token)
+        if not info:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        uname = info["user"].lower()
+        user  = self.users.get(uname)
+        if not user:
+            return web.json_response({"error": "unbekannter Benutzer"}, status=404)
+
+        raw = await request.read()
+        if len(raw) < 10000:
+            return web.json_response({"error": "Aufnahme zu kurz"}, status=400)
+
+        spk        = self._speaker_id(uname)
+        voices_dir = Path(__file__).parent / "voices"
+        voices_dir.mkdir(exist_ok=True)
+        wav_path   = voices_dir / f"{spk}.wav"
+
+        # Browser-Audio (webm/opus/wav) → 24 kHz mono s16, normalisiert
+        ffm = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", "pipe:0",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ar", "24000", "-ac", "1", "-sample_fmt", "s16",
+            str(wav_path),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await ffm.communicate(input=raw)
+        if ffm.returncode != 0 or not wav_path.exists():
+            return web.json_response({"error": "Audio-Konvertierung fehlgeschlagen"},
+                                     status=400)
+        import wave as _wave
+        try:
+            with _wave.open(str(wav_path), "rb") as wf:
+                dur = wf.getnframes() / wf.getframerate()
+        except Exception:
+            wav_path.unlink(missing_ok=True)
+            return web.json_response({"error": "ungültiges Audio"}, status=400)
+        if dur < 5.0:
+            wav_path.unlink(missing_ok=True)
+            return web.json_response(
+                {"error": f"Aufnahme zu kurz ({dur:.1f}s) — bitte mindestens "
+                          f"10–20 Sekunden sprechen"}, status=400)
+
+        # An Voice-Server übertragen
+        base = self._voice_server_base()
+        if not base:
+            return web.json_response({"error": "Voice-Server nicht konfiguriert"},
+                                     status=503)
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(f"{base}/speaker/{spk}",
+                                     data=wav_path.read_bytes()) as resp:
+                    rdata = await resp.json()
+                    if resp.status != 200:
+                        return web.json_response(
+                            {"error": rdata.get("error", "Voice-Server-Fehler")},
+                            status=502)
+        except Exception as e:
+            return web.json_response({"error": f"Voice-Server: {e}"}, status=502)
+
+        user.setdefault("voice", {})["sample"] = f"voices/{spk}.wav"
+        self._save_users()
+        log.info("Stimm-Sample von %s gespeichert (%.1fs, Sprecher %s)",
+                 uname, dur, spk)
+        return web.json_response({"ok": True, "duration_s": round(dur, 1),
+                                  "speaker": spk})
+
+    async def handle_voice_preview(self, request):
+        """POST {text}: kurze Hörprobe in der eigenen Stimme (WAV, kein Funk)."""
+        token = self._token_from(request)
+        info  = self._validate_token(token)
+        if not info:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        text = (body.get("text") or "").strip()[:200]
+        if not text:
+            return web.json_response({"error": "kein Text"}, status=400)
+        vcfg = self.cfg.get("voice", {})
+        url  = (vcfg.get("remote_url") or "").strip()
+        if not vcfg.get("enabled", False) or not url:
+            return web.json_response({"error": "Voice deaktiviert"}, status=503)
+        speaker = self._user_speaker(info["user"])
+        payload = {"text": text, "language": vcfg.get("language", "de"),
+                   "speaker": speaker}
+        try:
+            timeout = aiohttp.ClientTimeout(total=120)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(url, json=payload) as resp:
+                    if resp.status != 200:
+                        return web.json_response(
+                            {"error": (await resp.text())[:120]}, status=502)
+                    wav = await resp.read()
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=502)
+        return web.Response(body=wav, content_type="audio/wav")
+
+    _AUTO_REPLY_DEFAULTS = {
+        "enabled":          False,
+        "auto_send":        False,
+        "names":            ["jörg"],
+        "ignore_callsigns": ["tx-", "stream-", "web-", "audio test"],
+        "cooldown_s":       90,
+        "ollama_url":       "http://192.0.0.17:11434",
+        "ollama_model":     "llama3.2:3B",
+        "persona":          "Du bist Jörg, ein CB-Funker aus Eickelborn (Kanal 74).",
+    }
+
+    async def handle_admin_auto_reply(self, request):
+        """GET: alle Automatik-Einstellungen; POST: speichern (Admin)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        ar = self.cfg.setdefault("voice", {}).setdefault("auto_reply", {})
+
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+
+            def _strlist(v):
+                if isinstance(v, str):
+                    v = v.split(",")
+                return [s.strip() for s in v if isinstance(s, str) and s.strip()]
+
+            if "enabled" in body:
+                ar["enabled"] = bool(body["enabled"])
+            if "auto_send" in body:
+                ar["auto_send"] = bool(body["auto_send"])
+            if "names" in body:
+                names = _strlist(body["names"])
+                if names:
+                    ar["names"] = names
+            if "ignore_callsigns" in body:
+                ar["ignore_callsigns"] = _strlist(body["ignore_callsigns"])
+            if "cooldown_s" in body:
+                try:
+                    ar["cooldown_s"] = max(0, min(3600, float(body["cooldown_s"])))
+                except (TypeError, ValueError):
+                    pass
+            for key in ("ollama_url", "ollama_model", "persona"):
+                if key in body and isinstance(body[key], str):
+                    ar[key] = body[key].strip()
+
+            try:
+                if not self.args.config:
+                    raise RuntimeError("kein --config Pfad")
+                cfg_path = Path(self.args.config)
+                disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+                blk = disk.setdefault("voice", {}).setdefault("auto_reply", {})
+                blk.update({k: v for k, v in ar.items() if not k.startswith("_")})
+                cfg_path.write_text(
+                    json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+            except Exception as e:
+                log.warning("Automatik-Einstellungen nicht gespeichert: %s", e)
+                return web.json_response({"error": f"Speichern fehlgeschlagen: {e}"},
+                                         status=500)
+            log.info("Automatik-Einstellungen gespeichert: names=%s model=%s",
+                     ar.get("names"), ar.get("ollama_model"))
+
+        out = dict(self._AUTO_REPLY_DEFAULTS)
+        out.update({k: v for k, v in ar.items() if not k.startswith("_")})
+        return web.json_response(out)
+
+    async def handle_admin_auto_reply_models(self, request):
+        """Verfügbare Ollama-Modelle vom konfigurierten Server (Admin)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        ar  = self.cfg.get("voice", {}).get("auto_reply", {})
+        url = (request.rel_url.query.get("url")
+               or ar.get("ollama_url", "http://192.0.0.17:11434")).rstrip("/")
+        try:
+            timeout = aiohttp.ClientTimeout(total=8)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(f"{url}/api/tags") as resp:
+                    data = await resp.json()
+            models = sorted(
+                ({"name": m["name"], "size_gb": round(m.get("size", 0) / 1e9, 1)}
+                 for m in data.get("models", [])),
+                key=lambda m: m["size_gb"])
+            return web.json_response({"models": models})
+        except Exception as e:
+            return web.json_response({"models": [], "error": str(e)})
+
+    async def handle_admin_auto_reply_test(self, request):
+        """Testlauf: Satz einwerfen → Ollama-Vorschlag zurück (Admin).
+
+        Persona-Priorität: body.persona > eigene User-Persona > global.
+        """
+        info, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        text = (body.get("text") or "").strip()
+        if not text:
+            return web.json_response({"error": "kein Text"}, status=400)
+        persona = (body.get("persona") or "").strip()
+        if not persona:
+            u = self.users.get(info["user"].lower(), {})
+            persona = u.get("voice", {}).get("auto_reply", {}).get("persona", "")
+        t0 = time.time()
+        suggestion = await self._ollama_suggest(text, persona)
+        if not suggestion:
+            return web.json_response(
+                {"error": "Ollama lieferte keine Antwort (Logs prüfen)"}, status=502)
+        return web.json_response({"suggestion": suggestion,
+                                  "seconds": round(time.time() - t0, 1)})
+
+    async def handle_admin_bot(self, request):
+        """GET: KI-Funker-Einstellungen; POST: speichern (Admin)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        bot = self.cfg.setdefault("voice", {}).setdefault("bot", {})
+
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+
+            def _strlist(v):
+                if isinstance(v, str):
+                    v = v.split(",")
+                return [s.strip() for s in v if isinstance(s, str) and s.strip()]
+
+            if "enabled" in body:
+                bot["enabled"] = bool(body["enabled"])
+            for key in ("name", "speaker", "persona",
+                        "ollama_url", "ollama_model"):
+                if key in body and isinstance(body[key], str):
+                    bot[key] = body[key].strip()
+            if "trigger" in body:
+                bot["trigger"] = _strlist(body["trigger"])
+            if "rooms" in body:
+                bot["rooms"] = _strlist(body["rooms"])
+            for key, hi in (("cooldown_s", 3600),
+                            ("conversation_window_s", 3600),
+                            ("history_len", 30)):
+                if key in body:
+                    try:
+                        bot[key] = max(0, min(hi, float(body[key])))
+                    except (TypeError, ValueError):
+                        pass
+
+            try:
+                if not self.args.config:
+                    raise RuntimeError("kein --config Pfad")
+                cfg_path = Path(self.args.config)
+                disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+                blk = disk.setdefault("voice", {}).setdefault("bot", {})
+                blk.update({k: v for k, v in bot.items()
+                            if not k.startswith("_")})
+                cfg_path.write_text(
+                    json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+            except Exception as e:
+                log.warning("KI-Funker-Einstellungen nicht gespeichert: %s", e)
+                return web.json_response(
+                    {"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
+            log.info("KI-Funker-Einstellungen gespeichert: enabled=%s name=%s "
+                     "speaker=%s model=%s", bot.get("enabled"),
+                     bot.get("name"), bot.get("speaker"),
+                     bot.get("ollama_model"))
+
+        out = dict(self._BOT_DEFAULTS)
+        out.update({k: v for k, v in bot.items() if not k.startswith("_")})
+        return web.json_response(out)
+
+    async def handle_admin_bot_test(self, request):
+        """Trockenlauf: Satz einwerfen → Entscheidung + Antwort (sendet NICHT).
+
+        Optional body.room = echten Raumverlauf als Kontext nutzen."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        text = (body.get("text") or "").strip()
+        if not text:
+            return web.json_response({"error": "kein Text"}, status=400)
+        bot       = self._bot_cfg()
+        room_name = (body.get("room") or "").strip()
+        hist      = list(self._room_hist.get(room_name, []))
+        hist.append((time.time(), body.get("from") or "Testfunker", text))
+        t0 = time.time()
+        answer = await self._bot_ollama(bot, hist)
+        return web.json_response({
+            "would_reply": bool(answer),
+            "answer": answer or "SKIP",
+            "seconds": round(time.time() - t0, 1)})
 
     async def _disconnect_user_tx(self, email: str):
         """Trennt alle persistenten User-TX-Verbindungen für eine E-Mail-Adresse."""
@@ -1490,6 +2303,8 @@ class TXServer:
             "icecast_host": icecast.get("host", "localhost"),
             "icecast_port": icecast.get("port", 8000),
             "tx_timeout":   self.cfg.get("frn", {}).get("tx_timeout", 180),
+            "voice_enabled": bool(self.cfg.get("voice", {}).get("enabled", False)
+                                  and (self.cfg.get("voice", {}).get("remote_url") or "").strip()),
         })
 
     # ── Admin API handlers ─────────────────────────────────────────────────
@@ -2125,6 +2940,7 @@ class TXServer:
         tx_conn      = user_tx_conn or room
 
         room._chat_clients.add(ws)
+        self._ws_users[id(ws)] = info["user"].lower()
         try:
             await ws.send_json({"type": "ready", "callsign": callsign,
                                 "room": room.name})
@@ -2355,6 +3171,123 @@ class TXServer:
 
                         _tx_approval_task = asyncio.create_task(_play_clip_task())
 
+                    elif cmd == "SPEAK_VOICE":
+                        if in_tx or waiting_tx:
+                            await ws.send_json({"type": "error",
+                                                "msg": "PTT aktiv — bitte erst loslassen"})
+                            continue
+                        if room._tx_lock.locked():
+                            await ws.send_json({"type": "error",
+                                                "msg": "Raum belegt (jemand sendet)"})
+                            continue
+                        vcfg = self.cfg.get("voice", {})
+                        if not (vcfg.get("enabled", False)
+                                and (vcfg.get("remote_url") or "").strip()):
+                            await ws.send_json({"type": "error",
+                                                "msg": "Sprach-Funktion ist deaktiviert"})
+                            continue
+
+                        voice_text = (data.get("text") or "").strip()
+                        if not voice_text:
+                            await ws.send_json({"type": "error", "msg": "Kein Text"})
+                            continue
+                        if len(voice_text) > 500:
+                            voice_text = voice_text[:500]
+                        voice_lang = vcfg.get("language", "de")
+
+                        await room._tx_lock.acquire()
+                        waiting_tx = True
+                        await ws.send_json({"type": "voice_synth"})
+
+                        async def _speak_voice_task(vt=voice_text, vl=voice_lang):
+                            nonlocal in_tx, waiting_tx, user_tx_conn, tx_conn
+                            ok = False
+                            try:
+                                # Stimme ERST synthetisieren (dauert einige Sekunden), bevor
+                                # der Sender getastet wird — sonst toter Träger während TTS.
+                                try:
+                                    pcm = await self._get_voice_pcm(
+                                        vt, vl, self._user_speaker(info["user"]))
+                                except Exception as e:
+                                    room._tx_lock.release()
+                                    waiting_tx = False
+                                    log.warning("[%s] Voice-TTS-Fehler: %s", room.name, e)
+                                    if not asyncio.current_task().cancelled():
+                                        await ws.send_json({"type": "error",
+                                                            "msg": f"Sprach-Fehler: {e}"})
+                                    return
+
+                                await ws.send_json({"type": "tx_waiting"})
+                                try:
+                                    if frn_email and frn_password:
+                                        existing = self._user_tx_conns.get(user_key)
+                                        if existing and existing._connected:
+                                            user_tx_conn = existing
+                                            tx_conn = existing
+                                        else:
+                                            for k in list(self._user_tx_conns):
+                                                if k[0] == frn_email and k != user_key:
+                                                    old = self._user_tx_conns.pop(k)
+                                                    try:
+                                                        await old.disconnect()
+                                                    except Exception:
+                                                        pass
+                                            for attempt in range(4):
+                                                try:
+                                                    conn = FRNTXRoom(
+                                                        name=room.name,
+                                                        frn_server=room.server,
+                                                        frn_port=room.port,
+                                                        email=frn_email,
+                                                        password=frn_password,
+                                                        callsign=callsign,
+                                                    )
+                                                    await conn.ensure_connected()
+                                                    user_tx_conn = conn
+                                                    tx_conn = conn
+                                                    self._user_tx_conns[user_key] = conn
+                                                    break
+                                                except Exception as e:
+                                                    if "BLOCK" in str(e) and attempt < 3:
+                                                        await asyncio.sleep(8)
+                                                    else:
+                                                        break
+                                    ok = await tx_conn.request_tx(timeout=10.0)
+                                finally:
+                                    room._tx_lock.release()
+                                    waiting_tx = False
+
+                                if ok:
+                                    in_tx = True
+                                    await ws.send_json({"type": "tx_active", "beep": True})
+                                    try:
+                                        for i in range(0, len(pcm), PCM_PACKET_BYTES):
+                                            await tx_conn.send_pcm(pcm[i:i + PCM_PACKET_BYTES])
+                                            await asyncio.sleep(PCM_PACKET_BYTES / (8000 * 2))
+                                    except asyncio.CancelledError:
+                                        raise
+                                    except Exception as e:
+                                        log.warning("[%s] Voice-PCM-Fehler: %s", room.name, e)
+                                    finally:
+                                        if in_tx:
+                                            await tx_conn.end_tx()
+                                            in_tx = False
+                                    if not asyncio.current_task().cancelled():
+                                        await ws.send_json({"type": "tx_stopped"})
+                                elif not asyncio.current_task().cancelled():
+                                    await ws.send_json({"type": "error",
+                                                        "msg": "TX nicht genehmigt (Kanal belegt)"})
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as e:
+                                log.warning("[%s] Voice-Task Fehler: %s", room.name, e)
+                                try:
+                                    await ws.send_json({"type": "error", "msg": f"TX-Fehler: {e}"})
+                                except Exception:
+                                    pass
+
+                        _tx_approval_task = asyncio.create_task(_speak_voice_task())
+
                 elif msg.type == web.WSMsgType.BINARY:
                     if not in_tx and not waiting_tx:
                         continue
@@ -2397,6 +3330,7 @@ class TXServer:
                     pass
             # user_tx_conn bleibt am Leben (in self._user_tx_conns) für nächsten PTT-Druck
             room._chat_clients.discard(ws)
+            self._ws_users.pop(id(ws), None)
             log.info("WS closed: user=%s", info["user"])
 
         return ws
@@ -2527,6 +3461,12 @@ class TXServer:
         app.router.add_delete("/api/clips/{id}/recording",          self.handle_clip_recording_delete)
         app.router.add_get ("/api/frn-networks",              self.handle_frn_networks)
         app.router.add_get ("/api/rooms/{mount}/clients",    self.handle_room_clients)
+        app.router.add_get ("/api/voice/auto-reply",         self.handle_voice_auto_reply)
+        app.router.add_post("/api/voice/auto-reply",         self.handle_voice_auto_reply)
+        app.router.add_get ("/api/voice/my-settings",        self.handle_voice_my_settings)
+        app.router.add_post("/api/voice/my-settings",        self.handle_voice_my_settings)
+        app.router.add_post("/api/voice/sample",             self.handle_voice_sample_upload)
+        app.router.add_post("/api/voice/preview",            self.handle_voice_preview)
         app.router.add_get ("/ws",                           self.handle_ws)
         app.router.add_get ("/rx",                           self.handle_rx_ws)
 
@@ -2555,6 +3495,14 @@ class TXServer:
         app.router.add_get ("/api/admin/server",   self.handle_admin_server_get)
         app.router.add_post("/api/admin/server",   self.handle_admin_server_set)
         app.router.add_post("/api/admin/register", self.handle_admin_register)
+
+        app.router.add_get ("/api/admin/auto-reply",        self.handle_admin_auto_reply)
+        app.router.add_post("/api/admin/auto-reply",        self.handle_admin_auto_reply)
+        app.router.add_get ("/api/admin/auto-reply/models", self.handle_admin_auto_reply_models)
+        app.router.add_post("/api/admin/auto-reply/test",   self.handle_admin_auto_reply_test)
+        app.router.add_get ("/api/admin/bot",       self.handle_admin_bot)
+        app.router.add_post("/api/admin/bot",       self.handle_admin_bot)
+        app.router.add_post("/api/admin/bot/test",  self.handle_admin_bot_test)
 
         return app
 
@@ -2605,6 +3553,9 @@ def main():
             pipeline.wav_dir.mkdir(parents=True, exist_ok=True)
             pipeline.log_file = Path(transcfg.get("log_file",
                                                     "/opt/FRN/stream/transcription.log"))
+            # Auto-Antwort-Hook: Namensnennung → Ollama-Vorschlag an Web-Clients
+            pipeline.on_transcript = server.on_transcript
+            pipeline.resolve_callsign = server.bot_archive_callsign
             log.info("Transkription aktiviert (Aufnahmen via frn_stream.py)")
 
             # Tasks erst im laufenden Loop starten (on_startup)

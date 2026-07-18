@@ -753,6 +753,30 @@ audio {
 .clip-item:hover .clip-rec-btn { opacity: 1; }
 .clip-rec-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+/* ── Sprach-Nachricht (eigene Stimme) ── */
+.voice-row { display: flex; gap: 6px; align-items: stretch; }
+#voice-text {
+  flex: 1; resize: vertical; min-height: 44px;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; font-family: inherit; font-size: 0.85em;
+}
+#voice-text:focus { outline: none; border-color: var(--accent); }
+.voice-send {
+  padding: 0 16px; border-radius: 6px; cursor: pointer; white-space: nowrap;
+  background: var(--panel); color: var(--accent);
+  border: 1px solid var(--accent);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.7em; letter-spacing: 0.08em; text-transform: uppercase;
+  transition: background 0.15s, color 0.15s;
+}
+.voice-send:hover:not(:disabled) { background: var(--accent); color: #000; }
+.voice-send:disabled { opacity: 0.38; cursor: not-allowed; }
+.voice-send.sending {
+  border-color: var(--red); color: var(--red);
+  animation: led-pulse 0.7s ease-in-out infinite alternate;
+}
+
 /* ── Responsive ── */
 @media (min-width: 480px) {
   .site-header { padding: 28px 28px 0; }
@@ -892,6 +916,57 @@ audio {
         <div class="clips-grid" id="clips-grid"></div>
       </div>
     </div>
+    <!-- Sprach-Nachricht in eigener Stimme (nur wenn voice_enabled) -->
+    <div id="voice-section" style="display:none">
+      <div class="clips-wrap">
+        <div class="clips-label">In meiner Stimme senden</div>
+        <div id="voice-suggest-banner" style="display:none;margin-bottom:8px;padding:8px 10px;
+             border:1px solid var(--accent);border-radius:6px;font-size:0.8em;
+             background:rgba(79,195,247,0.07)"></div>
+        <div class="voice-row">
+          <textarea id="voice-text" rows="2" maxlength="500"
+            placeholder="Text eingeben — wird in deiner Stimme gesendet…"></textarea>
+          <button id="voice-send-btn" class="voice-send" onclick="sendVoice()">Senden</button>
+        </div>
+        <details id="voice-settings" style="margin-top:10px">
+          <summary style="cursor:pointer;font-size:0.78em;color:var(--muted)">
+            ⚙ Meine Stimme &amp; Automatik
+          </summary>
+          <div style="margin-top:10px;display:flex;flex-direction:column;gap:10px">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span id="vs-sample-status" style="font-size:0.75em;color:var(--muted)">…</span>
+              <button class="btn-save" style="font-size:0.68em"
+                      onclick="openVoiceRecordModal()">🎙 STIMME AUFNEHMEN</button>
+              <button class="btn-save" style="font-size:0.68em" id="vs-preview-btn"
+                      onclick="voicePreview()">▶ HÖRPROBE</button>
+            </div>
+            <label style="display:flex;align-items:center;gap:7px;font-size:0.78em;cursor:pointer">
+              <input type="checkbox" id="vs-enabled" style="accent-color:var(--accent)">
+              🤖 Automatik: Vorschlag machen, wenn eines meiner Wörter fällt
+            </label>
+            <label style="display:flex;align-items:center;gap:7px;font-size:0.78em;cursor:pointer">
+              <input type="checkbox" id="vs-autosend" style="accent-color:#f0b429">
+              ⚠ Automatisch senden — ohne Freigabe, in meiner Stimme
+            </label>
+            <div class="form-field">
+              <label>Meine Trigger-Wörter (Komma-getrennt)</label>
+              <input type="text" id="vs-names" placeholder="jörg, joerg">
+            </div>
+            <div class="form-field">
+              <label>Meine Persona — wer antwortet?</label>
+              <textarea id="vs-persona" rows="2" style="width:100%;resize:vertical;
+                background:var(--panel);color:var(--text);border:1px solid var(--border);
+                border-radius:6px;padding:8px 10px;font-family:inherit;font-size:.85em"
+                placeholder="Du bist …, ein CB-Funker aus …"></textarea>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px">
+              <button class="btn-save" onclick="saveMySettings()">SPEICHERN</button>
+              <span id="vs-msg" style="font-size:0.75em"></span>
+            </div>
+          </div>
+        </details>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -968,6 +1043,8 @@ audio {
       <button class="admin-tab"        onclick="showAdminTab('rooms')">RÄUME</button>
       <button class="admin-tab"        onclick="showAdminTab('status')">STATUS</button>
       <button class="admin-tab"        onclick="showAdminTab('server');loadServerTab()">SERVER</button>
+      <button class="admin-tab"        onclick="showAdminTab('autoreply');loadAutoReplyAdmin()">AUTOMATIK</button>
+      <button class="admin-tab"        onclick="showAdminTab('bot');loadBotAdmin()">KI-FUNKER</button>
     </div>
 
     <!-- ── Users tab ── -->
@@ -1153,6 +1230,181 @@ audio {
       <div id="reg-msg" style="margin-top:10px;font-size:.8rem;color:var(--accent)"></div>
     </div>
 
+    <!-- ── Automatik tab ── -->
+    <div id="admin-tab-autoreply" class="admin-tab-content">
+      <div class="admin-section-title">Automatische Antwort-Vorschläge</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:12px;line-height:1.5">
+        Globale Einstellungen der Automatik. <b>Jeder Benutzer</b> konfiguriert eigene
+        Trigger-Wörter, Persona und Stimme unter „⚙ Meine Stimme &amp; Automatik" im
+        Sende-Bereich — die Felder hier sind Infrastruktur + Fallback, falls ein
+        Benutzer nichts eingestellt hat.
+      </div>
+
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer">
+        <input type="checkbox" id="ar-enabled" style="accent-color:var(--accent)">
+        Automatik aktiv
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer">
+        <input type="checkbox" id="ar-autosend" style="accent-color:#f0b429">
+        ⚠ Automatisch senden — Antwort geht <b>ohne Freigabe</b> in deiner Stimme raus
+      </label>
+      <div style="font-size:.72rem;color:var(--text-muted);margin:0 0 14px 24px;line-height:1.4">
+        Aus = Vorschlag erscheint in der App, du gibst per Senden-Knopf frei (Standard).<br>
+        An = Abwesenheits-Modus: der Server antwortet selbstständig, auch wenn niemand
+        angemeldet ist. Cooldown gilt weiterhin.
+      </div>
+
+      <div class="form-grid">
+        <div class="form-field" style="flex:2">
+          <label>Standard-Trigger-Wörter (Fallback, Komma-getrennt)</label>
+          <input type="text" id="ar-names" placeholder="jörg, joerg, jörch">
+        </div>
+        <div class="form-field" style="flex:0 0 130px">
+          <label>Cooldown (Sek.)</label>
+          <input type="number" id="ar-cooldown" min="0" max="3600" placeholder="90">
+        </div>
+      </div>
+
+      <div class="form-field" style="margin-top:8px">
+        <label>Standard-Persona (Fallback — wer antwortet, wenn der Benutzer keine eigene hat)</label>
+        <textarea id="ar-persona" rows="2" style="width:100%;resize:vertical;
+          background:var(--panel);color:var(--text);border:1px solid var(--border);
+          border-radius:6px;padding:8px 10px;font-family:inherit;font-size:.85em"
+          placeholder="Du bist Jörg, ein CB-Funker aus Eickelborn (Kanal 74)."></textarea>
+      </div>
+
+      <div class="form-grid" style="margin-top:8px">
+        <div class="form-field" style="flex:2">
+          <label>Ignorierte Rufzeichen-Präfixe (Komma-getrennt — verhindert Selbst-Trigger)</label>
+          <input type="text" id="ar-ignore" placeholder="tx-, stream-, web-, audio test">
+        </div>
+      </div>
+
+      <div class="form-grid" style="margin-top:8px">
+        <div class="form-field" style="flex:2">
+          <label>Ollama-Server</label>
+          <input type="text" id="ar-ollama-url" placeholder="http://192.0.0.17:11434">
+        </div>
+        <div class="form-field" style="flex:2">
+          <label>KI-Modell</label>
+          <input type="text" id="ar-ollama-model" list="ar-model-list" placeholder="llama3.2:3B">
+          <datalist id="ar-model-list"></datalist>
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <button class="btn-save" onclick="saveAutoReplyAdmin()">SPEICHERN</button>
+      </div>
+      <div class="admin-msg" id="msg-autoreply"></div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
+      <div class="admin-section-title">Test</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">
+        Testet die <b>gespeicherten</b> Einstellungen (erst speichern!) —
+        ohne Funk, ohne Senden. Trigger-Wörter werden hier nicht geprüft.
+      </div>
+      <div class="form-grid">
+        <div class="form-field" style="flex:3">
+          <label>Gehörter Satz</label>
+          <input type="text" id="ar-test-text" placeholder="Jörg, bist du auf dem Kanal?">
+        </div>
+        <div class="form-field" style="flex:0 0 110px;justify-content:flex-end;display:flex;flex-direction:column">
+          <label>&nbsp;</label>
+          <button class="btn-save" onclick="testAutoReply()" id="ar-test-btn">TESTEN</button>
+        </div>
+      </div>
+      <div id="ar-test-result" style="margin-top:10px;font-size:.85rem;display:none;
+           padding:8px 10px;border:1px solid var(--border);border-radius:6px"></div>
+    </div>
+
+    <!-- ── KI-Funker tab ── -->
+    <div id="admin-tab-bot" class="admin-tab-content">
+      <div class="admin-section-title">KI-Funker</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:12px;line-height:1.5">
+        Ein eigenständiger Funk-Roboter mit eigener Stimme und Persona. Er hört alle
+        Räume mit, merkt sich die letzten Durchgänge und antwortet <b>selbstständig</b>,
+        wenn sein Name fällt, jemand allgemein ruft („ist da jemand QRV?", „CQ") oder
+        er mitten in einem Gespräch steckt. Ob er wirklich gemeint ist, entscheidet
+        das KI-Modell — auf Nachfrage gibt er ehrlich zu, ein Roboter zu sein.
+      </div>
+
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer">
+        <input type="checkbox" id="bot-enabled" style="accent-color:#f0b429">
+        ⚠ KI-Funker aktiv — antwortet <b>ohne Freigabe</b> über Funk
+      </label>
+      <div style="font-size:.72rem;color:var(--text-muted);margin:0 0 14px 24px;line-height:1.4">
+        Cooldown und Selbst-Erkennung (eigenes Echo) laufen automatisch mit.
+      </div>
+
+      <div class="form-grid">
+        <div class="form-field" style="flex:1">
+          <label>Name</label>
+          <input type="text" id="bot-name" placeholder="Robert">
+        </div>
+        <div class="form-field" style="flex:2">
+          <label>Zusätzliche Trigger-Wörter (Komma-getrennt)</label>
+          <input type="text" id="bot-trigger" placeholder="roboter, funk-roboter">
+        </div>
+      </div>
+
+      <div class="form-field" style="margin-top:8px">
+        <label>Persona (wer ist der Bot?)</label>
+        <textarea id="bot-persona" rows="3" style="width:100%;resize:vertical;
+          background:var(--panel);color:var(--text);border:1px solid var(--border);
+          border-radius:6px;padding:8px 10px;font-family:inherit;font-size:.85em"></textarea>
+      </div>
+
+      <div class="form-grid" style="margin-top:8px">
+        <div class="form-field" style="flex:2">
+          <label>Stimme (Sprecher-ID, z.B. eingebaute: damien_black, aaron_dreschner, wulf_carlevaro)</label>
+          <input type="text" id="bot-speaker" placeholder="damien_black">
+        </div>
+        <div class="form-field" style="flex:0 0 130px">
+          <label>Cooldown (Sek.)</label>
+          <input type="number" id="bot-cooldown" min="0" max="3600" placeholder="20">
+        </div>
+        <div class="form-field" style="flex:0 0 160px">
+          <label>Gesprächsfenster (Sek.)</label>
+          <input type="number" id="bot-convwin" min="0" max="3600" placeholder="180">
+        </div>
+      </div>
+
+      <div class="form-grid" style="margin-top:8px">
+        <div class="form-field" style="flex:2">
+          <label>Nur diese Räume (Komma-getrennt, leer = alle)</label>
+          <input type="text" id="bot-rooms" placeholder="quasel">
+        </div>
+        <div class="form-field" style="flex:2">
+          <label>KI-Modell</label>
+          <input type="text" id="bot-model" list="ar-model-list" placeholder="qwen3:14b">
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <button class="btn-save" onclick="saveBotAdmin()">SPEICHERN</button>
+      </div>
+      <div class="admin-msg" id="msg-bot"></div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
+      <div class="admin-section-title">Trockentest</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">
+        Satz einwerfen → der Bot entscheidet (gemeint / SKIP) und formuliert seine
+        Antwort. Es wird <b>nichts gesendet</b>. Testet die gespeicherten Einstellungen.
+      </div>
+      <div class="form-grid">
+        <div class="form-field" style="flex:3">
+          <label>Gehörter Satz</label>
+          <input type="text" id="bot-test-text" placeholder="Ist hier jemand QRV?">
+        </div>
+        <div class="form-field" style="flex:0 0 110px;justify-content:flex-end;display:flex;flex-direction:column">
+          <label>&nbsp;</label>
+          <button class="btn-save" onclick="testBot()" id="bot-test-btn">TESTEN</button>
+        </div>
+      </div>
+      <div id="bot-test-result" style="margin-top:10px;font-size:.85rem;display:none;
+           padding:8px 10px;border:1px solid var(--border);border-radius:6px"></div>
+    </div>
+
   </div>
 </div>
 
@@ -1224,6 +1476,10 @@ async function loadUIConfig() {
 </div>`;
     });
     if (cfg.tx_timeout) _totTotal = cfg.tx_timeout;
+
+    // Sprach-Funktion (eigene Stimme) — Ein/Aus über config.json voice.enabled.
+    // Sichtbarkeit wird in showTxPanel() final gesetzt; hier nur Flag merken.
+    window._voiceEnabled = !!cfg.voice_enabled;
   } catch(e) {
     // fallback: static cards already in HTML (none here, but graceful)
     console.warn("Could not load UI config:", e);
@@ -1633,13 +1889,18 @@ document.addEventListener("visibilitychange", async () => {
 // _initBgAudio() startet den stillen Keep-Alive-Loop innerhalb dieser User-Geste —
 // das aktiviert und hält die iOS-Audio-Session (kein Mikrofon nötig fürs Zuhören).
 document.addEventListener("pointerdown", () => {
-  ensureRxAudioCtx();
   _initBgAudio();
   // Innerhalb dieser Geste den Icecast-Stream (stumm) auflegen, damit iOS die
   // Hintergrund-Wiedergabe später erlaubt (Lautstärke wird dann nur getoggelt).
   const mount = document.getElementById("room-select")?.value;
   if (mount && authToken && _bgAudioEnabled) _bgSetMount(mount);
 }, { once: true });
+
+// RX-Audio bei JEDER Geste aufwecken (nicht nur der ersten): nach Sperren/
+// App-Wechsel wird der Context suspendiert oder neu erstellt — resume() wirkt
+// nur innerhalb einer echten User-Geste. Ohne das bleibt RX stumm, obwohl
+// Daten ankommen (Symptom: Parrot-Echo unhörbar).
+document.addEventListener("pointerdown", () => { ensureRxAudioCtx(); });
 
 function connectRxWs(mount) {
   disconnectRxWs();
@@ -2084,6 +2345,9 @@ function showTxPanel(rooms, defaultRoom = "") {
     connectChatWs(startMount);   // Chat-WS sofort beim Login aufbauen
   }
   loadClips();
+  const vsec = document.getElementById("voice-section");
+  if (vsec) vsec.style.display = window._voiceEnabled ? "" : "none";
+  if (window._voiceEnabled) loadMySettings();
 }
 
 // ── PTT ─────────────────────────────────────────────────────────────────────
@@ -2203,9 +2467,18 @@ function onWsMessage(evt) {
     const roomName = document.getElementById("room-select").selectedOptions[0]?.text || "";
     setStatus("● SENDE: " + (clipActive ? (window._activeClipLabel || roomName) : roomName), "ok");
     if (msg.beep) playBeep();
+  } else if (msg.type === "voice_synth") {
+    setStatus("🎙 STIMME WIRD ERZEUGT... (ca. 10 s)", "busy");
   } else if (msg.type === "tx_waiting") {
     setStatus("⏳ WARTE AUF TX-FREIGABE...", "busy");
   } else if (msg.type === "tx_stopped") {
+    if (window._voiceSending) {
+      // Sprach-Nachricht erfolgreich gesendet → Button zurücksetzen, Text leeren
+      window._voiceSending = false;
+      _voiceBtnReset();
+      const ta = document.getElementById("voice-text");
+      if (ta) ta.value = "";
+    }
     if (clipActive) {
       clipActive = false;
       setClipButtonsSending(null);
@@ -2218,6 +2491,10 @@ function onWsMessage(evt) {
     document.getElementById("led-tx").className = "led";
     setStatus("BEREIT", ""); stopAudio();
   } else if (msg.type === "error") {
+    if (window._voiceSending) {
+      window._voiceSending = false;
+      _voiceBtnReset();
+    }
     if (clipActive) {
       clipActive = false;
       setClipButtonsSending(null);
@@ -2243,6 +2520,30 @@ function onWsMessage(evt) {
     const cnt = (msg.clients || []).length;
     document.getElementById("room-user-count").textContent = cnt ? `${cnt} QRV` : "";
     document.getElementById("led-room").className = cnt ? "led active" : "led";
+  } else if (msg.type === "voice_suggest") {
+    // Automatik: Name fiel im Funk → Vorschlag ins Textfeld, Freigabe = Senden
+    const ta = document.getElementById("voice-text");
+    if (ta) ta.value = msg.suggestion || "";
+    const banner = document.getElementById("voice-suggest-banner");
+    if (banner) {
+      banner.style.display = "";
+      banner.innerHTML =
+        `🤖 <b>${esc(msg.from)}</b>: „${esc(msg.heard)}"<br>` +
+        `Vorschlag steht im Textfeld — <b>Senden</b> = Freigabe, Text ist änderbar.`;
+    }
+    _setTabAlert("FRN");
+    _notify("FRN Auto-Antwort", msg.suggestion || "");
+    playBeep();
+  } else if (msg.type === "voice_autosent") {
+    // Automatik hat selbstständig gesendet — nur informieren
+    const banner = document.getElementById("voice-suggest-banner");
+    if (banner) {
+      banner.style.display = "";
+      banner.innerHTML = msg.ok
+        ? `🤖✅ Automatisch geantwortet auf <b>${esc(msg.from)}</b> („${esc(msg.heard)}"):<br>„${esc(msg.text)}"`
+        : `🤖⚠ Auto-Antwort fehlgeschlagen (Kanal belegt?) — Vorschlag war: „${esc(msg.text)}"`;
+    }
+    _notify("FRN Auto-Antwort gesendet", msg.text || "");
   }
 }
 
@@ -2290,7 +2591,17 @@ let _mediaRec  = null, _recChunks = [], _recBlob = null;
 let _recTimer  = null, _recSecs   = 0;
 let _recStream = null, _recACtx   = null, _recAnalyser = null, _recVuTimer = null;
 
+let _recMode = "clip";   // "clip" | "voice" (eigenes Stimm-Sample)
+
+function openVoiceRecordModal() {
+  openRecordModal("__voice__", "Stimm-Sample", false);
+  _recMode = "voice";
+  _setRecStatus("20–30 s frei sprechen: Stell dich vor, erzähl vom Wetter — " +
+                "ganz normal reden, keine Kunstpausen.", "");
+}
+
 function openRecordModal(id, label, hasRec) {
+  _recMode   = "clip";
   _recClipId = id; _recHasRec = !!hasRec;
   document.getElementById("record-title").textContent = "Aufnahme: " + label;
   _setRecStatus("Bereit zum Aufnehmen", "");
@@ -2403,6 +2714,7 @@ function _setRecStatus(txt, cls) {
 }
 
 async function saveRecording() {
+  if (_recMode === "voice") return saveVoiceSample();
   if (!_recBlob || !_recClipId) return;
   const btn = document.getElementById("rec-save-btn");
   btn.disabled = true; btn.textContent = "Speichert...";
@@ -2526,6 +2838,167 @@ async function sendClip(id, label) {
   }
 
   ws.send(JSON.stringify({ cmd: "PLAY_CLIP", id }));
+}
+
+function _voiceBtnReset() {
+  const btn = document.getElementById("voice-send-btn");
+  if (btn) { btn.classList.remove("sending"); btn.disabled = false; }
+}
+
+// ── Meine Stimme & Automatik (pro Benutzer) ─────────────────────────────────
+async function loadMySettings() {
+  if (!authToken) return;
+  try {
+    const r = await fetch(`${TX_BASE}/api/voice/my-settings`, { headers: { "X-Token": authToken } });
+    if (!r.ok) return;
+    const d = await r.json();
+    document.getElementById("vs-enabled").checked  = !!d.enabled;
+    document.getElementById("vs-autosend").checked = !!d.auto_send;
+    document.getElementById("vs-names").value      = (d.names || []).join(", ");
+    document.getElementById("vs-persona").value    = d.persona || "";
+    document.getElementById("vs-sample-status").innerHTML = d.has_sample
+      ? "✅ Eigenes Stimm-Sample vorhanden"
+      : "⚠ Kein eigenes Sample — Standard-Stimme wird genutzt";
+  } catch {}
+}
+
+async function saveMySettings() {
+  if (!authToken) return;
+  const msg = document.getElementById("vs-msg");
+  const body = {
+    enabled:   document.getElementById("vs-enabled").checked,
+    auto_send: document.getElementById("vs-autosend").checked,
+    names:     document.getElementById("vs-names").value,
+    persona:   document.getElementById("vs-persona").value,
+  };
+  try {
+    const r = await fetch(`${TX_BASE}/api/voice/my-settings`, {
+      method: "POST",
+      headers: { "X-Token": authToken, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    msg.style.color = r.ok ? "var(--green2)" : "var(--red)";
+    msg.textContent = r.ok ? "✓ Gespeichert" : ("Fehler: " + (d.error || r.status));
+    setTimeout(() => { msg.textContent = ""; }, 3000);
+  } catch(e) {
+    msg.style.color = "var(--red)";
+    msg.textContent = "Fehler: " + e;
+  }
+}
+
+async function voicePreview() {
+  if (!authToken) return;
+  const btn = document.getElementById("vs-preview-btn");
+  btn.disabled = true;
+  ensureRxAudioCtx();   // Klick-Geste: Audio freischalten
+  try {
+    const r = await fetch(`${TX_BASE}/api/voice/preview`, {
+      method: "POST",
+      headers: { "X-Token": authToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "Hallo, so klingt meine Stimme im Funk. Ein, zwei, drei, vier, fünf." }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      setStatus("Hörprobe-Fehler: " + (d.error || r.status), "error");
+      return;
+    }
+    setStatus("🎧 Hörprobe …", "");
+    const buf = await r.arrayBuffer();
+    const ctx = rxAudioCtx || new AudioContext();
+    const audio = await ctx.decodeAudioData(buf);
+    const src = ctx.createBufferSource();
+    src.buffer = audio;
+    src.connect(ctx.destination);
+    src.onended = () => setStatus("BEREIT", "");
+    src.start();
+  } catch(e) {
+    setStatus("Hörprobe-Fehler: " + e, "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function _hideVoiceSuggest() {
+  const b = document.getElementById("voice-suggest-banner");
+  if (b) b.style.display = "none";
+}
+
+async function sendVoice() {
+  if (txActive || clipActive) return;
+  if (!authToken || !window._voiceEnabled) return;
+  ensureRxAudioCtx();   // Klick-Geste nutzen: RX-Audio aufwecken, damit das Echo hörbar ist
+  _hideVoiceSuggest();
+  const ta   = document.getElementById("voice-text");
+  const text = (ta?.value || "").trim();
+  if (!text) { setStatus("Kein Text eingegeben", "error"); return; }
+  const room = document.getElementById("room-select").value;
+  if (!room) return;
+
+  clipActive = true;
+  window._voiceSending    = true;
+  window._activeClipLabel = "Sprach-Nachricht";
+  updateClipButtons();
+  const btn = document.getElementById("voice-send-btn");
+  if (btn) { btn.classList.add("sending"); btn.disabled = true; }
+  setStatus("🎙 Verbinde…", "");
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(room)}`,
+                   ["frn", "frn.token." + authToken]);
+  ws.binaryType = "arraybuffer";
+  ws.onmessage  = onWsMessage;
+  ws.onerror    = () => {
+    clipActive = false; window._voiceSending = false; _voiceBtnReset(); updateClipButtons();
+    setStatus("WebSocket-Fehler", "error");
+  };
+  ws.onclose    = () => {
+    if (clipActive) {
+      clipActive = false; window._voiceSending = false; _voiceBtnReset(); updateClipButtons();
+      setStatus("BEREIT", "");
+    }
+    document.getElementById("led-tx").className = "led";
+  };
+
+  const ok = await new Promise(res => {
+    ws.onopen = () => res(true);
+    setTimeout(() => res(false), 5000);
+  });
+  if (!ok) {
+    clipActive = false; window._voiceSending = false; _voiceBtnReset(); updateClipButtons();
+    setStatus("Verbindungsfehler", "error");
+    ws.close();
+    return;
+  }
+
+  ws.send(JSON.stringify({ cmd: "SPEAK_VOICE", text }));
+}
+
+async function saveVoiceSample() {
+  if (!_recBlob) return;
+  const btn = document.getElementById("rec-save-btn");
+  btn.disabled = true; btn.textContent = "Lädt hoch…";
+  _setRecStatus("⏳ Wird verarbeitet und zum Voice-Server übertragen …", "");
+  try {
+    const r = await fetch(`${TX_BASE}/api/voice/sample`, {
+      method: "POST",
+      headers: { "Content-Type": _recBlob.type || "audio/webm", "X-Token": authToken },
+      body: _recBlob,
+    });
+    const d = await r.json();
+    if (r.ok) {
+      _setRecStatus(`✓ Stimm-Sample gespeichert (${d.duration_s}s) — ` +
+                    `ab jetzt wird DEINE Stimme genutzt`, "ok");
+      loadMySettings();
+      setTimeout(closeRecordModal, 1800);
+    } else {
+      _setRecStatus("Fehler: " + (d.error || r.status), "error");
+    }
+  } catch(e) {
+    _setRecStatus("Fehler: " + e, "error");
+  } finally {
+    btn.disabled = false; btn.textContent = "Speichern";
+  }
 }
 
 function playBeep() {
@@ -2913,6 +3386,159 @@ async function registerFRN() {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+// ── Automatik (Auto-Antwort) Admin ──────────────────────────────────────────
+async function loadAutoReplyAdmin() {
+  try {
+    const r = await adminFetch("/api/admin/auto-reply");
+    const d = await r.json();
+    document.getElementById("ar-enabled").checked    = !!d.enabled;
+    document.getElementById("ar-autosend").checked   = !!d.auto_send;
+    document.getElementById("ar-names").value        = (d.names || []).join(", ");
+    document.getElementById("ar-cooldown").value     = d.cooldown_s ?? 90;
+    document.getElementById("ar-persona").value      = d.persona || "";
+    document.getElementById("ar-ignore").value       = (d.ignore_callsigns || []).join(", ");
+    document.getElementById("ar-ollama-url").value   = d.ollama_url || "";
+    document.getElementById("ar-ollama-model").value = d.ollama_model || "";
+    loadOllamaModels();
+  } catch(e) {
+    showMsg("msg-autoreply", "Fehler beim Laden: " + e, "error");
+  }
+}
+
+async function loadOllamaModels() {
+  try {
+    const url = encodeURIComponent(document.getElementById("ar-ollama-url").value.trim());
+    const r = await adminFetch("/api/admin/auto-reply/models" + (url ? `?url=${url}` : ""));
+    const d = await r.json();
+    document.getElementById("ar-model-list").innerHTML = (d.models || []).map(m =>
+      `<option value="${esc(m.name)}">${esc(m.name)} (${m.size_gb} GB)</option>`).join("");
+  } catch {}
+}
+
+async function saveAutoReplyAdmin() {
+  const body = {
+    enabled:          document.getElementById("ar-enabled").checked,
+    auto_send:        document.getElementById("ar-autosend").checked,
+    names:            document.getElementById("ar-names").value,
+    cooldown_s:       parseFloat(document.getElementById("ar-cooldown").value) || 90,
+    persona:          document.getElementById("ar-persona").value,
+    ignore_callsigns: document.getElementById("ar-ignore").value,
+    ollama_url:       document.getElementById("ar-ollama-url").value,
+    ollama_model:     document.getElementById("ar-ollama-model").value,
+  };
+  try {
+    const r = await adminFetch("/api/admin/auto-reply", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (d.error) { showMsg("msg-autoreply", "Fehler: " + d.error, "error"); return; }
+    showMsg("msg-autoreply", "Gespeichert.", "ok");
+    loadMySettings();   // Bereich „Meine Stimme & Automatik" synchron halten
+  } catch(e) {
+    showMsg("msg-autoreply", "Fehler: " + e, "error");
+  }
+}
+
+async function testAutoReply() {
+  const text = document.getElementById("ar-test-text").value.trim();
+  const out  = document.getElementById("ar-test-result");
+  const btn  = document.getElementById("ar-test-btn");
+  if (!text) { out.style.display = ""; out.textContent = "Bitte Test-Satz eingeben."; return; }
+  btn.disabled = true;
+  out.style.display = "";
+  out.textContent = "⏳ KI denkt … (Modell wird ggf. erst geladen)";
+  try {
+    const r = await adminFetch("/api/admin/auto-reply/test", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ text }),
+    });
+    const d = await r.json();
+    if (d.error) out.textContent = "Fehler: " + d.error;
+    else out.innerHTML =
+      `🤖 „${esc(d.suggestion)}" <span style="color:var(--muted)">(${d.seconds}s)</span>`;
+  } catch(e) {
+    out.textContent = "Fehler: " + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── KI-Funker Admin ─────────────────────────────────────────────────────────
+async function loadBotAdmin() {
+  try {
+    const r = await adminFetch("/api/admin/bot");
+    const d = await r.json();
+    document.getElementById("bot-enabled").checked = !!d.enabled;
+    document.getElementById("bot-name").value      = d.name || "";
+    document.getElementById("bot-trigger").value   = (d.trigger || []).join(", ");
+    document.getElementById("bot-persona").value   = d.persona || "";
+    document.getElementById("bot-speaker").value   = d.speaker || "";
+    document.getElementById("bot-cooldown").value  = d.cooldown_s ?? 20;
+    document.getElementById("bot-convwin").value   = d.conversation_window_s ?? 180;
+    document.getElementById("bot-rooms").value     = (d.rooms || []).join(", ");
+    document.getElementById("bot-model").value     = d.ollama_model || "";
+    loadOllamaModels();   // füllt die geteilte Modell-Datalist
+  } catch(e) {
+    showMsg("msg-bot", "Fehler beim Laden: " + e, "error");
+  }
+}
+
+async function saveBotAdmin() {
+  const body = {
+    enabled:               document.getElementById("bot-enabled").checked,
+    name:                  document.getElementById("bot-name").value,
+    trigger:               document.getElementById("bot-trigger").value,
+    persona:               document.getElementById("bot-persona").value,
+    speaker:               document.getElementById("bot-speaker").value,
+    cooldown_s:            parseFloat(document.getElementById("bot-cooldown").value) || 20,
+    conversation_window_s: parseFloat(document.getElementById("bot-convwin").value) || 180,
+    rooms:                 document.getElementById("bot-rooms").value,
+    ollama_model:          document.getElementById("bot-model").value,
+  };
+  try {
+    const r = await adminFetch("/api/admin/bot", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (d.error) { showMsg("msg-bot", "Fehler: " + d.error, "error"); return; }
+    showMsg("msg-bot", "Gespeichert.", "ok");
+  } catch(e) {
+    showMsg("msg-bot", "Fehler: " + e, "error");
+  }
+}
+
+async function testBot() {
+  const text = document.getElementById("bot-test-text").value.trim();
+  const out  = document.getElementById("bot-test-result");
+  const btn  = document.getElementById("bot-test-btn");
+  if (!text) { out.style.display = ""; out.textContent = "Bitte Test-Satz eingeben."; return; }
+  btn.disabled = true;
+  out.style.display = "";
+  out.textContent = "⏳ KI denkt … (Modell wird ggf. erst geladen)";
+  try {
+    const r = await adminFetch("/api/admin/bot/test", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ text }),
+    });
+    const d = await r.json();
+    if (d.error) out.textContent = "Fehler: " + d.error;
+    else if (!d.would_reply)
+      out.innerHTML = `🤐 Bot fühlt sich nicht angesprochen (SKIP) <span style="color:var(--muted)">(${d.seconds}s)</span>`;
+    else out.innerHTML =
+      `🤖 „${esc(d.answer)}" <span style="color:var(--muted)">(${d.seconds}s)</span>`;
+  } catch(e) {
+    out.textContent = "Fehler: " + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function showMsg(id, text, cls) {
   const el = document.getElementById(id);
   el.textContent = text; el.className = "admin-msg " + cls;

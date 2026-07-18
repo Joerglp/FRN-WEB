@@ -391,7 +391,25 @@ class TranscriptionPipeline:
         if not text:
             return
 
+        # Rufzeichen-Auflösung: frn_tx_server setzt pipeline.resolve_callsign,
+        # damit z.B. eigene KI-Funker-Sendungen im Archiv unter dem Bot-Namen
+        # geführt werden statt ohne Rufzeichen.
+        rc = getattr(self, "resolve_callsign", None)
+        if rc:
+            try:
+                callsign = rc(room, callsign, ts, text) or callsign
+            except Exception as e:
+                log.debug("resolve_callsign-Hook: %s", e)
+
         self._log(ts, room, callsign, text)
+
+        # Hook für Auto-Antwort: frn_tx_server setzt pipeline.on_transcript.
+        cb = getattr(self, "on_transcript", None)
+        if cb:
+            try:
+                asyncio.create_task(cb(room, callsign, text, ts))
+            except Exception as e:
+                log.debug("on_transcript-Hook: %s", e)
 
         try:
             from frn_archive import add_entry
