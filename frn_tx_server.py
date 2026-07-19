@@ -1216,6 +1216,9 @@ class TXServer:
         "history_len": 10,
         "ollama_url": "",
         "ollama_model": "qwen3:14b",
+        # 0 = Modell nach jeder Antwort entladen (geteilte GPU), "2h" o.Ä. =
+        # im RAM halten (eigener CPU-Server, spart den ~1 min Erst-Load)
+        "ollama_keep_alive": 0,
         "rooms": [],
     }
 
@@ -1369,7 +1372,7 @@ class TXServer:
             else:
                 messages.append({"role": "user", "content": f"{who}: {txt}"})
         body = {"model": model, "messages": messages, "stream": False,
-                "keep_alive": 0,
+                "keep_alive": bot.get("ollama_keep_alive", 0),
                 "options": {"num_predict": 150, "temperature": 0.7}}
         if "qwen3" in model.lower() or "deepseek-r1" in model.lower():
             body["think"] = False   # Thinking-Modelle: Grübel-Block abschalten
@@ -1719,6 +1722,9 @@ class TXServer:
                         "ollama_url", "ollama_model"):
                 if key in body and isinstance(body[key], str):
                     bot[key] = body[key].strip()
+            if "ollama_keep_alive" in body and isinstance(
+                    body["ollama_keep_alive"], (str, int, float)):
+                bot["ollama_keep_alive"] = body["ollama_keep_alive"]
             if "trigger" in body:
                 bot["trigger"] = _strlist(body["trigger"])
             if "rooms" in body:
