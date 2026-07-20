@@ -1345,6 +1345,11 @@ class TXServer:
         own_tag = f"{name} (du)"
         system = (
             f"{(bot.get('persona') or '').strip()}\n"
+            "Die Beschreibung oben ist dein Hintergrundwissen über dich — "
+            "erzähle solche Details (Wohnort, dass du neu bist o.Ä.) NICHT "
+            "von dir aus, sondern nur, wenn jemand danach fragt oder es im "
+            "Gespräch wirklich passt. Stell dich nicht in jedem Durchgang "
+            "neu vor.\n"
             f"Du heißt {name}. Die Nachrichten des Benutzers sind mitgehörte "
             "Funk-Durchgänge im Format 'Rufzeichen: Text'; deine früheren "
             "eigenen Sendungen erscheinen als deine eigenen Nachrichten.\n"
