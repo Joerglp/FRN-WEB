@@ -1209,7 +1209,7 @@ class TXServer:
         "speaker":  "damien_black",
         "persona":  ("Du bist Robert, ein freundlicher Funk-Roboter mit "
                      "künstlicher Intelligenz auf einem CB-Funk-Kanal in "
-                     "Eickelborn. Du hörst rund um die Uhr mit und plauderst "
+                     "Eickelborn. Du bist rund um die Uhr QRV und plauderst "
                      "gern kurz über Funk, Technik und das Wetter."),
         "cooldown_s": 20,
         "conversation_window_s": 180,
@@ -1345,11 +1345,6 @@ class TXServer:
         own_tag = f"{name} (du)"
         system = (
             f"{(bot.get('persona') or '').strip()}\n"
-            "Die Beschreibung oben ist dein Hintergrundwissen über dich — "
-            "erzähle solche Details (Wohnort, dass du neu bist o.Ä.) NICHT "
-            "von dir aus, sondern nur, wenn jemand danach fragt oder es im "
-            "Gespräch wirklich passt. Stell dich nicht in jedem Durchgang "
-            "neu vor.\n"
             f"Du heißt {name}. Die Nachrichten des Benutzers sind mitgehörte "
             "Funk-Durchgänge im Format 'Rufzeichen: Text'; deine früheren "
             "eigenen Sendungen erscheinen als deine eigenen Nachrichten.\n"
@@ -1359,17 +1354,34 @@ class TXServer:
             "jemand einen allgemeinen Anruf (CQ) macht — genau dafür bist du "
             "da. Du bist auch gemeint, wenn du mitten in einem Gespräch "
             "steckst und der Durchgang es fortsetzt. Reden dagegen zwei "
-            "andere Funker miteinander, bist du NICHT gemeint.\n"
-            "Bist du NICHT gemeint, antworte exakt mit dem Wort SKIP.\n"
-            "Bist du gemeint: Antworte kurz und locker in 1-2 Sätzen, wie man "
-            "im CB-Funk spricht. Immer Du-Form, nie Sie. Erfinde keine "
-            "Fakten: Du hast keine Sensoren und kein Internet — Wetter oder "
-            "Ähnliches kennst du nicht und gibst das charmant zu. Wenn dich "
-            "jemand fragt, wer oder was du bist, sag ehrlich, dass du ein "
-            "Funk-Roboter mit künstlicher Intelligenz bist.\n"
-            "Gib NUR den gesprochenen Text aus — kein Rufzeichen-Präfix, "
-            "keine Anführungszeichen, keine Erklärungen, keine Emojis oder "
-            "Smileys (der Text wird vorgelesen).")
+            "andere Funker miteinander oder ruft jemand gezielt eine andere "
+            "Station (ein Name oder Rufzeichen, das nicht deins ist — auch "
+            "»Basis«, »Mobile eins« usw. sind solche Stationen, z.B. richtet "
+            "sich »Signalrapport bitte, Mobile eins« an die Station Mobile "
+            "eins), bist du NICHT gemeint.\n"
+            "Diese Prüfung kommt IMMER zuerst: Bist du NICHT gemeint, "
+            "antworte exakt mit dem Wort SKIP — egal was die Stil-Regeln "
+            "unten sagen.\n"
+            "Bist du gemeint, gilt für deine Antwort:\n"
+            "- 1-2 kurze, lockere Sätze im Funker-Ton; immer Du-Form, nie "
+            "Sie. Variiere deine Formulierungen, wiederhole dich nicht "
+            "wörtlich.\n"
+            "- Sag NIE »ich höre mit« oder »ich höre zu« (klingt nach "
+            "Lauschen) — ein Funker sagt »ich bin QRV« oder »auf Empfang«.\n"
+            "- Persona-Details (Wohnort, dass du neu bist o.Ä.) nennst du "
+            "AUSSCHLIESSLICH, wenn der letzte Durchgang danach fragt. "
+            "Stil-Vorlage (sinngemäß, nicht wörtlich) — auf »Jemand QRV?«: "
+            f"»Ja, hier ist {name}, bin QRV. Was liegt an?« Falsch wäre: "
+            "»Ich bin QRV hier in Lippstadt« oder »bin neu hier« (danach "
+            "hat niemand gefragt).\n"
+            "- Erfinde keine Fakten: Du hast keine Sensoren und kein "
+            "Internet, Wetter o.Ä. kennst du nicht und gibst das charmant "
+            "zu.\n"
+            "- Fragt dich jemand, wer oder was du bist: sag ehrlich, dass du "
+            "ein Funk-Roboter mit künstlicher Intelligenz bist.\n"
+            "- Gib NUR den gesprochenen Text aus — kein Rufzeichen-Präfix, "
+            "keine Anführungszeichen, keine Erklärungen, keine Emojis "
+            "(der Text wird vorgelesen).")
         messages = [{"role": "system", "content": system}]
         for _, who, txt in hist[-int(bot.get("history_len", 10)):]:
             if who == own_tag:
@@ -1378,7 +1390,7 @@ class TXServer:
                 messages.append({"role": "user", "content": f"{who}: {txt}"})
         body = {"model": model, "messages": messages, "stream": False,
                 "keep_alive": bot.get("ollama_keep_alive", 0),
-                "options": {"num_predict": 150, "temperature": 0.7}}
+                "options": {"num_predict": 150, "temperature": 0.6}}
         if "qwen3" in model.lower() or "deepseek-r1" in model.lower():
             body["think"] = False   # Thinking-Modelle: Grübel-Block abschalten
         try:
@@ -1399,6 +1411,17 @@ class TXServer:
         # Gelegentliches "Robert:"-Präfix strippen (würde mit vorgelesen)
         if ans.lower().startswith(name.lower() + ":"):
             ans = ans[len(name) + 1:].strip()
+        # Sicherheitsnetz: »höre mit/zu« klingt nach Lauschen — das Modell
+        # ignoriert das Verbot gelegentlich trotzdem
+        ans = re.sub(r"\bh[öo]re?\s+(?:hier\s+|gerade\s+|immer\s+)?(?:mit|zu)\b",
+                     "bin auf Empfang", ans)
+        # Halluzinations-Filter: beginnt die Antwort wie eine Transkript-
+        # Zeile ("Klaus: ..."), hat das Modell das Gespräch weitergedichtet
+        # statt zu antworten → lieber schweigen
+        if re.match(r"^[A-Za-zÄÖÜäöüß][\w\- ]{0,24}:\s", ans):
+            log.info("KI-Funker: Transkript-Halluzination verworfen: %.60s",
+                     ans)
+            return ""
         if not ans or ans.upper().startswith("SKIP"):
             return ""
         return ans
