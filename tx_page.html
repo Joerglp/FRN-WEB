@@ -524,6 +524,36 @@ audio {
   padding-bottom: 6px; border-bottom: 1px solid var(--border);
 }
 
+/* ── Übersicht-Karten ── */
+.ov-card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px 14px; margin-bottom: 12px;
+}
+.ov-head {
+  display: flex; justify-content: space-between; align-items: center;
+  font-weight: 600; font-size: .92rem; margin-bottom: 8px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--border);
+}
+.ov-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 12px; padding: 3px 0; font-size: .85rem;
+}
+.ov-key { color: var(--muted); flex: 0 0 auto; }
+.ov-val {
+  color: var(--text); text-align: right; font-family: 'Share Tech Mono', monospace;
+  word-break: break-word;
+}
+.ov-badge { font-size: .78rem; font-weight: 700; letter-spacing: .04em; }
+.ov-on  { color: #34d399; }
+.ov-off { color: var(--muted); }
+.ov-change {
+  background: transparent; border: 1px solid var(--accent); color: var(--accent);
+  border-radius: 6px; padding: 3px 10px; font-size: .74rem; cursor: pointer;
+  white-space: nowrap;
+}
+.ov-change:hover { background: var(--accent); color: var(--bg); }
+.ov-note { font-size: .72rem; color: var(--muted); font-style: italic; }
+
 .form-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;
 }
@@ -1039,12 +1069,26 @@ audio {
     </div>
 
     <div class="admin-tabs">
-      <button class="admin-tab active" onclick="showAdminTab('users')">BENUTZER</button>
-      <button class="admin-tab"        onclick="showAdminTab('rooms')">RÄUME</button>
-      <button class="admin-tab"        onclick="showAdminTab('status')">STATUS</button>
-      <button class="admin-tab"        onclick="showAdminTab('server');loadServerTab()">SERVER</button>
-      <button class="admin-tab"        onclick="showAdminTab('autoreply');loadAutoReplyAdmin()">AUTOMATIK</button>
-      <button class="admin-tab"        onclick="showAdminTab('bot');loadBotAdmin()">KI-FUNKER</button>
+      <button class="admin-tab active" data-tab="overview" onclick="showAdminTab('overview')">ÜBERSICHT</button>
+      <button class="admin-tab" data-tab="users"     onclick="showAdminTab('users')">BENUTZER</button>
+      <button class="admin-tab" data-tab="rooms"     onclick="showAdminTab('rooms')">RÄUME</button>
+      <button class="admin-tab" data-tab="status"    onclick="showAdminTab('status')">STATUS</button>
+      <button class="admin-tab" data-tab="server"    onclick="showAdminTab('server')">SERVER</button>
+      <button class="admin-tab" data-tab="autoreply" onclick="showAdminTab('autoreply')">AUTOMATIK</button>
+      <button class="admin-tab" data-tab="bot"       onclick="showAdminTab('bot')">KI-FUNKER</button>
+    </div>
+
+    <!-- ── Übersicht tab ── -->
+    <div id="admin-tab-overview" class="admin-tab-content active">
+      <div class="admin-section-title" style="display:flex;justify-content:space-between;align-items:center">
+        <span>Aktuelle Einstellungen</span>
+        <button class="btn-save" style="padding:4px 12px" onclick="loadOverview()">↻ Aktualisieren</button>
+      </div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:14px;line-height:1.5">
+        Alles Wichtige auf einen Blick. Zum Ändern jeweils auf <b>„Ändern →"</b> tippen —
+        das öffnet den passenden Reiter.
+      </div>
+      <div id="overview-body">Lädt …</div>
     </div>
 
     <!-- ── Users tab ── -->
@@ -3049,8 +3093,7 @@ function updateLevel() {
 // ══════════════════════════════════════════════════════════════════════════
 function openAdmin() {
   document.getElementById("admin-overlay").classList.add("open");
-  showAdminTab("users");
-  loadUsers();
+  showAdminTab("overview");
 }
 function closeAdmin() {
   document.getElementById("admin-overlay").classList.remove("open");
@@ -3058,15 +3101,46 @@ function closeAdmin() {
 
 function showAdminTab(name) {
   document.querySelectorAll(".admin-tab").forEach(b =>
-    b.classList.toggle("active", b.textContent.toLowerCase().includes(name.substring(0,4).toLowerCase()) ||
-    (name==="status" && b.textContent.toLowerCase().includes("stat"))));
+    b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".admin-tab-content").forEach(d =>
     d.classList.remove("active"));
   const el = document.getElementById("admin-tab-" + name);
   if (el) {
     el.classList.add("active");
-    if (name === "status") loadStatus();
-    if (name === "rooms")  loadRooms();
+    if (name === "overview")  loadOverview();
+    if (name === "users")     loadUsers();
+    if (name === "status")    loadStatus();
+    if (name === "rooms")     loadRooms();
+    if (name === "server")    loadServerTab();
+    if (name === "autoreply") loadAutoReplyAdmin();
+    if (name === "bot")       loadBotAdmin();
+  }
+}
+
+// ── Übersicht (Read-only Zusammenfassung) ────────────────────────────────────
+async function loadOverview() {
+  const body = document.getElementById("overview-body");
+  try {
+    const r = await adminFetch("/api/admin/overview");
+    const d = await r.json();
+    if (d.error) { body.textContent = "Fehler: " + d.error; return; }
+    body.innerHTML = (d.groups || []).map(g => {
+      const rows = g.items.map(([label, value, active]) => {
+        let vhtml;
+        if (active === true)  vhtml = `<span class="ov-badge ov-on">● AN</span>`;
+        else if (active === false) vhtml = `<span class="ov-badge ov-off">○ AUS</span>`;
+        else vhtml = `<span class="ov-val">${esc(value)}</span>`;
+        return `<div class="ov-row"><span class="ov-key">${esc(label)}</span>${vhtml}</div>`;
+      }).join("");
+      const change = g.tab
+        ? `<button class="ov-change" onclick="showAdminTab('${g.tab}')">Ändern →</button>`
+        : `<span class="ov-note">nur in config.json</span>`;
+      return `<div class="ov-card">
+        <div class="ov-head"><span>${g.icon || ""} ${esc(g.title)}</span>${change}</div>
+        ${rows}</div>`;
+    }).join("");
+  } catch(e) {
+    body.textContent = "Fehler beim Laden: " + e;
   }
 }
 

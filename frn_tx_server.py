@@ -2527,6 +2527,75 @@ class TXServer:
             "frn_port":      self.args.frn_port,
         })
 
+    async def handle_admin_overview(self, request):
+        """GET /api/admin/overview — alle wichtigen Einstellungen auf einen
+        Blick (live aus config.json), gruppiert, mit Angabe wo man ändert.
+
+        Reine Lese-Ansicht — geändert wird weiter im jeweiligen Fach-Reiter.
+        Passwörter/Tokens werden NICHT ausgegeben.
+        """
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        cfg   = self.cfg
+        voice = cfg.get("voice", {})
+        bot   = {**self._BOT_DEFAULTS, **voice.get("bot", {})}
+        ar    = {**self._AUTO_REPLY_DEFAULTS, **voice.get("auto_reply", {})}
+        wh    = cfg.get("whisper", {})
+
+        def _host(url: str) -> str:
+            return re.sub(r"^https?://", "", (url or "").strip()).rstrip("/") \
+                   or "—"
+
+        groups = [
+            {"title": "KI-Funker (Robert)", "tab": "bot", "icon": "🤖",
+             "items": [
+                ("Aktiv",            "AN" if bot.get("enabled") else "AUS",
+                                     bool(bot.get("enabled"))),
+                ("Name",             bot.get("name"), None),
+                ("Trigger-Wörter",   ", ".join(bot.get("trigger", [])), None),
+                ("Stimme",           bot.get("speaker"), None),
+                ("KI-Modell",        bot.get("ollama_model"), None),
+                ("KI-Server",        _host(bot.get("ollama_url")), None),
+                ("Cooldown",         f"{int(bot.get('cooldown_s', 0))} s", None),
+                ("Gesprächsfenster", f"{int(bot.get('conversation_window_s', 0))} s", None),
+                ("Räume",            ", ".join(bot.get("rooms")) or "alle", None),
+             ]},
+            {"title": "Automatik (Namens-Antwort)", "tab": "autoreply", "icon": "💬",
+             "items": [
+                ("Aktiv",       "AN" if ar.get("enabled") else "AUS",
+                                bool(ar.get("enabled"))),
+                ("Trigger-Namen", ", ".join(ar.get("names", [])), None),
+                ("KI-Modell",   ar.get("ollama_model"), None),
+                ("KI-Server",   _host(ar.get("ollama_url")), None),
+                ("Cooldown",    f"{int(ar.get('cooldown_s', 0))} s", None),
+             ]},
+            {"title": "Stimme (Text-zu-Sprache)", "tab": None, "icon": "🎙",
+             "items": [
+                ("Aktiv",   "AN" if voice.get("enabled") else "AUS",
+                            bool(voice.get("enabled"))),
+                ("Sprache", voice.get("language", "de"), None),
+                ("TTS-Server", _host(voice.get("remote_url")), None),
+             ]},
+            {"title": "Transkription (Whisper)", "tab": None, "icon": "📝",
+             "items": [
+                ("Modell",  wh.get("model", "—"), None),
+                ("Sprache", wh.get("language", "de"), None),
+                ("Whisper-Server", _host(wh.get("remote_url")) + " (leer = lokal auf dem Pi)"
+                                   if not wh.get("remote_url") else _host(wh.get("remote_url")),
+                                   None),
+             ]},
+            {"title": "FRN-Server & Räume", "tab": "server", "icon": "📡",
+             "items": [
+                ("FRN-Server", f"{self.args.frn_server}:{self.args.frn_port}", None),
+                ("Räume", ", ".join(
+                    f"{r.name}{'●' if r._connected else '○'}"
+                    for r in self.rooms.values()) or "—", None),
+                ("Benutzer", str(len(self.users)), None),
+             ]},
+        ]
+        return web.json_response({"groups": groups})
+
     async def handle_admin_server_get(self, request):
         """GET /api/admin/server — return current FRN server."""
         _, err = await self._require_admin(request)
@@ -3532,6 +3601,7 @@ class TXServer:
         app.router.add_delete("/api/admin/rooms/{mount}", self.handle_admin_rooms_delete)
 
         app.router.add_get("/api/admin/status", self.handle_admin_status)
+        app.router.add_get("/api/admin/overview", self.handle_admin_overview)
 
         app.router.add_get ("/api/admin/server",   self.handle_admin_server_get)
         app.router.add_post("/api/admin/server",   self.handle_admin_server_set)
