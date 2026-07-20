@@ -1424,6 +1424,18 @@ audio {
         </div>
       </div>
 
+      <div class="form-grid" style="margin-top:8px">
+        <div class="form-field" style="flex:2">
+          <label>Ollama-Server (URL)</label>
+          <input type="text" id="bot-ollama-url" placeholder="https://webserver.example.de/ollama">
+        </div>
+        <div class="form-field" style="flex:2">
+          <label>Zugangs-Token (falls Server passwortgeschützt)</label>
+          <input type="password" id="bot-ollama-token" autocomplete="new-password"
+                 placeholder="leer = ohne Token">
+        </div>
+      </div>
+
       <div style="margin-top:12px">
         <button class="btn-save" onclick="saveBotAdmin()">SPEICHERN</button>
       </div>
@@ -3554,6 +3566,9 @@ async function loadBotAdmin() {
     document.getElementById("bot-convwin").value   = d.conversation_window_s ?? 180;
     document.getElementById("bot-rooms").value     = (d.rooms || []).join(", ");
     document.getElementById("bot-model").value     = d.ollama_model || "";
+    document.getElementById("bot-ollama-url").value = d.ollama_url || "";
+    // Server liefert nur eine Maske (••••), nie den echten Token
+    document.getElementById("bot-ollama-token").value = d.ollama_token || "";
     loadOllamaModels();   // füllt die geteilte Modell-Datalist
   } catch(e) {
     showMsg("msg-bot", "Fehler beim Laden: " + e, "error");
@@ -3571,6 +3586,8 @@ async function saveBotAdmin() {
     conversation_window_s: parseFloat(document.getElementById("bot-convwin").value) || 180,
     rooms:                 document.getElementById("bot-rooms").value,
     ollama_model:          document.getElementById("bot-model").value,
+    ollama_url:            document.getElementById("bot-ollama-url").value,
+    ollama_token:          document.getElementById("bot-ollama-token").value,
   };
   try {
     const r = await adminFetch("/api/admin/bot", {

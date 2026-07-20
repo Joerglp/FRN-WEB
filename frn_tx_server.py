@@ -1186,10 +1186,12 @@ class TXServer:
         body = {"model": model, "prompt": prompt, "stream": False,
                 "keep_alive": 0,
                 "options": {"num_predict": 60, "temperature": 0.7}}
+        auth = self._ollama_auth(ar.get("ollama_token"))
         try:
             timeout = aiohttp.ClientTimeout(total=60)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
-                async with sess.post(f"{url}/api/generate", json=body) as resp:
+                async with sess.post(f"{url}/api/generate", json=body,
+                                     auth=auth) as resp:
                     if resp.status != 200:
                         log.warning("Ollama HTTP %d: %s", resp.status,
                                     (await resp.text())[:120])
@@ -1201,6 +1203,9 @@ class TXServer:
             return ""
 
     # ── KI-Funker (autonomer Gesprächspartner) ─────────────────────────────
+
+    # Platzhalter, den die UI statt des echten Tokens sieht/zurücksendet
+    _TOKEN_MASK = "••••••••"
 
     _BOT_DEFAULTS = {
         "enabled":  False,
@@ -1219,6 +1224,9 @@ class TXServer:
         # 0 = Modell nach jeder Antwort entladen (geteilte GPU), "2h" o.Ä. =
         # im RAM halten (eigener CPU-Server, spart den ~1 min Erst-Load)
         "ollama_keep_alive": 0,
+        # Optionaler Zugangs-Token, wenn der Ollama-Server hinter einem
+        # Passwort-Proxy steht (Basic-Auth, Benutzer "frn"). Leer = ohne.
+        "ollama_token": "",
         "rooms": [],
     }
 
@@ -1330,6 +1338,13 @@ class TXServer:
         finally:
             self._bot_busy.discard(room_name)
 
+    @staticmethod
+    def _ollama_auth(token: str | None):
+        """Basic-Auth für einen Ollama-Server hinter Passwort-Proxy (user 'frn').
+        Leerer/kein Token → None (offener Server, kein Auth-Header)."""
+        token = (token or "").strip()
+        return aiohttp.BasicAuth("frn", token) if token else None
+
     async def _bot_ollama(self, bot: dict, hist: list) -> str:
         """Entscheidung + Antwort des KI-Funkers in einem Ollama-Chat-Aufruf.
 
@@ -1393,10 +1408,12 @@ class TXServer:
                 "options": {"num_predict": 150, "temperature": 0.6}}
         if "qwen3" in model.lower() or "deepseek-r1" in model.lower():
             body["think"] = False   # Thinking-Modelle: Grübel-Block abschalten
+        auth = self._ollama_auth(bot.get("ollama_token"))
         try:
             timeout = aiohttp.ClientTimeout(total=180)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
-                async with sess.post(f"{url}/api/chat", json=body) as resp:
+                async with sess.post(f"{url}/api/chat", json=body,
+                                     auth=auth) as resp:
                     if resp.status != 200:
                         log.warning("KI-Funker Ollama HTTP %d: %s", resp.status,
                                     (await resp.text())[:120])
@@ -1620,6 +1637,7 @@ class TXServer:
         "cooldown_s":       90,
         "ollama_url":       "http://192.0.0.17:11434",
         "ollama_model":     "llama3.2:3B",
+        "ollama_token":     "",
         "persona":          "Du bist Jörg, ein CB-Funker aus Eickelborn (Kanal 74).",
     }
 
@@ -1760,6 +1778,11 @@ class TXServer:
             if "ollama_keep_alive" in body and isinstance(
                     body["ollama_keep_alive"], (str, int, float)):
                 bot["ollama_keep_alive"] = body["ollama_keep_alive"]
+            if "ollama_token" in body and isinstance(body["ollama_token"], str):
+                tok = body["ollama_token"].strip()
+                # Maske aus dem GET = unverändert lassen; leer = löschen
+                if tok != self._TOKEN_MASK:
+                    bot["ollama_token"] = tok
             if "trigger" in body:
                 bot["trigger"] = _strlist(body["trigger"])
             if "rooms" in body:
@@ -1795,6 +1818,8 @@ class TXServer:
 
         out = dict(self._BOT_DEFAULTS)
         out.update({k: v for k, v in bot.items() if not k.startswith("_")})
+        # Token nie im Klartext ausliefern — nur "gesetzt/nicht gesetzt"
+        out["ollama_token"] = self._TOKEN_MASK if bot.get("ollama_token") else ""
         return web.json_response(out)
 
     async def handle_admin_bot_test(self, request):
