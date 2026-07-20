@@ -1419,20 +1419,45 @@ audio {
           <input type="text" id="bot-rooms" placeholder="quasel">
         </div>
         <div class="form-field" style="flex:2">
-          <label>KI-Modell</label>
-          <input type="text" id="bot-model" list="ar-model-list" placeholder="qwen3:14b">
+          <label>KI-Anbieter</label>
+          <select id="bot-provider" onchange="updateBotProvider()">
+            <option value="ollama">Lokal / eigener Server (Ollama)</option>
+            <option value="gemini">Google Gemini (Cloud, schnell)</option>
+          </select>
         </div>
       </div>
 
-      <div class="form-grid" style="margin-top:8px">
-        <div class="form-field" style="flex:2">
-          <label>Ollama-Server (URL)</label>
-          <input type="text" id="bot-ollama-url" placeholder="https://webserver.example.de/ollama">
+      <!-- Ollama-Felder -->
+      <div class="prov-ollama">
+        <div class="form-grid" style="margin-top:8px">
+          <div class="form-field" style="flex:2">
+            <label>Ollama-Modell</label>
+            <input type="text" id="bot-model" list="ar-model-list" placeholder="qwen3:14b">
+          </div>
+          <div class="form-field" style="flex:2">
+            <label>Ollama-Server (URL)</label>
+            <input type="text" id="bot-ollama-url" placeholder="https://webserver.example.de/ollama">
+          </div>
         </div>
-        <div class="form-field" style="flex:2">
+        <div class="form-field" style="margin-top:8px">
           <label>Zugangs-Token (falls Server passwortgeschützt)</label>
           <input type="password" id="bot-ollama-token" autocomplete="new-password"
                  placeholder="leer = ohne Token">
+        </div>
+      </div>
+
+      <!-- Gemini-Felder -->
+      <div class="prov-gemini">
+        <div class="form-grid" style="margin-top:8px">
+          <div class="form-field" style="flex:2">
+            <label>Gemini-Modell</label>
+            <input type="text" id="bot-gemini-model" placeholder="gemini-flash-lite-latest">
+          </div>
+          <div class="form-field" style="flex:2">
+            <label>Gemini API-Key <span style="color:var(--muted)">(aistudio.google.com/apikey)</span></label>
+            <input type="password" id="bot-gemini-key" autocomplete="new-password"
+                   placeholder="Google-AI-Studio-Schlüssel">
+          </div>
         </div>
       </div>
 
@@ -3553,6 +3578,12 @@ async function testAutoReply() {
 }
 
 // ── KI-Funker Admin ─────────────────────────────────────────────────────────
+function updateBotProvider() {
+  const p = document.getElementById("bot-provider").value;
+  document.querySelectorAll(".prov-ollama").forEach(e => e.style.display = p === "ollama" ? "" : "none");
+  document.querySelectorAll(".prov-gemini").forEach(e => e.style.display = p === "gemini" ? "" : "none");
+}
+
 async function loadBotAdmin() {
   try {
     const r = await adminFetch("/api/admin/bot");
@@ -3565,10 +3596,14 @@ async function loadBotAdmin() {
     document.getElementById("bot-cooldown").value  = d.cooldown_s ?? 20;
     document.getElementById("bot-convwin").value   = d.conversation_window_s ?? 180;
     document.getElementById("bot-rooms").value     = (d.rooms || []).join(", ");
+    document.getElementById("bot-provider").value  = d.provider || "ollama";
     document.getElementById("bot-model").value     = d.ollama_model || "";
     document.getElementById("bot-ollama-url").value = d.ollama_url || "";
-    // Server liefert nur eine Maske (••••), nie den echten Token
+    // Server liefert nur eine Maske (••••), nie das echte Geheimnis
     document.getElementById("bot-ollama-token").value = d.ollama_token || "";
+    document.getElementById("bot-gemini-model").value = d.gemini_model || "";
+    document.getElementById("bot-gemini-key").value   = d.gemini_api_key || "";
+    updateBotProvider();
     loadOllamaModels();   // füllt die geteilte Modell-Datalist
   } catch(e) {
     showMsg("msg-bot", "Fehler beim Laden: " + e, "error");
@@ -3585,9 +3620,12 @@ async function saveBotAdmin() {
     cooldown_s:            parseFloat(document.getElementById("bot-cooldown").value) || 20,
     conversation_window_s: parseFloat(document.getElementById("bot-convwin").value) || 180,
     rooms:                 document.getElementById("bot-rooms").value,
+    provider:              document.getElementById("bot-provider").value,
     ollama_model:          document.getElementById("bot-model").value,
     ollama_url:            document.getElementById("bot-ollama-url").value,
     ollama_token:          document.getElementById("bot-ollama-token").value,
+    gemini_model:          document.getElementById("bot-gemini-model").value,
+    gemini_api_key:        document.getElementById("bot-gemini-key").value,
   };
   try {
     const r = await adminFetch("/api/admin/bot", {
