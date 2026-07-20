@@ -12,7 +12,9 @@ Browser-basierter **PTT-Sender, Stream-Empfänger und Gesprächsarchiv** für da
 - **FRN-Server wechseln** — direkt aus dem Browser auf einen anderen FRN-Server umschalten
 - **FRN-Konto registrieren** — neues FRN-Konto direkt aus dem Browser beantragen
 - **Auto-Discovery** — Räume automatisch vom FRN-Server lesen, keine feste Raumliste nötig
-- **Transkription** *(optional)* — Spracherkennung via [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+- **Transkription** *(optional, KI)* — Spracherkennung via [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+- **Sprachausgabe** *(optional, KI)* — Text in einer geklonten Stimme in den Funk senden (Voice-Clone-TTS)
+- **KI-Funker** *(optional, KI)* — autonomer Gesprächspartner, der mithört und selbstständig per Stimme antwortet
 - **Funkarchiv** *(optional)* — Alle Übertragungen mit Audioplayer, durchsuchbar; separater **Chat-Verlauf**-Tab
 - **Komprimiertes Audio** — WAV-Aufnahmen werden als Opus gespeichert (~10× kleiner)
 - **Hintergrund-Audio** — 🔊-Button hält den Stream aktiv wenn der Bildschirm gesperrt wird
@@ -27,6 +29,23 @@ Browser-basierter **PTT-Sender, Stream-Empfänger und Gesprächsarchiv** für da
 - **Archiv-Statistiken** — Balkendiagramm, Top-Rufzeichen und -Räume, Gesamtzahlen
 - **Kommentare** — Notizen zu einzelnen Archiv-Einträgen hinzufügen
 - **Docker-Support** — kompletter Stack mit `docker compose up`
+
+## Zwei Betriebsarten: Basis oder mit KI
+
+FRN-WEB läuft in **einer** Codebasis, die KI-Funktionen sind ein optionaler Zusatz — niemand muss sie nutzen. Welche Variante du fährst, entscheidet allein die Konfiguration; es gibt keinen zweiten Branch und keinen getrennten Download.
+
+| | **Basis** (ohne KI) | **Voll** (mit KI) |
+|---|---|---|
+| Mithören, Senden (PTT), Räume, Login, Admin | ✅ | ✅ |
+| Funkarchiv (Audio + Chat) | ✅ | ✅ |
+| Transkription der Sprüche (Whisper) | — | ✅ |
+| Sprachausgabe / KI-Funker | — | ✅ |
+| Zusätzliche Server nötig | — | Whisper-, TTS- und Ollama-Dienst (eigene Rechner) |
+| Vorlage | `config/config.json.example` | `config/config.ai.json.example` |
+
+Die KI-Server (Whisper, Voice-TTS, Ollama) laufen als **eigenständige Dienste** und werden nur über ihre Adresse in der Config eingebunden — die App selbst bringt **keine** KI-Bibliotheken mit (sie braucht nur `aiohttp`, `numpy`, `scipy`). Fehlt eine Adresse oder steht ein Feature auf `enabled: false`, ist es sauber aus und wird in der Oberfläche ausgeblendet. In der KI-Vorlage stehen alle KI-Features bewusst auf `enabled: false` — man schaltet sie einzeln frei, wenn der jeweilige Server läuft.
+
+**Umschalten** heißt einfach: die passende Vorlage nach `config/config.json` kopieren (siehe Schnellstart). Auch nachträglich kannst du KI in einer laufenden Basis-Installation dazuschalten, indem du die entsprechenden Blöcke ergänzt.
 
 ## Voraussetzungen
 
@@ -46,14 +65,20 @@ cd FRN-WEB
 cp config/tx_users.json.example config/tx_users.json
 python3 tx_add_user.py admin "DL0XYZ"   # Ersten Admin anlegen
 
-# 3. config/config.json editieren
+# 3. Konfiguration wählen und anlegen:
+#    Basis (ohne KI):
+cp config/config.json.example config/config.json
+#    ODER mit KI (Transkription/Sprachausgabe/KI-Funker):
+# cp config/config.ai.json.example config/config.json
+#
+#    Dann config/config.json editieren:
 #    → frn.server: Adresse des FRN_Server (host.docker.internal = lokaler Host)
 #    → frn_stream_account: FRN-Zugangsdaten für Auto-Discovery und Streams
 
-# 4. Starten (ohne Whisper)
+# 4. Starten (Basis, ohne Whisper)
 docker compose up -d
 
-# 4b. Starten MIT Whisper-Transkription
+# 4b. Starten MIT Whisper-Transkription (KI-Variante)
 WITH_WHISPER=true docker compose up -d --build
 ```
 

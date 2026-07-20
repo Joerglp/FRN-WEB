@@ -1,5 +1,5 @@
 {
-  "_comment": "FRN-WEB Hauptkonfiguration — hier alle Verbindungseinstellungen anpassen",
+  "_comment": "FRN-WEB — BASIS-Konfiguration (OHNE KI). Streaming, PTT/Senden, Funkarchiv. Keine Transkription, keine Sprach-KI. Wer KI-Funktionen will, nimmt stattdessen config.ai.json.example. Siehe README, Abschnitt 'Zwei Betriebsarten'.",
   "tx_server": {
     "host": "0.0.0.0",
     "port": 8765
@@ -26,7 +26,7 @@
     "callsign_prefix": "WEB"
   },
   "whisper": {
-    "_comment": "remote_url: leer lassen für lokales Modell im Container (WITH_WHISPER=true)",
+    "_comment": "OHNE KI: remote_url leer UND Whisper-Container nicht starten (WITH_WHISPER nicht setzen) = keine Transkription. Das Archiv speichert dann nur Audio, keinen Text.",
     "remote_url": "",
     "model":    "medium",
     "language": "de",

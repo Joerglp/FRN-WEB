@@ -1,0 +1,70 @@
+{
+  "_comment": "FRN-WEB — VOLL-Konfiguration (MIT KI). Wie config.json.example, plus optionale KI-Schicht: Transkription (Whisper), Sprachausgabe (Voice-Clone-TTS) und der autonome KI-Funker. ALLE KI-Features stehen hier bewusst auf enabled=false — einzeln einschalten, wenn die zugehörigen Server laufen. Die KI-Server (Whisper/TTS/Ollama) laufen als eigene Dienste, NICHT in dieser App; hier stehen nur ihre Adressen. Siehe README, Abschnitt 'Zwei Betriebsarten'.",
+  "tx_server": {
+    "host": "0.0.0.0",
+    "port": 8765
+  },
+  "frn": {
+    "server": "host.docker.internal",
+    "port": 10024,
+    "tx_timeout": 180
+  },
+  "icecast": {
+    "host": "icecast",
+    "port": 8000,
+    "source_password": "ICECAST_SOURCE_PW",
+    "admin_password":  "ICECAST_ADMIN_PW"
+  },
+  "auth": {
+    "_comment": "mode: local=nur tx_users.json | frn=nur FRN-Server | both=lokal zuerst, dann FRN",
+    "mode": "both"
+  },
+  "frn_stream_account": {
+    "_comment": "Zugangsdaten für die Icecast-Stream-Clients (frn_stream_runner). Leer = aus tx_rooms.json.",
+    "email":           "deine@email.de",
+    "password":        "DEIN_FRN_PASSWORT",
+    "callsign_prefix": "WEB"
+  },
+  "whisper": {
+    "_comment": "Transkription. remote_url leer = lokales Modell im Container (Start mit WITH_WHISPER=true). Für einen GPU-Rechner die URL des externen Whisper-Servers eintragen, z.B. http://DEIN-GPU-RECHNER:9001/transcribe",
+    "remote_url": "",
+    "model":    "medium",
+    "language": "de",
+    "initial_prompt": "CB-Funk, Amateurfunk. Gespraech zwischen Funkern. Gaengige Ausdruecke: Roger, Over, QRV, Kanal frei, Basis, Mobile, Standort, Rapport, 73, 55."
+  },
+  "voice": {
+    "_comment": "Sprach-KI. enabled=false schaltet den kompletten Voice-Bereich aus (Text-in-Stimme-Senden, Auto-Antwort, KI-Funker). remote_url = Adresse des Voice-Clone-TTS-Servers (eigener Dienst).",
+    "enabled": false,
+    "remote_url": "http://DEIN-TTS-SERVER:9002/tts",
+    "language": "de",
+    "auto_reply": {
+      "_comment": "Antwort-VORSCHLAG bei Namensnennung im Funk (via Ollama). Gesendet wird nur nach Freigabe in der App (auto_send=true sendet ohne Freigabe). Zum Aktivieren enabled=true.",
+      "enabled": false,
+      "auto_send": false,
+      "names": ["max", "maxi"],
+      "ignore_callsigns": ["tx-", "stream-", "web-", "audio test"],
+      "cooldown_s": 90,
+      "ollama_url": "http://DEIN-OLLAMA-SERVER:11434",
+      "ollama_model": "llama3.2:3b",
+      "persona": "Du bist Max, ein freundlicher Funker."
+    },
+    "bot": {
+      "_comment": "Autonomer KI-Funker: hoert mit und antwortet selbststaendig per Stimme, wenn er angesprochen wird oder jemand allgemein ruft. Zum Aktivieren enabled=true. speaker = Sprecher-ID des TTS-Servers. ollama_keep_alive: 0 = Modell nach jeder Antwort entladen, '2h' = im RAM halten (eigener Server).",
+      "enabled": false,
+      "name": "Robby",
+      "speaker": "default",
+      "persona": "Du bist Robby, ein freundlicher Funk-Roboter mit kuenstlicher Intelligenz. Du bist rund um die Uhr QRV und plauderst gern kurz ueber Funk, Technik und das Wetter.",
+      "trigger": ["robby"],
+      "rooms": [],
+      "cooldown_s": 20,
+      "conversation_window_s": 180,
+      "ollama_url": "http://DEIN-OLLAMA-SERVER:11434",
+      "ollama_model": "qwen3:14b",
+      "ollama_keep_alive": 0
+    }
+  },
+  "ui": {
+    "title":    "FRN Webstreams",
+    "subtitle": "Free Radio Network"
+  }
+}
