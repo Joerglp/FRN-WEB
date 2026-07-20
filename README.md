@@ -164,6 +164,18 @@ Chat-Nachrichten werden automatisch gespeichert sobald sie im FRN-Raum eingehen 
 
 Im SERVER-Tab können neue FRN-Konten direkt beim System-Manager `sysman.freeradionetwork.de` beantragt werden. Rufzeichen, Name, E-Mail und Stadt eingeben → **KONTO BEANTRAGEN** → Passwort kommt per E-Mail.
 
+## KI-Dienste einrichten (optional)
+
+Die KI-Funktionen laufen als **drei eigenständige HTTP-Dienste** — die App bindet sie nur über ihre Adresse ein (`config/config.ai.json.example` als Vorlage). Jeder Dienst ist einzeln optional; du kannst z.B. nur Transkription nutzen und Sprachausgabe weglassen. Sie können alle auf demselben Rechner laufen oder verteilt (empfohlen: rechenintensive Dienste auf einen Rechner mit NVIDIA-GPU).
+
+| Dienst | Skript | Port | Wozu | GPU? |
+|--------|--------|------|------|------|
+| **Whisper** | `whisper_server.py` | 9001 | Sprüche transkribieren (fürs Archiv + KI-Funker) | empfohlen, geht auch CPU |
+| **Voice-TTS** | `voice_server.py` | 9002 | Text in einer Stimme aussprechen (Sprachausgabe, KI-Funker) | empfohlen, geht auch CPU |
+| **Ollama** | (externes Projekt) | 11434 | Antworten formulieren (KI-Funker, Auto-Antwort) | empfohlen, geht auch CPU |
+
+Faustregel: **Whisper + Voice-TTS + Ollama** zusammen wollen für flüssigen Betrieb eine GPU. Auf reiner CPU funktioniert alles, ist aber deutlich langsamer (Sprachsynthese z.B. ~20 s statt ~2 s pro Satz) — für einen gemütlichen Funk-Bot oft trotzdem okay.
+
 ## Whisper-Transkription
 
 Alle Übertragungen werden automatisch transkribiert und im **Funkarchiv** gespeichert.
@@ -221,6 +233,80 @@ In `config/config.json`:
 | `small` | 480 MB | gut | ~1 GB |
 | `medium` | 1,5 GB | sehr gut | ~2,5 GB |
 | `large-v3` | 3 GB | exzellent | ~5 GB / 3 GB VRAM |
+
+## Sprachausgabe (Voice-Clone-TTS)
+
+Wandelt Text in gesprochenes Audio um und sendet es in den Funk — entweder mit einer der eingebauten Studio-Stimmen oder mit einer aus einem kurzen Referenz-Sample geklonten Stimme. Engine: [Coqui XTTS-v2](https://github.com/idiap/coqui-ai-TTS). `voice_server.py` läuft als eigenständiger Dienst (Port 9002) und wird über `voice.remote_url` angesprochen.
+
+### Installation (nativ)
+
+Die Abhängigkeiten sind heikel — diese **Versionen sind aufeinander abgestimmt**, neuere brechen XTTS:
+
+```bash
+python3 -m venv voice-env && source voice-env/bin/activate
+pip install "coqui-tts==0.27.5" "transformers==4.57.6" aiohttp numpy
+# CPU:
+pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+# ODER GPU (CUDA 12.x):
+pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+
+COQUI_TOS_AGREED=1 VOICE_DEVICE=cpu python3 voice_server.py   # Port 9002
+```
+
+Beim ersten Start lädt XTTS sein Modell (~1,8 GB, CPML-Lizenz — nur nicht-kommerzielle Nutzung).
+
+### Stimmen
+
+- **Eingebaut:** ~58 Studio-Sprecher, sofort nutzbar. Liste via `GET /speakers` (Feld `builtin`). In der Config als `speaker`-ID eintragen, z.B. `"speaker": "aaron_dreschner"`.
+- **Eigene Stimme klonen:** ein ≥5 s sauberes WAV als `speaker`-Sample hochladen (`POST /speaker/<name>` mit rohem WAV-Body) oder als Datei ablegen. Danach `"speaker": "<name>"`.
+
+### Umgebungsvariablen
+
+| Variable | Default | Bedeutung |
+|----------|---------|-----------|
+| `VOICE_DEVICE` | `cpu` | `cpu` \| `cuda` (dauerhaft GPU) \| `cuda-ondemand` (nur während Synthese auf GPU, sonst VRAM frei) |
+| `VOICE_PORT` | `9002` | HTTP-Port |
+| `VOICE_REF_DIR` | `/ref` | Ordner mit Sprecher-Samples (`<name>.wav`) |
+| `COQUI_TOS_AGREED` | — | muss `1` sein (XTTS-Lizenz akzeptieren) |
+
+Dann in `config/config.json`:
+```json
+"voice": { "enabled": true, "remote_url": "http://DEIN-TTS-SERVER:9002/tts" }
+```
+
+## KI-Funker & Auto-Antwort (Ollama)
+
+Formuliert die Antworten. Läuft über [Ollama](https://ollama.com) (Port 11434) mit einem lokalen Sprachmodell — kein Cloud-Dienst, keine API-Kosten.
+
+```bash
+# Ollama installieren (siehe ollama.com), dann Modell(e) laden:
+ollama pull qwen3:14b      # gut für den KI-Funker (deutsch, folgt Anweisungen)
+ollama pull llama3.2:3b    # klein/schnell, reicht für kurze Auto-Antwort-Vorschläge
+```
+
+Zwei getrennte, unabhängig schaltbare Funktionen greifen darauf zu:
+
+- **KI-Funker** (`voice.bot`) — hört alle Räume mit und antwortet **selbstständig** per Stimme, wenn sein Name fällt, jemand allgemein ruft (»jemand QRV?«, CQ) oder er in einem Gespräch steckt. Braucht Whisper (hören), Voice-TTS (sprechen) und Ollama (denken). Ob er wirklich gemeint ist, entscheidet das Modell selbst (es darf mit `SKIP` schweigen).
+- **Auto-Antwort** (`voice.auto_reply`) — erzeugt bei Namensnennung einen Antwort-**Vorschlag**, der in der App erscheint; gesendet wird erst nach Freigabe (oder mit `auto_send: true` automatisch).
+
+```json
+"voice": {
+  "enabled": true,
+  "remote_url": "http://DEIN-TTS-SERVER:9002/tts",
+  "bot": {
+    "enabled": true,
+    "name": "Robby",
+    "speaker": "aaron_dreschner",
+    "ollama_url": "http://DEIN-OLLAMA-SERVER:11434",
+    "ollama_model": "qwen3:14b",
+    "ollama_keep_alive": "2h"
+  }
+}
+```
+
+`ollama_keep_alive`: `0` entlädt das Modell nach jeder Antwort (gut bei geteilter GPU), `"2h"` hält es im RAM (schnellere Antworten auf einem eigenen Server). Alle Bot-Einstellungen sind auch live im **Admin-Panel → KI-FUNKER** editierbar, inkl. Trockentest ohne Senden.
+
+> **Hinweis zur Fairness:** Ein Bot, der ungefragt in Gespräche funkt, kommt nicht überall gut an. Kläre die Nutzung auf deinem Netz/Kanal vorher ab und halte `cooldown_s` großzügig.
 
 ## Architektur
 
