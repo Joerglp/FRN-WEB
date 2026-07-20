@@ -1379,15 +1379,20 @@ class TXServer:
             "antworte exakt mit dem Wort SKIP — egal was die Stil-Regeln "
             "unten sagen.\n"
             "Bist du gemeint, gilt für deine Antwort:\n"
-            "- 1-2 kurze, lockere Sätze im Funker-Ton; immer Du-Form, nie "
-            "Sie. Variiere deine Formulierungen, wiederhole dich nicht "
-            "wörtlich.\n"
+            "- 1-2 kurze, lockere Sätze in normaler Umgangssprache; immer "
+            "Du-Form, nie Sie. Variiere deine Formulierungen, wiederhole "
+            "dich nicht wörtlich.\n"
+            "- Das hier ist lockerer CB-/Jedermannfunk, KEIN Amateurfunk. "
+            "Rede normal wie unter Kumpels — vermeide steife Funk-Codes wie "
+            "»QRV«, »QRM«, »73«, »QSL« in DEINER Antwort (verstehen musst du "
+            "sie, selbst benutzen sollst du sie nicht). Sag statt »ich bin "
+            "QRV« einfach »ich bin da«, »ich hör dich« oder »bin dabei«.\n"
             "- Sag NIE »ich höre mit« oder »ich höre zu« (klingt nach "
-            "Lauschen) — ein Funker sagt »ich bin QRV« oder »auf Empfang«.\n"
+            "Lauschen) — sag lieber »ich bin da« oder »ich hör dich«.\n"
             "- Persona-Details (Wohnort, dass du neu bist o.Ä.) nennst du "
             "AUSSCHLIESSLICH, wenn der letzte Durchgang danach fragt. "
-            "Stil-Vorlage (sinngemäß, nicht wörtlich) — auf »Jemand QRV?«: "
-            f"»Ja, hier ist {name}, bin QRV. Was liegt an?« Falsch wäre: "
+            "Stil-Vorlage (sinngemäß, nicht wörtlich) — auf »Ist einer da?«: "
+            f"»Moin, hier ist {name}. Was gibt's?« Falsch wäre: "
             "»Ich bin QRV hier in Lippstadt« oder »bin neu hier« (danach "
             "hat niemand gefragt).\n"
             "- Erfinde keine Fakten: Du hast keine Sensoren und kein "
@@ -1432,7 +1437,7 @@ class TXServer:
         # Sicherheitsnetz: »höre mit/zu« klingt nach Lauschen — das Modell
         # ignoriert das Verbot gelegentlich trotzdem
         ans = re.sub(r"\bh[öo]re?\s+(?:hier\s+|gerade\s+|immer\s+)?(?:mit|zu)\b",
-                     "bin auf Empfang", ans)
+                     "bin da", ans)
         # Halluzinations-Filter: beginnt die Antwort wie eine Transkript-
         # Zeile ("Klaus: ..."), hat das Modell das Gespräch weitergedichtet
         # statt zu antworten → lieber schweigen
