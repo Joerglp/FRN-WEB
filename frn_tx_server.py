@@ -1186,12 +1186,12 @@ class TXServer:
         body = {"model": model, "prompt": prompt, "stream": False,
                 "keep_alive": 0,
                 "options": {"num_predict": 60, "temperature": 0.7}}
-        auth = self._ollama_auth(ar.get("ollama_token"))
+        hdrs = self._ollama_headers(ar.get("ollama_token"))
         try:
             timeout = aiohttp.ClientTimeout(total=60)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
                 async with sess.post(f"{url}/api/generate", json=body,
-                                     auth=auth) as resp:
+                                     headers=hdrs) as resp:
                     if resp.status != 200:
                         log.warning("Ollama HTTP %d: %s", resp.status,
                                     (await resp.text())[:120])
@@ -1339,11 +1339,12 @@ class TXServer:
             self._bot_busy.discard(room_name)
 
     @staticmethod
-    def _ollama_auth(token: str | None):
-        """Basic-Auth für einen Ollama-Server hinter Passwort-Proxy (user 'frn').
-        Leerer/kein Token → None (offener Server, kein Auth-Header)."""
+    def _ollama_headers(token: str | None):
+        """Authorization-Header (Bearer) für einen Ollama-Server hinter
+        Token-Proxy. Bearer, weil gängige Clients (z.B. Open WebUI) nur das
+        können. Leerer/kein Token → None (offener Server, kein Header)."""
         token = (token or "").strip()
-        return aiohttp.BasicAuth("frn", token) if token else None
+        return {"Authorization": f"Bearer {token}"} if token else None
 
     async def _bot_ollama(self, bot: dict, hist: list) -> str:
         """Entscheidung + Antwort des KI-Funkers in einem Ollama-Chat-Aufruf.
@@ -1408,12 +1409,12 @@ class TXServer:
                 "options": {"num_predict": 150, "temperature": 0.6}}
         if "qwen3" in model.lower() or "deepseek-r1" in model.lower():
             body["think"] = False   # Thinking-Modelle: Grübel-Block abschalten
-        auth = self._ollama_auth(bot.get("ollama_token"))
+        hdrs = self._ollama_headers(bot.get("ollama_token"))
         try:
             timeout = aiohttp.ClientTimeout(total=180)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
                 async with sess.post(f"{url}/api/chat", json=body,
-                                     auth=auth) as resp:
+                                     headers=hdrs) as resp:
                     if resp.status != 200:
                         log.warning("KI-Funker Ollama HTTP %d: %s", resp.status,
                                     (await resp.text())[:120])
