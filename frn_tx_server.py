@@ -1207,6 +1207,28 @@ class TXServer:
     # Platzhalter, den die UI statt des echten Tokens sieht/zurücksendet
     _TOKEN_MASK = "••••••••"
 
+    # Standard-System-Anweisung für den KI-Funker. In der config unter
+    # voice.bot.system_prompt überschreibbar. Platzhalter {name}/{persona}.
+    # Der SKIP-Mechanismus (nur mit dem Wort SKIP antworten = schweigen) wird
+    # vom Code ausgewertet und sollte in einer eigenen Anweisung erhalten
+    # bleiben, sonst funkt der Bot in jeden Durchgang.
+    _BOT_SYSTEM_DEFAULT = (
+        "{persona}\n"
+        "Du heißt {name} und funkst im lockeren CB-Jedermannfunk mit. Die "
+        "Nachrichten sind mitgehörte Funksprüche im Format 'Rufzeichen: Text'; "
+        "deine eigenen früheren Sendungen erscheinen als deine Nachrichten.\n"
+        "Entscheide beim letzten Spruch, ob DU gemeint bist: dein Name {name} "
+        "fällt, jemand fragt allgemein ob wer da/zu hören ist, jemand macht "
+        "einen allgemeinen Anruf, oder ein Gespräch mit dir geht weiter. Reden "
+        "zwei andere miteinander oder wird eine andere Station gerufen, bist "
+        "du NICHT gemeint.\n"
+        "Bist du nicht gemeint, antworte nur mit dem Wort: SKIP\n"
+        "Bist du gemeint, antworte kurz und locker in 1-2 Sätzen, Du-Form. "
+        "Erfinde nichts, was du nicht wissen kannst (du hast keine Sensoren). "
+        "Gib nur den gesprochenen Text aus, ohne Rufzeichen-Präfix, "
+        "Anführungszeichen oder Emojis (er wird vorgelesen)."
+    )
+
     _BOT_DEFAULTS = {
         "enabled":  False,
         "name":     "Robert",
@@ -1219,6 +1241,9 @@ class TXServer:
         "cooldown_s": 20,
         "conversation_window_s": 180,
         "history_len": 10,
+        # System-Anweisung fürs Modell (leer = _BOT_SYSTEM_DEFAULT).
+        # Platzhalter {name} und {persona} werden eingesetzt.
+        "system_prompt": "",
         "ollama_url": "",
         "ollama_model": "qwen3:14b",
         # 0 = Modell nach jeder Antwort entladen (geteilte GPU), "2h" o.Ä. =
@@ -1359,50 +1384,12 @@ class TXServer:
         model = bot.get("ollama_model") or "qwen3:14b"
         name  = bot.get("name") or "Robert"
         own_tag = f"{name} (du)"
-        system = (
-            f"{(bot.get('persona') or '').strip()}\n"
-            f"Du heißt {name}. Die Nachrichten des Benutzers sind mitgehörte "
-            "Funk-Durchgänge im Format 'Rufzeichen: Text'; deine früheren "
-            "eigenen Sendungen erscheinen als deine eigenen Nachrichten.\n"
-            "Entscheide beim letzten Durchgang, ob DU gemeint bist. Du bist "
-            f"IMMER gemeint, wenn dein Name {name} fällt, wenn jemand "
-            "allgemein fragt, ob jemand QRV/da ist oder zuhört, oder wenn "
-            "jemand einen allgemeinen Anruf (CQ) macht — genau dafür bist du "
-            "da. Du bist auch gemeint, wenn du mitten in einem Gespräch "
-            "steckst und der Durchgang es fortsetzt. Reden dagegen zwei "
-            "andere Funker miteinander oder ruft jemand gezielt eine andere "
-            "Station (ein Name oder Rufzeichen, das nicht deins ist — auch "
-            "»Basis«, »Mobile eins« usw. sind solche Stationen, z.B. richtet "
-            "sich »Signalrapport bitte, Mobile eins« an die Station Mobile "
-            "eins), bist du NICHT gemeint.\n"
-            "Diese Prüfung kommt IMMER zuerst: Bist du NICHT gemeint, "
-            "antworte exakt mit dem Wort SKIP — egal was die Stil-Regeln "
-            "unten sagen.\n"
-            "Bist du gemeint, gilt für deine Antwort:\n"
-            "- 1-2 kurze, lockere Sätze in normaler Umgangssprache; immer "
-            "Du-Form, nie Sie. Variiere deine Formulierungen, wiederhole "
-            "dich nicht wörtlich.\n"
-            "- Das hier ist lockerer CB-/Jedermannfunk, KEIN Amateurfunk. "
-            "Rede normal wie unter Kumpels — vermeide steife Funk-Codes wie "
-            "»QRV«, »QRM«, »73«, »QSL« in DEINER Antwort (verstehen musst du "
-            "sie, selbst benutzen sollst du sie nicht). Sag statt »ich bin "
-            "QRV« einfach »ich bin da«, »ich hör dich« oder »bin dabei«.\n"
-            "- Sag NIE »ich höre mit« oder »ich höre zu« (klingt nach "
-            "Lauschen) — sag lieber »ich bin da« oder »ich hör dich«.\n"
-            "- Persona-Details (Wohnort, dass du neu bist o.Ä.) nennst du "
-            "AUSSCHLIESSLICH, wenn der letzte Durchgang danach fragt. "
-            "Stil-Vorlage (sinngemäß, nicht wörtlich) — auf »Ist einer da?«: "
-            f"»Moin, hier ist {name}. Was gibt's?« Falsch wäre: "
-            "»Ich bin QRV hier in Lippstadt« oder »bin neu hier« (danach "
-            "hat niemand gefragt).\n"
-            "- Erfinde keine Fakten: Du hast keine Sensoren und kein "
-            "Internet, Wetter o.Ä. kennst du nicht und gibst das charmant "
-            "zu.\n"
-            "- Fragt dich jemand, wer oder was du bist: sag ehrlich, dass du "
-            "ein Funk-Roboter mit künstlicher Intelligenz bist.\n"
-            "- Gib NUR den gesprochenen Text aus — kein Rufzeichen-Präfix, "
-            "keine Anführungszeichen, keine Erklärungen, keine Emojis "
-            "(der Text wird vorgelesen).")
+        # System-Anweisung kommt aus der config (voice.bot.system_prompt),
+        # damit sie ohne Code-Änderung angepasst werden kann. Platzhalter
+        # {name} und {persona} werden eingesetzt.
+        tmpl = bot.get("system_prompt") or self._BOT_SYSTEM_DEFAULT
+        system = (tmpl.replace("{persona}", (bot.get("persona") or "").strip())
+                      .replace("{name}", name))
         messages = [{"role": "system", "content": system}]
         for _, who, txt in hist[-int(bot.get("history_len", 10)):]:
             if who == own_tag:
@@ -1429,24 +1416,10 @@ class TXServer:
             log.warning("KI-Funker: Ollama nicht erreichbar (%s): %s", url, e)
             return ""
         ans = (data.get("message", {}).get("content") or "").strip()
-        ans = re.sub(r"<think>.*?</think>", "", ans, flags=re.S)
-        ans = ans.strip().strip('"')
-        # Gelegentliches "Robert:"-Präfix strippen (würde mit vorgelesen)
-        if ans.lower().startswith(name.lower() + ":"):
-            ans = ans[len(name) + 1:].strip()
-        # Sicherheitsnetz: »höre mit/zu« klingt nach Lauschen — das Modell
-        # ignoriert das Verbot gelegentlich trotzdem
-        ans = re.sub(r"\bh[öo]re?\s+(?:hier\s+|gerade\s+|immer\s+)?(?:mit|zu)\b",
-                     "bin da", ans)
-        # Halluzinations-Filter: beginnt die Antwort wie eine Transkript-
-        # Zeile ("Klaus: ..."), hat das Modell das Gespräch weitergedichtet
-        # statt zu antworten → lieber schweigen
-        if re.match(r"^[A-Za-zÄÖÜäöüß][\w\- ]{0,24}:\s", ans):
-            log.info("KI-Funker: Transkript-Halluzination verworfen: %.60s",
-                     ans)
-            return ""
+        # <think>…</think> entfernen (Reasoning-Modelle wie qwen3 geben es aus)
+        ans = re.sub(r"<think>.*?</think>", "", ans, flags=re.S).strip().strip('"')
         if not ans or ans.upper().startswith("SKIP"):
-            return ""
+            return ""   # nicht gemeint / nichts zu sagen
         return ans
 
     async def handle_voice_auto_reply(self, request):
