@@ -1391,6 +1391,9 @@ class TXServer:
         ans = (data.get("message", {}).get("content") or "").strip()
         ans = re.sub(r"<think>.*?</think>", "", ans, flags=re.S)
         ans = ans.strip().strip('"')
+        # Gelegentliches "Robert:"-Präfix strippen (würde mit vorgelesen)
+        if ans.lower().startswith(name.lower() + ":"):
+            ans = ans[len(name) + 1:].strip()
         if not ans or ans.upper().startswith("SKIP"):
             return ""
         return ans
@@ -1718,10 +1721,14 @@ class TXServer:
 
             if "enabled" in body:
                 bot["enabled"] = bool(body["enabled"])
-            for key in ("name", "speaker", "persona",
-                        "ollama_url", "ollama_model"):
+            for key in ("name", "persona", "ollama_url", "ollama_model"):
                 if key in body and isinstance(body[key], str):
                     bot[key] = body[key].strip()
+            if "speaker" in body and isinstance(body["speaker"], str):
+                # Sprecher-IDs sind strikt [a-z0-9_-]: Tippfehler wie
+                # "Aaron,dreschner" leise reparieren statt spaeter TTS-400
+                bot["speaker"] = re.sub(
+                    r"[^a-z0-9_\-]", "_", body["speaker"].strip().lower())
             if "ollama_keep_alive" in body and isinstance(
                     body["ollama_keep_alive"], (str, int, float)):
                 bot["ollama_keep_alive"] = body["ollama_keep_alive"]
