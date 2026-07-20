@@ -1244,6 +1244,11 @@ class TXServer:
         # System-Anweisung fürs Modell (leer = _BOT_SYSTEM_DEFAULT).
         # Platzhalter {name} und {persona} werden eingesetzt.
         "system_prompt": "",
+        # Anbieter des Sprachmodells: "ollama" (lokal/eigener Server) oder
+        # "gemini" (Google-Cloud, schneller). Bei gemini gelten gemini_*.
+        "provider": "ollama",
+        "gemini_api_key": "",
+        "gemini_model": "gemini-flash-lite-latest",
         "ollama_url": "",
         "ollama_model": "qwen3:14b",
         # 0 = Modell nach jeder Antwort entladen (geteilte GPU), "2h" o.Ä. =
@@ -1371,33 +1376,51 @@ class TXServer:
         token = (token or "").strip()
         return {"Authorization": f"Bearer {token}"} if token else None
 
-    async def _bot_ollama(self, bot: dict, hist: list) -> str:
-        """Entscheidung + Antwort des KI-Funkers in einem Ollama-Chat-Aufruf.
-
-        Das Modell sieht den Gesprächsverlauf (eigene Sendungen als
-        assistant-Rolle) und darf mit SKIP schweigen — das ist die
-        eigentliche »Intelligenz« hinter dem Vorfilter.
-        Liefert "" wenn der Bot nicht antworten soll."""
-        ar    = self.cfg.get("voice", {}).get("auto_reply", {})
-        url   = (bot.get("ollama_url") or ar.get("ollama_url")
-                 or "http://192.0.0.17:11434").rstrip("/")
-        model = bot.get("ollama_model") or "qwen3:14b"
-        name  = bot.get("name") or "Robert"
+    def _bot_build_prompt(self, bot: dict, hist: list) -> tuple[str, list]:
+        """Baut System-Anweisung + Nachrichtenverlauf (provider-neutral).
+        Nachrichten: role 'user' (fremde Funksprüche) / 'assistant' (eigene)."""
+        name = bot.get("name") or "Robert"
         own_tag = f"{name} (du)"
-        # System-Anweisung kommt aus der config (voice.bot.system_prompt),
-        # damit sie ohne Code-Änderung angepasst werden kann. Platzhalter
-        # {name} und {persona} werden eingesetzt.
+        # System-Anweisung aus der config (voice.bot.system_prompt), Platzhalter
+        # {name}/{persona} eingesetzt.
         tmpl = bot.get("system_prompt") or self._BOT_SYSTEM_DEFAULT
         system = (tmpl.replace("{persona}", (bot.get("persona") or "").strip())
                       .replace("{name}", name))
-        messages = [{"role": "system", "content": system}]
+        messages = []
         for _, who, txt in hist[-int(bot.get("history_len", 10)):]:
             if who == own_tag:
                 messages.append({"role": "assistant", "content": txt})
             else:
                 messages.append({"role": "user", "content": f"{who}: {txt}"})
-        body = {"model": model, "messages": messages, "stream": False,
-                "keep_alive": bot.get("ollama_keep_alive", 0),
+        return system, messages
+
+    async def _bot_ollama(self, bot: dict, hist: list) -> str:
+        """Entscheidung + Antwort des KI-Funkers. Provider laut voice.bot.provider
+        (ollama = lokal/eigener Server, gemini = Google-Cloud). Das Modell darf mit
+        SKIP schweigen. Liefert "" wenn der Bot nicht antworten soll."""
+        system, messages = self._bot_build_prompt(bot, hist)
+        provider = (bot.get("provider") or "ollama").strip().lower()
+        if provider == "gemini":
+            raw = await self._llm_gemini(bot, system, messages)
+        else:
+            raw = await self._llm_ollama(bot, system, messages)
+        if not raw:
+            return ""
+        # <think>…</think> entfernen (Reasoning-Modelle wie qwen3 geben es aus)
+        ans = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip().strip('"')
+        if not ans or ans.upper().startswith("SKIP"):
+            return ""   # nicht gemeint / nichts zu sagen
+        return ans
+
+    async def _llm_ollama(self, bot: dict, system: str, messages: list) -> str:
+        """Chat-Aufruf an einen Ollama-Server. Liefert rohen Antworttext ("" bei Fehler)."""
+        ar    = self.cfg.get("voice", {}).get("auto_reply", {})
+        url   = (bot.get("ollama_url") or ar.get("ollama_url")
+                 or "http://192.0.0.17:11434").rstrip("/")
+        model = bot.get("ollama_model") or "qwen3:14b"
+        body = {"model": model,
+                "messages": [{"role": "system", "content": system}] + messages,
+                "stream": False, "keep_alive": bot.get("ollama_keep_alive", 0),
                 "options": {"num_predict": 150, "temperature": 0.6}}
         if "qwen3" in model.lower() or "deepseek-r1" in model.lower():
             body["think"] = False   # Thinking-Modelle: Grübel-Block abschalten
@@ -1415,12 +1438,43 @@ class TXServer:
         except Exception as e:
             log.warning("KI-Funker: Ollama nicht erreichbar (%s): %s", url, e)
             return ""
-        ans = (data.get("message", {}).get("content") or "").strip()
-        # <think>…</think> entfernen (Reasoning-Modelle wie qwen3 geben es aus)
-        ans = re.sub(r"<think>.*?</think>", "", ans, flags=re.S).strip().strip('"')
-        if not ans or ans.upper().startswith("SKIP"):
-            return ""   # nicht gemeint / nichts zu sagen
-        return ans
+        return (data.get("message", {}).get("content") or "").strip()
+
+    async def _llm_gemini(self, bot: dict, system: str, messages: list) -> str:
+        """Chat-Aufruf an Google Gemini (generateContent). Liefert rohen
+        Antworttext ("" bei Fehler). Websuche/Grounding braucht bezahltes
+        Kontingent und ist daher hier nicht aktiviert."""
+        key = (bot.get("gemini_api_key") or "").strip()
+        if not key:
+            log.warning("KI-Funker: Gemini gewählt, aber kein gemini_api_key gesetzt")
+            return ""
+        model = bot.get("gemini_model") or "gemini-flash-lite-latest"
+        contents = [{"role": "model" if m["role"] == "assistant" else "user",
+                     "parts": [{"text": m["content"]}]} for m in messages]
+        body = {"systemInstruction": {"parts": [{"text": system}]},
+                "contents": contents,
+                "generationConfig": {"temperature": 0.6, "maxOutputTokens": 200}}
+        url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{model}:generateContent")
+        try:
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(url, json=body,
+                                     headers={"x-goog-api-key": key}) as resp:
+                    data = await resp.json()
+                    if resp.status != 200:
+                        msg = (data.get("error", {}) or {}).get("message", "")
+                        log.warning("KI-Funker Gemini HTTP %d: %s",
+                                    resp.status, str(msg)[:140])
+                        return ""
+        except Exception as e:
+            log.warning("KI-Funker: Gemini nicht erreichbar: %s", e)
+            return ""
+        cands = data.get("candidates") or []
+        if not cands:
+            return ""
+        parts = (cands[0].get("content", {}) or {}).get("parts", []) or []
+        return "".join(p.get("text", "") for p in parts).strip()
 
     async def handle_voice_auto_reply(self, request):
         """GET: Automatik-Status; POST {enabled}: ein/aus (persistiert)."""
@@ -1746,9 +1800,14 @@ class TXServer:
 
             if "enabled" in body:
                 bot["enabled"] = bool(body["enabled"])
-            for key in ("name", "persona", "ollama_url", "ollama_model"):
+            for key in ("name", "persona", "ollama_url", "ollama_model",
+                        "provider", "gemini_model"):
                 if key in body and isinstance(body[key], str):
                     bot[key] = body[key].strip()
+            if "gemini_api_key" in body and isinstance(body["gemini_api_key"], str):
+                k = body["gemini_api_key"].strip()
+                if k != self._TOKEN_MASK:   # Maske = unverändert lassen
+                    bot["gemini_api_key"] = k
             if "speaker" in body and isinstance(body["speaker"], str):
                 # Sprecher-IDs sind strikt [a-z0-9_-]: Tippfehler wie
                 # "Aaron,dreschner" leise reparieren statt spaeter TTS-400
@@ -1797,8 +1856,9 @@ class TXServer:
 
         out = dict(self._BOT_DEFAULTS)
         out.update({k: v for k, v in bot.items() if not k.startswith("_")})
-        # Token nie im Klartext ausliefern — nur "gesetzt/nicht gesetzt"
-        out["ollama_token"] = self._TOKEN_MASK if bot.get("ollama_token") else ""
+        # Geheimnisse nie im Klartext ausliefern — nur "gesetzt/nicht gesetzt"
+        out["ollama_token"]   = self._TOKEN_MASK if bot.get("ollama_token") else ""
+        out["gemini_api_key"] = self._TOKEN_MASK if bot.get("gemini_api_key") else ""
         return web.json_response(out)
 
     async def handle_admin_bot_test(self, request):
