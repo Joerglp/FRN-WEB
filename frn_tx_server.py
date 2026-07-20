@@ -1258,6 +1258,16 @@ class TXServer:
         # Passwort-Proxy steht (Basic-Auth, Benutzer "frn"). Leer = ohne.
         "ollama_token": "",
         "rooms": [],
+        # Sprachsteuerung über Funk: "<Name> aus" macht stumm, "<Name> start"
+        # weckt wieder. Greift auch bei deaktiviertem Bot (sonst kein Wecken).
+        "control": {
+            "enabled": True,
+            "off": ["aus", "sendepause", "schlafen", "ruhe", "funkstille"],
+            "on":  ["start", "an", "aufwachen", "wach auf", "weiter"],
+            "confirm": True,
+            "reply_off": "Alles klar, ich halt mich raus. Meldet euch, wenn ihr mich braucht.",
+            "reply_on":  "Bin wieder da. Was gibt es?",
+        },
     }
 
     # Allgemeine Anrufe, auf die der Bot auch ohne Namensnennung reagiert
@@ -1296,6 +1306,66 @@ class TXServer:
             return self._bot_cfg().get("name") or "Robert"
         return callsign
 
+    def _bot_command(self, bot: dict, name: str, low: str) -> str | None:
+        """Erkennt Sprach-Steuerbefehle: '<Name> aus' → 'off', '<Name> start'
+        → 'on'. Name und Kommandowort müssen nah beieinander stehen (gegen
+        Fehlauslöser in normalen Sätzen). None = kein Kommando."""
+        ctl = bot.get("control") or {}
+        if not ctl.get("enabled", True):
+            return None
+        nm = re.escape((name or "robert").lower())
+        if not re.search(rf"\b{nm}\b", low):
+            return None
+
+        def _hit(words) -> bool:
+            for w in words:
+                w = re.escape((w or "").strip().lower())
+                if not w:
+                    continue
+                # Name … Kommandowort ODER Kommandowort … Name, max ~18 Zeichen
+                if re.search(rf"\b{nm}\b.{{0,18}}?\b{w}\b", low) or \
+                   re.search(rf"\b{w}\b.{{0,18}}?\b{nm}\b", low):
+                    return True
+            return False
+
+        if _hit(ctl.get("off", [])):
+            return "off"
+        if _hit(ctl.get("on", [])):
+            return "on"
+        return None
+
+    def _bot_set_enabled(self, value: bool):
+        """Bot ein-/ausschalten und in config.json persistieren (überlebt
+        Neustart)."""
+        self.cfg.setdefault("voice", {}).setdefault("bot", {})["enabled"] = bool(value)
+        try:
+            if self.args.config:
+                p = Path(self.args.config)
+                disk = json.loads(p.read_text(encoding="utf-8"))
+                disk.setdefault("voice", {}).setdefault(
+                    "bot", {})["enabled"] = bool(value)
+                p.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                             encoding="utf-8")
+        except Exception as e:
+            log.warning("KI-Funker enabled-Persistenz fehlgeschlagen: %s", e)
+
+    async def _bot_apply_command(self, room: "FRNTXRoom", room_name: str,
+                                 bot: dict, cmd: str):
+        """Schaltet den Bot per Funkbefehl und quittiert per Stimme."""
+        turn_on = (cmd == "on")
+        self._bot_set_enabled(turn_on)
+        log.info("[%s] KI-Funker per Funk %s", room_name,
+                 "geweckt" if turn_on else "stummgeschaltet")
+        ctl = bot.get("control") or {}
+        if ctl.get("confirm", True):
+            txt = (ctl.get("reply_on") if turn_on else ctl.get("reply_off")) or ""
+            if txt:
+                try:
+                    await self._auto_send_voice(
+                        room, txt, bot.get("speaker") or "default")
+                except Exception as e:
+                    log.warning("[%s] Steuerungs-Quittung: %s", room_name, e)
+
     def _bot_observe(self, room: "FRNTXRoom", room_name: str, callsign: str,
                      text: str, ts: float, low: str):
         """Verlauf pflegen und entscheiden, ob der KI-Funker antworten soll.
@@ -1310,7 +1380,18 @@ class TXServer:
         hist.append((ts, f"{name} (du)" if own else (callsign or "Funker"),
                      text))
         del hist[:-max(4, int(bot.get("history_len", 10)))]
-        if own or not bot.get("enabled"):
+        if own:
+            return
+        # Sprachsteuerung: greift AUCH bei deaktiviertem Bot (sonst kein Wecken).
+        # No-Op (schon im Zielzustand) fällt durch zur normalen Antwort-Logik.
+        cmd = self._bot_command(bot, name, low)
+        if cmd == "off" and bot.get("enabled"):
+            asyncio.create_task(self._bot_apply_command(room, room_name, bot, "off"))
+            return
+        if cmd == "on" and not bot.get("enabled"):
+            asyncio.create_task(self._bot_apply_command(room, room_name, bot, "on"))
+            return
+        if not bot.get("enabled"):
             return
         rooms = bot.get("rooms") or []
         if rooms and room_name not in rooms:
