@@ -8,18 +8,18 @@
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg:        #070a07;
-    --bg2:       #0d130d;
-    --bg3:       #111811;
+    --bg:        #121c12;
+    --bg2:       #1b291b;
+    --bg3:       #243624;
     --green:     #39ff14;
-    --green-dim: #1a7a05;
+    --green-dim: #2ea00a;
     --green-glow:#39ff1440;
     --amber:     #ffb700;
     --amber-dim: #7a5500;
-    --text:      #a8d8a8;
-    --text-dim:  #4a7a4a;
-    --border:    #1e3a1e;
-    --scan:      rgba(0,0,0,0.04);
+    --text:      #dcf6dc;
+    --text-dim:  #96c296;
+    --border:    #3a6a3a;
+    --scan:      rgba(0,0,0,0.02);
     --red:       #ff3333;
   }
 
@@ -55,7 +55,7 @@
     content: '';
     position: fixed;
     inset: 0;
-    background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.7) 100%);
+    background: radial-gradient(ellipse at center, transparent 85%, rgba(0,0,0,0.16) 100%);
     pointer-events: none;
     z-index: 9998;
   }
@@ -320,7 +320,7 @@
     flex: 1;
     min-width: 180px;
     max-width: 340px;
-    filter: invert(1) hue-rotate(90deg) brightness(0.7) sepia(1) saturate(3);
+    filter: invert(1) hue-rotate(90deg) brightness(0.92) sepia(1) saturate(3);
     opacity: 0.85;
   }
   .msg audio:hover { opacity: 1; }
@@ -397,7 +397,7 @@
       linear-gradient(var(--border) 1px, transparent 1px),
       linear-gradient(90deg, var(--border) 1px, transparent 1px);
     background-size: 40px 40px;
-    opacity: 0.25;
+    opacity: 0.11;
     pointer-events: none;
     z-index: 0;
   }
