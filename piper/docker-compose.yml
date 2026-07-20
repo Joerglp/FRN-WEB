@@ -1,0 +1,11 @@
+services:
+  frn-piper:
+    build: .
+    container_name: frn-piper
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9003:9003"   # nur lokal — der TX-Server läuft auf demselben Pi
+    volumes:
+      - ./models:/models:ro
+    environment:
+      PIPER_EMOTION: amused

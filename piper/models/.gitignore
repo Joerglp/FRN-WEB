@@ -1,0 +1,3 @@
+# Modelle nicht versionieren (zu groß) — via download-thorsten.sh holen
+*.onnx
+*.onnx.json

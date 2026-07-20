@@ -238,6 +238,8 @@ In `config/config.json`:
 
 Wandelt Text in gesprochenes Audio um und sendet es in den Funk — entweder mit einer der eingebauten Studio-Stimmen oder mit einer aus einem kurzen Referenz-Sample geklonten Stimme. Engine: [Coqui XTTS-v2](https://github.com/idiap/coqui-ai-TTS). `voice_server.py` läuft als eigenständiger Dienst (Port 9002) und wird über `voice.remote_url` angesprochen.
 
+> **Schnelle CPU-Alternative:** Wer keine GPU hat oder Tempo braucht, nutzt statt XTTS den **Piper**-Dienst (`piper/`, Port 9003) — dieselbe Schnittstelle, ~1 s pro Satz auf einem Raspberry Pi, dafür eine feste (nicht geklonte) Stimme. Siehe [`piper/README.md`](piper/README.md).
+
 ### Installation (nativ)
 
 Die Abhängigkeiten sind heikel — diese **Versionen sind aufeinander abgestimmt**, neuere brechen XTTS:
