@@ -1967,6 +1967,53 @@ class TXServer:
             "answer": answer or "SKIP",
             "seconds": round(time.time() - t0, 1)})
 
+    async def handle_admin_tts(self, request):
+        """GET: aktive TTS-Engine + URLs; POST {engine: piper|xtts}: umschalten.
+
+        Schaltet voice.remote_url zwischen dem lokalen Piper-Dienst und dem
+        XTTS-Voice-Clone (GPU-Box) um. Gilt für alle Sprachausgabe-Funktionen.
+        """
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        v = self.cfg.setdefault("voice", {})
+        piper = (v.get("piper_url") or "http://127.0.0.1:9003/tts").strip()
+        xtts  = (v.get("xtts_url") or v.get("_remote_url_xtts_backup")
+                 or "http://192.0.0.17:9002/tts").strip()
+
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+            engine = (body.get("engine") or "").strip().lower()
+            if engine not in ("piper", "xtts"):
+                return web.json_response(
+                    {"error": "engine muss 'piper' oder 'xtts' sein"}, status=400)
+            url = piper if engine == "piper" else xtts
+            v.update({"remote_url": url, "tts_engine": engine,
+                      "piper_url": piper, "xtts_url": xtts})
+            try:
+                cfg_path = Path(self.args.config)
+                disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+                dv = disk.setdefault("voice", {})
+                dv.update({"remote_url": url, "tts_engine": engine,
+                           "piper_url": piper, "xtts_url": xtts})
+                cfg_path.write_text(
+                    json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+            except Exception as e:
+                return web.json_response(
+                    {"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
+            log.info("Sprachausgabe umgestellt auf %s (%s)", engine, url)
+
+        engine = v.get("tts_engine")
+        if not engine:   # aus aktiver URL ableiten
+            cur = (v.get("remote_url") or "").strip()
+            engine = "xtts" if cur == xtts else "piper"
+        return web.json_response({"engine": engine,
+                                  "piper_url": piper, "xtts_url": xtts})
+
     async def _disconnect_user_tx(self, email: str):
         """Trennt alle persistenten User-TX-Verbindungen für eine E-Mail-Adresse."""
         to_del = [k for k in self._user_tx_conns if k[0] == email]
@@ -3759,6 +3806,8 @@ class TXServer:
         app.router.add_get ("/api/admin/bot",       self.handle_admin_bot)
         app.router.add_post("/api/admin/bot",       self.handle_admin_bot)
         app.router.add_post("/api/admin/bot/test",  self.handle_admin_bot_test)
+        app.router.add_get ("/api/admin/tts",       self.handle_admin_tts)
+        app.router.add_post("/api/admin/tts",       self.handle_admin_tts)
 
         return app
 

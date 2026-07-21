@@ -1399,11 +1399,18 @@ audio {
       </div>
 
       <div class="form-grid" style="margin-top:8px">
+        <div class="form-field" style="flex:0 0 220px">
+          <label>Sprachausgabe (TTS) <span style="color:var(--muted)">— gilt für alle Stimm-Funktionen</span></label>
+          <select id="tts-engine" onchange="saveTts()">
+            <option value="piper">Piper (lokal, schnell)</option>
+            <option value="xtts">XTTS (GPU-Box, geklont)</option>
+          </select>
+        </div>
         <div class="form-field" style="flex:2">
-          <label>Stimme (Sprecher-ID, z.B. eingebaute: damien_black, aaron_dreschner, wulf_carlevaro)</label>
+          <label>Stimme / Emotion <span style="color:var(--muted)">(XTTS: Sprecher-ID wie aaron_dreschner · Piper: Emotion wie amused)</span></label>
           <input type="text" id="bot-speaker" placeholder="damien_black">
         </div>
-        <div class="form-field" style="flex:0 0 130px">
+        <div class="form-field" style="flex:0 0 110px">
           <label>Cooldown (Sek.)</label>
           <input type="number" id="bot-cooldown" min="0" max="3600" placeholder="20">
         </div>
@@ -3604,9 +3611,34 @@ async function loadBotAdmin() {
     document.getElementById("bot-gemini-model").value = d.gemini_model || "";
     document.getElementById("bot-gemini-key").value   = d.gemini_api_key || "";
     updateBotProvider();
+    loadTts();            // TTS-Engine-Dropdown
     loadOllamaModels();   // füllt die geteilte Modell-Datalist
   } catch(e) {
     showMsg("msg-bot", "Fehler beim Laden: " + e, "error");
+  }
+}
+
+async function loadTts() {
+  try {
+    const r = await adminFetch("/api/admin/tts");
+    const d = await r.json();
+    document.getElementById("tts-engine").value = d.engine || "piper";
+  } catch(e) { /* still */ }
+}
+
+async function saveTts() {
+  const engine = document.getElementById("tts-engine").value;
+  try {
+    const r = await adminFetch("/api/admin/tts", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ engine }),
+    });
+    const d = await r.json();
+    if (d.error) { showMsg("msg-bot", "Fehler: " + d.error, "error"); return; }
+    showMsg("msg-bot", "Sprachausgabe: " + (engine === "piper" ? "Piper (lokal)" : "XTTS (GPU-Box)"), "ok");
+  } catch(e) {
+    showMsg("msg-bot", "Fehler: " + e, "error");
   }
 }
 
