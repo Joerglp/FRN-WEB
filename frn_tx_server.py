@@ -1475,23 +1475,24 @@ class TXServer:
                 messages.append({"role": "user", "content": f"{who}: {txt}"})
         return system, messages
 
-    async def _bot_ollama(self, bot: dict, hist: list) -> str:
+    async def _bot_ollama(self, bot: dict, hist: list, with_raw: bool = False):
         """Entscheidung + Antwort des KI-Funkers. Provider laut voice.bot.provider
         (ollama = lokal/eigener Server, gemini = Google-Cloud). Das Modell darf mit
-        SKIP schweigen. Liefert "" wenn der Bot nicht antworten soll."""
+        SKIP schweigen. Liefert "" wenn der Bot nicht antworten soll.
+        with_raw=True → (verarbeitete Antwort, roher Modell-Output) für den Test."""
         system, messages = self._bot_build_prompt(bot, hist)
         provider = (bot.get("provider") or "ollama").strip().lower()
         if provider == "gemini":
             raw = await self._llm_gemini(bot, system, messages)
         else:
             raw = await self._llm_ollama(bot, system, messages)
-        if not raw:
-            return ""
-        # <think>…</think> entfernen (Reasoning-Modelle wie qwen3 geben es aus)
-        ans = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip().strip('"')
-        if not ans or ans.upper().startswith("SKIP"):
-            return ""   # nicht gemeint / nichts zu sagen
-        return ans
+        ans = ""
+        if raw:
+            # <think>…</think> entfernen (Reasoning-Modelle wie qwen3 geben es aus)
+            cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip().strip('"')
+            if cleaned and not cleaned.upper().startswith("SKIP"):
+                ans = cleaned   # sonst: nicht gemeint / nichts zu sagen
+        return (ans, raw or "") if with_raw else ans
 
     async def _llm_ollama(self, bot: dict, system: str, messages: list) -> str:
         """Chat-Aufruf an einen Ollama-Server. Liefert rohen Antworttext ("" bei Fehler)."""
@@ -1964,11 +1965,39 @@ class TXServer:
         hist      = list(self._room_hist.get(room_name, []))
         hist.append((time.time(), body.get("from") or "Testfunker", text))
         t0 = time.time()
-        answer = await self._bot_ollama(bot, hist)
+        answer, raw = await self._bot_ollama(bot, hist, with_raw=True)
         return web.json_response({
             "would_reply": bool(answer),
             "answer": answer or "SKIP",
+            "raw": raw,
             "seconds": round(time.time() - t0, 1)})
+
+    async def handle_admin_gemini_models(self, request):
+        """Verfügbare Gemini-Modell-IDs (Text-Chat) für das Dropdown.
+        Verhindert, dass versehentlich ein Anzeigename statt der API-ID
+        eingetragen wird."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        key = (self._bot_cfg().get("gemini_api_key") or "").strip()
+        if not key:
+            return web.json_response({"models": [], "error": "kein API-Key"})
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    headers={"x-goog-api-key": key}) as resp:
+                    data = await resp.json()
+            skip = ("tts", "image", "embedding", "aqa", "vision")
+            models = sorted(
+                m["name"].replace("models/", "")
+                for m in data.get("models", [])
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+                and not any(s in m["name"].lower() for s in skip))
+            return web.json_response({"models": models})
+        except Exception as e:
+            return web.json_response({"models": [], "error": str(e)})
 
     async def handle_admin_tts(self, request):
         """GET: aktive TTS-Engine + URLs; POST {engine: piper|xtts}: umschalten.
@@ -3811,6 +3840,7 @@ class TXServer:
         app.router.add_post("/api/admin/bot/test",  self.handle_admin_bot_test)
         app.router.add_get ("/api/admin/tts",       self.handle_admin_tts)
         app.router.add_post("/api/admin/tts",       self.handle_admin_tts)
+        app.router.add_get ("/api/admin/gemini-models", self.handle_admin_gemini_models)
 
         return app
 

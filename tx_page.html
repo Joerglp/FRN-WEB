@@ -1472,8 +1472,9 @@ audio {
       <div class="prov-gemini">
         <div class="form-grid" style="margin-top:8px">
           <div class="form-field" style="flex:2">
-            <label>Gemini-Modell</label>
-            <input type="text" id="bot-gemini-model" placeholder="gemini-flash-lite-latest">
+            <label>Gemini-Modell <span style="color:var(--muted)">(technische ID, nicht der Anzeigename!)</span></label>
+            <input type="text" id="bot-gemini-model" list="gemini-model-list" placeholder="gemini-flash-lite-latest">
+            <datalist id="gemini-model-list"></datalist>
           </div>
           <div class="form-field" style="flex:2">
             <label>Gemini API-Key <span style="color:var(--muted)">(aistudio.google.com/apikey)</span></label>
@@ -3626,12 +3627,22 @@ async function loadBotAdmin() {
     document.getElementById("bot-ollama-token").value = d.ollama_token || "";
     document.getElementById("bot-gemini-model").value = d.gemini_model || "";
     document.getElementById("bot-gemini-key").value   = d.gemini_api_key || "";
+    loadGeminiModels();   // Datalist mit echten Modell-IDs füllen
     updateBotProvider();
     loadTts();            // TTS-Engine-Dropdown
     loadOllamaModels();   // füllt die geteilte Modell-Datalist
   } catch(e) {
     showMsg("msg-bot", "Fehler beim Laden: " + e, "error");
   }
+}
+
+async function loadGeminiModels() {
+  try {
+    const r = await adminFetch("/api/admin/gemini-models");
+    const d = await r.json();
+    document.getElementById("gemini-model-list").innerHTML =
+      (d.models || []).map(m => `<option value="${esc(m)}">`).join("");
+  } catch(e) { /* still */ }
 }
 
 async function loadTts() {
@@ -3705,11 +3716,20 @@ async function testBot() {
       body: JSON.stringify({ text }),
     });
     const d = await r.json();
-    if (d.error) out.textContent = "Fehler: " + d.error;
-    else if (!d.would_reply)
-      out.innerHTML = `🤐 Bot fühlt sich nicht angesprochen (SKIP) <span style="color:var(--muted)">(${d.seconds}s)</span>`;
-    else out.innerHTML =
-      `🤖 „${esc(d.answer)}" <span style="color:var(--muted)">(${d.seconds}s)</span>`;
+    if (d.error) { out.textContent = "Fehler: " + d.error; }
+    else {
+      const head = d.would_reply
+        ? `🤖 „${esc(d.answer)}" <span style="color:var(--muted)">(${d.seconds}s)</span>`
+        : `🤐 Bot fühlt sich nicht angesprochen (SKIP) <span style="color:var(--muted)">(${d.seconds}s)</span>`;
+      // Roh-Ausgabe des Modells (vor SKIP-Auswertung / think-Filter) mit anzeigen
+      const raw = (d.raw || "").trim();
+      const rawBlock = raw
+        ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:.75rem;color:var(--muted)">Roh-Ausgabe des Modells</summary>
+             <pre style="white-space:pre-wrap;word-break:break-word;font-size:.75rem;margin:6px 0 0;padding:8px;
+                  background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">${esc(raw)}</pre></details>`
+        : "";
+      out.innerHTML = head + rawBlock;
+    }
   } catch(e) {
     out.textContent = "Fehler: " + e;
   } finally {
