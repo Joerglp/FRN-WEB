@@ -24,6 +24,7 @@ import os
 import re
 import secrets
 import struct
+import subprocess
 import time
 from pathlib import Path
 
@@ -1999,6 +2000,61 @@ class TXServer:
         except Exception as e:
             return web.json_response({"models": [], "error": str(e)})
 
+    _CROSSLINK_MASK = "••••••••"
+
+    async def handle_admin_crosslink(self, request):
+        """GET/POST fuer die Raum-Crosslink-Bruecke (frn_crosslink.py als
+        eigener systemd-Dienst frn-crosslink.service). Diese App laeuft als
+        root, daher kein Sudoers-Umweg noetig fuer systemctl."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        cl = self.cfg.setdefault("crosslink", {})
+
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+            for key in ("email", "callsign", "room_a", "room_b"):
+                if key in body and isinstance(body[key], str):
+                    cl[key] = body[key].strip()
+            if "password" in body and isinstance(body["password"], str):
+                pw = body["password"].strip()
+                if pw != self._CROSSLINK_MASK:
+                    cl["password"] = pw
+            if "enabled" in body:
+                cl["enabled"] = bool(body["enabled"])
+            try:
+                cfg_path = Path(self.args.config)
+                disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+                disk.setdefault("crosslink", {}).update(
+                    {k: v for k, v in cl.items() if not k.startswith("_")})
+                cfg_path.write_text(
+                    json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+            except Exception as e:
+                return web.json_response(
+                    {"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
+            # Dienst passend zum enabled-Flag schalten
+            try:
+                if cl.get("enabled"):
+                    subprocess.run(["systemctl", "enable", "--now", "frn-crosslink"],
+                                   capture_output=True, timeout=15)
+                else:
+                    subprocess.run(["systemctl", "disable", "--now", "frn-crosslink"],
+                                   capture_output=True, timeout=15)
+            except Exception as e:
+                log.warning("Crosslink-Dienst konnte nicht umgeschaltet werden: %s", e)
+
+        r = subprocess.run(["systemctl", "is-active", "frn-crosslink"],
+                          capture_output=True, text=True, timeout=10)
+        active = r.stdout.strip() == "active"
+        out = dict(cl)
+        out["password"] = self._CROSSLINK_MASK if cl.get("password") else ""
+        out["active"] = active
+        return web.json_response(out)
+
     async def handle_admin_tts(self, request):
         """GET: aktive TTS-Engine + URLs; POST {engine: piper|xtts}: umschalten.
 
@@ -3840,6 +3896,8 @@ class TXServer:
         app.router.add_post("/api/admin/bot/test",  self.handle_admin_bot_test)
         app.router.add_get ("/api/admin/tts",       self.handle_admin_tts)
         app.router.add_post("/api/admin/tts",       self.handle_admin_tts)
+        app.router.add_get ("/api/admin/crosslink", self.handle_admin_crosslink)
+        app.router.add_post("/api/admin/crosslink", self.handle_admin_crosslink)
         app.router.add_get ("/api/admin/gemini-models", self.handle_admin_gemini_models)
 
         return app

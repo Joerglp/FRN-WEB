@@ -1076,6 +1076,7 @@ audio {
       <button class="admin-tab" data-tab="server"    onclick="showAdminTab('server')">SERVER</button>
       <button class="admin-tab" data-tab="autoreply" onclick="showAdminTab('autoreply')">AUTOMATIK</button>
       <button class="admin-tab" data-tab="bot"       onclick="showAdminTab('bot')">KI-FUNKER</button>
+      <button class="admin-tab" data-tab="crosslink" onclick="showAdminTab('crosslink')">CROSSLINK</button>
     </div>
 
     <!-- ── Übersicht tab ── -->
@@ -1507,6 +1508,54 @@ audio {
       </div>
       <div id="bot-test-result" style="margin-top:10px;font-size:.85rem;display:none;
            padding:8px 10px;border:1px solid var(--border);border-radius:6px"></div>
+    </div>
+
+    <!-- ── Crosslink tab ── -->
+    <div id="admin-tab-crosslink" class="admin-tab-content">
+      <div class="admin-section-title">Raum-Crosslink</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:14px;line-height:1.5">
+        Verbindet zwei FRN-Räume dauerhaft — wer in Raum A spricht, wird auch in Raum B gehört
+        und umgekehrt. Läuft als eigener Dienst, braucht eine <b>eigene</b> FRN-Kennung
+        (nicht die der Stream-/WebTX-Verbindungen, sonst Kontokollision).
+      </div>
+
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer">
+        <input type="checkbox" id="cl-enabled">
+        Crosslink aktiv
+        <span id="cl-active-badge" style="font-size:.72rem;padding:2px 8px;border-radius:4px;margin-left:6px"></span>
+      </label>
+
+      <div class="form-grid">
+        <div class="form-field" style="flex:1">
+          <label>Raum A</label>
+          <input type="text" id="cl-room-a" placeholder="Eickelborn-CH74">
+        </div>
+        <div class="form-field" style="flex:1">
+          <label>Raum B</label>
+          <input type="text" id="cl-room-b" placeholder="Eickelborn-Freenet">
+        </div>
+      </div>
+      <div class="form-grid" style="margin-top:8px">
+        <div class="form-field" style="flex:1">
+          <label>Rufzeichen (Anzeige in beiden Räumen)</label>
+          <input type="text" id="cl-callsign" placeholder="Crosslink">
+        </div>
+      </div>
+      <div class="form-grid" style="margin-top:8px">
+        <div class="form-field" style="flex:2">
+          <label>FRN-E-Mail (eigene Kennung für den Crosslink)</label>
+          <input type="text" id="cl-email" placeholder="crosslink@deine-domain.de">
+        </div>
+        <div class="form-field" style="flex:2">
+          <label>FRN-Passwort</label>
+          <input type="password" id="cl-password" autocomplete="new-password" placeholder="leer = unverändert">
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <button class="btn-save" onclick="saveCrosslink()">SPEICHERN</button>
+      </div>
+      <div class="admin-msg" id="msg-crosslink"></div>
     </div>
 
   </div>
@@ -3174,6 +3223,7 @@ function showAdminTab(name) {
     if (name === "server")    loadServerTab();
     if (name === "autoreply") loadAutoReplyAdmin();
     if (name === "bot")       loadBotAdmin();
+    if (name === "crosslink") loadCrosslink();
   }
 }
 
@@ -3734,6 +3784,50 @@ async function testBot() {
     out.textContent = "Fehler: " + e;
   } finally {
     btn.disabled = false;
+  }
+}
+
+// ── Crosslink ────────────────────────────────────────────────────────────────
+async function loadCrosslink() {
+  try {
+    const r = await adminFetch("/api/admin/crosslink");
+    const d = await r.json();
+    document.getElementById("cl-enabled").checked = !!d.enabled;
+    document.getElementById("cl-room-a").value     = d.room_a || "";
+    document.getElementById("cl-room-b").value     = d.room_b || "";
+    document.getElementById("cl-callsign").value   = d.callsign || "";
+    document.getElementById("cl-email").value      = d.email || "";
+    document.getElementById("cl-password").value   = d.password || "";
+    const badge = document.getElementById("cl-active-badge");
+    badge.textContent = d.active ? "läuft" : "gestoppt";
+    badge.style.background = d.active ? "#1a7a05" : "#3a3a3a";
+    badge.style.color = d.active ? "#eafff0" : "#bbb";
+  } catch(e) {
+    showMsg("msg-crosslink", "Fehler beim Laden: " + e, "error");
+  }
+}
+
+async function saveCrosslink() {
+  const body = {
+    enabled:  document.getElementById("cl-enabled").checked,
+    room_a:   document.getElementById("cl-room-a").value,
+    room_b:   document.getElementById("cl-room-b").value,
+    callsign: document.getElementById("cl-callsign").value,
+    email:    document.getElementById("cl-email").value,
+    password: document.getElementById("cl-password").value,
+  };
+  try {
+    const r = await adminFetch("/api/admin/crosslink", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (d.error) { showMsg("msg-crosslink", "Fehler: " + d.error, "error"); return; }
+    showMsg("msg-crosslink", "Gespeichert. Dienst: " + (d.active ? "läuft" : "gestoppt"), "ok");
+    loadCrosslink();
+  } catch(e) {
+    showMsg("msg-crosslink", "Fehler: " + e, "error");
   }
 }
 
