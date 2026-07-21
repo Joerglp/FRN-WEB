@@ -1882,7 +1882,7 @@ class TXServer:
             if "enabled" in body:
                 bot["enabled"] = bool(body["enabled"])
             for key in ("name", "persona", "ollama_url", "ollama_model",
-                        "provider", "gemini_model"):
+                        "provider", "gemini_model", "system_prompt"):
                 if key in body and isinstance(body[key], str):
                     bot[key] = body[key].strip()
             if "gemini_api_key" in body and isinstance(body["gemini_api_key"], str):
@@ -1940,6 +1940,9 @@ class TXServer:
         # Geheimnisse nie im Klartext ausliefern — nur "gesetzt/nicht gesetzt"
         out["ollama_token"]   = self._TOKEN_MASK if bot.get("ollama_token") else ""
         out["gemini_api_key"] = self._TOKEN_MASK if bot.get("gemini_api_key") else ""
+        # Leere System-Anweisung → Standardvorlage anzeigen (zum Anpassen)
+        if not (out.get("system_prompt") or "").strip():
+            out["system_prompt"] = self._BOT_SYSTEM_DEFAULT
         return web.json_response(out)
 
     async def handle_admin_bot_test(self, request):

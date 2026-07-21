@@ -1398,6 +1398,21 @@ audio {
           border-radius:6px;padding:8px 10px;font-family:inherit;font-size:.85em"></textarea>
       </div>
 
+      <details style="margin-top:8px">
+        <summary style="cursor:pointer;font-size:.82rem;color:var(--accent);padding:4px 0">
+          ⚙ System-Anweisung (für Fortgeschrittene) — steuert Roberts komplettes Verhalten
+        </summary>
+        <div class="form-field" style="margin-top:6px">
+          <label>Anweisung fürs Modell — Platzhalter <code>{name}</code> und <code>{persona}</code> werden eingesetzt. Leer = Standard.</label>
+          <textarea id="bot-system-prompt" rows="12" style="width:100%;resize:vertical;
+            background:var(--panel);color:var(--text);border:1px solid var(--border);
+            border-radius:6px;padding:8px 10px;font-family:'Share Tech Mono',monospace;font-size:.8em;line-height:1.5"></textarea>
+          <div style="font-size:.72rem;color:var(--muted);margin-top:4px;line-height:1.4">
+            ⚠ Die Zeile mit dem Wort <b>SKIP</b> nicht entfernen — sonst funkt Robert in jeden Durchgang, statt nur wenn er gemeint ist.
+          </div>
+        </div>
+      </details>
+
       <div class="form-grid" style="margin-top:8px">
         <div class="form-field" style="flex:0 0 220px">
           <label>Sprachausgabe (TTS) <span style="color:var(--muted)">— gilt für alle Stimm-Funktionen</span></label>
@@ -3599,6 +3614,7 @@ async function loadBotAdmin() {
     document.getElementById("bot-name").value      = d.name || "";
     document.getElementById("bot-trigger").value   = (d.trigger || []).join(", ");
     document.getElementById("bot-persona").value   = d.persona || "";
+    document.getElementById("bot-system-prompt").value = d.system_prompt || "";
     document.getElementById("bot-speaker").value   = d.speaker || "";
     document.getElementById("bot-cooldown").value  = d.cooldown_s ?? 20;
     document.getElementById("bot-convwin").value   = d.conversation_window_s ?? 180;
@@ -3648,6 +3664,7 @@ async function saveBotAdmin() {
     name:                  document.getElementById("bot-name").value,
     trigger:               document.getElementById("bot-trigger").value,
     persona:               document.getElementById("bot-persona").value,
+    system_prompt:         document.getElementById("bot-system-prompt").value,
     speaker:               document.getElementById("bot-speaker").value,
     cooldown_s:            parseFloat(document.getElementById("bot-cooldown").value) || 20,
     conversation_window_s: parseFloat(document.getElementById("bot-convwin").value) || 180,
