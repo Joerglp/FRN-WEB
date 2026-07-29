@@ -454,7 +454,13 @@ class RoomRecorder:
 
     SILENCE_TIMEOUT = 4.0    # Sekunden Stille nach letztem Audio → Session beendet
     MIN_DURATION    = 1.5    # Sekunden Mindestlänge (kürzere werden verworfen)
-    MAX_DURATION    = 300.0  # Sekunden Maximallänge (erzwungener Schnitt)
+    MAX_DURATION    = 90.0   # Sekunden Maximallänge (erzwungener Schnitt) --
+                             # war 300s: bei Dämmerungs-Bandöffnungen blieb COS
+                             # oft minutenlang "an" (Rauschen/Ferndurchgang),
+                             # 5-Min-Clips blockierten Whisper (single-threaded)
+                             # am Stück und stauten die ganze Warteschlange.
+                             # 90s deckt reguläre CB-Durchsagen ab und deckelt
+                             # den Worst-Case fuer diese Stör-Ereignisse.
     SAMPLE_RATE     = 8000
     SAMPLE_WIDTH    = 2      # int16
 

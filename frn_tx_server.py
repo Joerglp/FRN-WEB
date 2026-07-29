@@ -995,16 +995,89 @@ class TXServer:
             return self._speaker_id(username)
         return "default"
 
+    _GTTS_MAX_CHARS = 180  # Sicherheitsmarge unter dem ~200-Zeichen-Limit des
+                           # inoffiziellen Google-Translate-TTS-Endpunkts
+
+    @classmethod
+    def _split_for_gtts(cls, text: str) -> list[str]:
+        """Text in Stücke <= _GTTS_MAX_CHARS teilen, bevorzugt an Satzgrenzen
+        (nur bei zu langen Einzelsätzen zusätzlich an Wortgrenzen)."""
+        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        chunks: list[str] = []
+        cur = ""
+
+        def _flush():
+            nonlocal cur
+            if cur:
+                chunks.append(cur)
+                cur = ""
+
+        for s in sentences:
+            s = s.strip()
+            if not s:
+                continue
+            if len(s) > cls._GTTS_MAX_CHARS:
+                _flush()
+                piece = ""
+                for w in s.split():
+                    if piece and len(piece) + len(w) + 1 > cls._GTTS_MAX_CHARS:
+                        chunks.append(piece)
+                        piece = w
+                    else:
+                        piece = f"{piece} {w}".strip()
+                if piece:
+                    chunks.append(piece)
+                continue
+            if cur and len(cur) + len(s) + 1 > cls._GTTS_MAX_CHARS:
+                _flush()
+            cur = f"{cur} {s}".strip()
+        _flush()
+        return chunks or [text[:cls._GTTS_MAX_CHARS]]
+
+    async def _google_tts_pcm(self, text: str, lang: str = "de") -> bytes:
+        """Sprachausgabe über den kostenlosen, inoffiziellen Google-Translate-
+        TTS-Endpunkt (derselbe Trick wie Home Assistants google_translate-
+        Plattform: kein API-Key, kein Google-Cloud-Konto). Sehr schnell
+        (~0.2-0.4s), aber: feste Google-Standardstimme statt Klon/Charakter,
+        und ein Längenlimit pro Anfrage -- längere Texte werden je Satz in
+        Stücke geteilt, einzeln geholt+dekodiert und als PCM aneinandergehängt
+        (Roh-PCM-Konkatenation ist unproblematisch, anders als MP3-Frames)."""
+        import urllib.parse
+        chunks  = self._split_for_gtts(text)
+        timeout = aiohttp.ClientTimeout(total=15)
+        pcm_parts = []
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            for chunk in chunks:
+                q   = urllib.parse.quote(chunk)
+                url = ("https://translate.google.com/translate_tts?"
+                       f"ie=UTF-8&client=tw-ob&tl={lang}&q={q}")
+                async with sess.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"Google-TTS {resp.status}")
+                    mp3_bytes = await resp.read()
+                ffm = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-i", "pipe:0",
+                    "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                pcm, _ = await ffm.communicate(input=mp3_bytes)
+                pcm_parts.append(pcm)
+        return b"".join(pcm_parts)
+
     async def _get_voice_pcm(self, text: str, lang: str = "de",
                              speaker: str = "default") -> bytes:
-        """Ruft den Voice-Clone-TTS-Dienst (XTTS) und liefert 8 kHz mono s16le PCM.
-
-        Der Dienst gibt ein WAV (24 kHz) in der Stimme des Sprechers zurück;
-        ffmpeg wandelt es auf das FRN-Format (8 kHz mono s16le) herunter.
-        """
+        """Liefert 8 kHz mono s16le PCM für die Sprachausgabe. Engine laut
+        voice.tts_engine: "google" (kostenlos, schnell, feste Stimme) oder
+        piper/xtts (eigene Stimme/Charakter, über voice.remote_url)."""
         vcfg = self.cfg.get("voice", {})
-        url  = (vcfg.get("remote_url") or "").strip()
-        if not vcfg.get("enabled", False) or not url:
+        if not vcfg.get("enabled", False):
+            raise RuntimeError("Voice-Funktion ist deaktiviert")
+        if (vcfg.get("tts_engine") or "").strip().lower() == "google":
+            return await self._google_tts_pcm(text, lang)
+        url = (vcfg.get("remote_url") or "").strip()
+        if not url:
             raise RuntimeError("Voice-Funktion ist deaktiviert")
         payload = {"text": text, "language": lang, "speaker": speaker or "default"}
         timeout = aiohttp.ClientTimeout(total=120)
@@ -1259,6 +1332,15 @@ class TXServer:
         # Passwort-Proxy steht (Basic-Auth, Benutzer "frn"). Leer = ohne.
         "ollama_token": "",
         "rooms": [],
+        # Websuche: "Robert, such mal nach ..." / "Robert, google mal ..."
+        # fragt die lokale SearXNG-Instanz ab, Treffer landen als Zusatz-
+        # Kontext im System-Prompt (siehe _bot_websearch). Kostenlos, da
+        # selbst gehostet — kein Cloud-Suchdienst mit Zusatzkosten.
+        "websearch": {
+            "enabled": False,
+            "searxng_url": "http://127.0.0.1:8075/search",
+            "max_results": 3,
+        },
         # Sprachsteuerung über Funk: "<Name> aus" macht stumm, "<Name> start"
         # weckt wieder. Greift auch bei deaktiviertem Bot (sonst kein Wecken).
         "control": {
@@ -1271,14 +1353,32 @@ class TXServer:
         },
     }
 
-    # Allgemeine Anrufe, auf die der Bot auch ohne Namensnennung reagiert
+    # Allgemeine Anrufe, auf die der Bot auch ohne Namensnennung reagiert.
+    # Begrüßungen NUR wenn erkennbar an die Runde gerichtet (an alle/zusammen/
+    # miteinander/die Runde) -- "Guten Morgen Gottfried" (an eine bestimmte
+    # Person) oder ein blankes "Guten Morgen." sollen NICHT triggern, sonst
+    # antwortet Robert auf jeden beliebigen Gruß im Kanal.
     _BOT_CALL_RE = re.compile(
         r"\bqrv\b|\bcq\b"
         r"|jemand\s+(da|dran|drauf|erreichbar|zu\s*h[öo]ren"
         r"|auf\s+dem\s+kanal|auf\s+der\s+frequenz)"
-        r"|h[öo]rt\s+(mich|da)\s+(irgend)?(je|wer)mand"
-        r"|(ist|is)\s+(da|hier)\s+(irgend)?(je|wer)mand"
-        r"|(einer|wer|keiner|niemand)\s+(da|qrv|auf\s+dem\s+kanal)")
+        r"|h[öo]rt\s+(mich|da|hier)\s+(irgend)?(jemand|einer|wer)\b"
+        r"|(ist|is)\s+(da|hier)\s+((irgend)?jemand|einer|wer)\b"
+        r"|(ist|is)\s+(einer|wer|jemand)\s+(da|hier)\b"
+        r"|(einer|wer|keiner|niemand)\s+(da|hier|qrv|auf\s+dem\s+kanal)"
+        r"|(guten\s+(morgen|tag|abend)|moin\s*moin|moin|hallo)\s+"
+        r"(an\s+alle|zusammen|alle|die\s+runde|in\s+die\s+runde|miteinander)\b")
+
+    # Auslöser für die Websuche, z.B. "Robert, such mal nach dem Wetter" oder
+    # "google mal die Höhe vom Fernsehturm". "nach" ist bei such/durchsuch/
+    # recherchier PFLICHT, um Alltagssätze wie "ich such noch meine Antenne"
+    # nicht fälschlich als Suchauftrag zu werten.
+    _BOT_SEARCH_RE = re.compile(
+        r"(?:goo?g(?:le)?|gugl\w*)\s+(?:mal\s+)?(?:bitte\s+)?(.+)"
+        r"|(?:such(?:e|st)?|durchsuch\w*|recherchier\w*)"
+        r"\s+(?:mal\s+)?(?:bitte\s+)?nach\s+(.+)"
+        r"|nach\s+(.+?)\s+(?:mal\s+)?such\w*\b",
+        re.IGNORECASE)
 
     def _bot_cfg(self) -> dict:
         return {**self._BOT_DEFAULTS,
@@ -1297,6 +1397,18 @@ class TXServer:
                 return True
         return False
 
+    def resolve_known_text(self, room: str, ts: float) -> str | None:
+        """Liefert den bereits bekannten Text einer eigenen Bot-Sendung, wenn
+        die Aufnahmezeit in ein eigenes Sendefenster fällt — spart die Re-
+        Transkription von Roberts eigener synthetisierter Stimme (siehe
+        process_wav in frn_transcription.py). Nutzt NUR den Zeitfenster-
+        Check (nicht den difflib-Textvergleich aus _bot_is_own, da hier noch
+        kein Transkript vorliegt, das verglichen werden könnte)."""
+        for t0, t1, sent in self._bot_own_tx.get(room, []):
+            if t0 - 3.0 <= ts <= t1 + 3.0:
+                return sent
+        return None
+
     def bot_archive_callsign(self, room: str, callsign: str, ts: float,
                              text: str) -> str:
         """Eigene Bot-Sendungen in Log + Archiv unter dem Bot-Namen führen.
@@ -1306,6 +1418,15 @@ class TXServer:
         if not callsign and self._bot_is_own(room, text, ts):
             return self._bot_cfg().get("name") or "Robert"
         return callsign
+
+    # Kurze, alltagssprachlich mehrdeutige Kommandowörter brauchen ein enges
+    # Abstandsfenster zum Namen -- "aus" kollidiert sonst mit dem trennbaren
+    # Verb "aussehen" ("Robert, er sieht gut aus." löste faelschlich den
+    # Aus-Befehl aus, weil "aus" nur 15 Zeichen von "Robert" entfernt stand).
+    # Längere, eindeutigere Wörter (sendepause, schlafen, ...) behalten das
+    # weite Fenster, da sie kaum in normalen Sätzen zufällig auftauchen.
+    _BOT_CMD_TIGHT_GAP = {"aus": 8, "an": 8}
+    _BOT_CMD_DEFAULT_GAP = 18
 
     def _bot_command(self, bot: dict, name: str, low: str) -> str | None:
         """Erkennt Sprach-Steuerbefehle: '<Name> aus' → 'off', '<Name> start'
@@ -1320,12 +1441,14 @@ class TXServer:
 
         def _hit(words) -> bool:
             for w in words:
-                w = re.escape((w or "").strip().lower())
-                if not w:
+                w_raw = (w or "").strip().lower()
+                if not w_raw:
                     continue
-                # Name … Kommandowort ODER Kommandowort … Name, max ~18 Zeichen
-                if re.search(rf"\b{nm}\b.{{0,18}}?\b{w}\b", low) or \
-                   re.search(rf"\b{w}\b.{{0,18}}?\b{nm}\b", low):
+                gap = self._BOT_CMD_TIGHT_GAP.get(w_raw, self._BOT_CMD_DEFAULT_GAP)
+                w = re.escape(w_raw)
+                # Name … Kommandowort ODER Kommandowort … Name, max `gap` Zeichen
+                if re.search(rf"\b{nm}\b.{{0,{gap}}}?\b{w}\b", low) or \
+                   re.search(rf"\b{w}\b.{{0,{gap}}}?\b{nm}\b", low):
                     return True
             return False
 
@@ -1407,16 +1530,28 @@ class TXServer:
         if not (in_conv or any(t in low for t in triggers)
                 or self._BOT_CALL_RE.search(low)):
             return
-        asyncio.create_task(self._bot_reply(room, room_name, bot))
+        search_query = ""
+        if (bot.get("websearch") or {}).get("enabled"):
+            m = self._BOT_SEARCH_RE.search(text)
+            if m:
+                q = (m.group(1) or m.group(2) or m.group(3)
+                     or "").strip(" .,!?;:\"'")
+                if len(q) >= 3:
+                    search_query = q[:200]
+        asyncio.create_task(self._bot_reply(room, room_name, bot, search_query))
 
-    async def _bot_reply(self, room: "FRNTXRoom", room_name: str, bot: dict):
+    async def _bot_reply(self, room: "FRNTXRoom", room_name: str, bot: dict,
+                         search_query: str = ""):
         """Antwort generieren und senden (höchstens ein Lauf pro Raum)."""
         if room_name in self._bot_busy:
             return
         self._bot_busy.add(room_name)
+        heard_ts = time.time()
         try:
             hist   = list(self._room_hist.get(room_name, []))
-            answer = await self._bot_ollama(bot, hist)
+            if hist:
+                heard_ts = hist[-1][0]   # Zeitpunkt des ausloesenden Funkspruchs
+            answer = await self._bot_ollama(bot, hist, search_query=search_query)
             if not answer:
                 log.info("[%s] KI-Funker: nicht gemeint (SKIP)", room_name)
                 return
@@ -1425,6 +1560,8 @@ class TXServer:
             sent = await self._auto_send_voice(room, answer,
                                                bot.get("speaker") or "default")
             t1   = time.time()
+            log.info("[%s] KI-Funker TTS+Senden: %.1fs — Gesamt (gehört→gesendet): %.1fs",
+                     room_name, t1 - t0, t1 - heard_ts)
             if not sent:
                 return
             self._bot_last_reply[room_name] = t1
@@ -1458,9 +1595,43 @@ class TXServer:
         token = (token or "").strip()
         return {"Authorization": f"Bearer {token}"} if token else None
 
-    def _bot_build_prompt(self, bot: dict, hist: list) -> tuple[str, list]:
+    async def _bot_websearch(self, bot: dict, query: str) -> str:
+        """Fragt die lokale SearXNG-Instanz ab (JSON-API) und liefert eine
+        kurze Zusammenfassung der Top-Treffer fürs Prompt ("" bei Fehler/
+        keinen Treffern). Läuft NUR lokal/im LAN (siehe pass_ip in SearXNGs
+        limiter.toml) — kostenlos, kein Cloud-Suchdienst."""
+        ws  = bot.get("websearch") or {}
+        url = (ws.get("searxng_url")
+               or "http://127.0.0.1:8075/search").strip()
+        n   = int(ws.get("max_results", 3) or 3)
+        try:
+            timeout = aiohttp.ClientTimeout(total=8)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(url, params={"q": query,
+                                                  "format": "json"}) as resp:
+                    if resp.status != 200:
+                        log.warning("KI-Funker Websuche HTTP %d", resp.status)
+                        return ""
+                    data = await resp.json()
+        except Exception as e:
+            log.warning("KI-Funker: Websuche fehlgeschlagen: %s", e)
+            return ""
+        results = (data.get("results") or [])[:max(1, n)]
+        if not results:
+            return ""
+        lines = []
+        for i, r in enumerate(results, 1):
+            title   = (r.get("title") or "").strip()
+            content = (r.get("content") or "").strip()
+            lines.append(f"{i}. {title} — {content}"[:220])
+        return "\n".join(lines)
+
+    def _bot_build_prompt(self, bot: dict, hist: list,
+                          search_context: str = "") -> tuple[str, list]:
         """Baut System-Anweisung + Nachrichtenverlauf (provider-neutral).
-        Nachrichten: role 'user' (fremde Funksprüche) / 'assistant' (eigene)."""
+        Nachrichten: role 'user' (fremde Funksprüche) / 'assistant' (eigene).
+        search_context: optionale Websuche-Treffer, werden dem System-Prompt
+        angehängt (nicht als eigene Chat-Nachricht, bleibt so provider-neutral)."""
         name = bot.get("name") or "Robert"
         own_tag = f"{name} (du)"
         # System-Anweisung aus der config (voice.bot.system_prompt), Platzhalter
@@ -1468,29 +1639,73 @@ class TXServer:
         tmpl = bot.get("system_prompt") or self._BOT_SYSTEM_DEFAULT
         system = (tmpl.replace("{persona}", (bot.get("persona") or "").strip())
                       .replace("{name}", name))
+        if search_context:
+            system += ("\n\nAktuelle Websuche-Ergebnisse (nutze sie nur, "
+                       "wenn sie zur Frage passen, fass sie kurz und locker "
+                       "wie am Funk üblich zusammen, keine Web-Adressen "
+                       "vorlesen):\n" + search_context)
+        # Verlauf enthaelt sonst NUR Rufzeichen+Text, keine Zeit -- ein Spruch
+        # von vor 6 Stunden sah fuers Modell genauso "gerade eben" gesagt aus
+        # wie einer von vor 10 Sekunden. Fix: uralte Eintraege raus, echte
+        # Pausen dazwischen als Marker sichtbar machen.
+        STALE_DROP_S = 3600   # aelter als 1h -- fuer die aktuelle Lage irrelevant
+        GAP_NOTE_S   = 180    # ab 3 Min. Pause einen Hinweis einfuegen
+        now = time.time()
+        recent = [(ts, who, txt)
+                  for ts, who, txt in hist[-int(bot.get("history_len", 10)):]
+                  if now - ts <= STALE_DROP_S]
+        if recent:
+            system += ("\n\nWenn eine Nachricht wie '[... 12 Minuten Pause ...]' "
+                       "erscheint, ist seitdem eine Pause im Funkverkehr "
+                       "vergangen -- was davor gesagt wurde, gilt NICHT mehr "
+                       "als gerade laufendes Gespräch.")
         messages = []
-        for _, who, txt in hist[-int(bot.get("history_len", 10)):]:
+        prev_ts = None
+        for ts, who, txt in recent:
+            if prev_ts is not None and ts - prev_ts >= GAP_NOTE_S:
+                gap_min = round((ts - prev_ts) / 60)
+                messages.append({"role": "user",
+                                  "content": f"[... {gap_min} Minuten Pause ...]"})
             if who == own_tag:
                 messages.append({"role": "assistant", "content": txt})
             else:
                 messages.append({"role": "user", "content": f"{who}: {txt}"})
+            prev_ts = ts
         return system, messages
 
-    async def _bot_ollama(self, bot: dict, hist: list, with_raw: bool = False):
+    async def _bot_ollama(self, bot: dict, hist: list, with_raw: bool = False,
+                          search_query: str = ""):
         """Entscheidung + Antwort des KI-Funkers. Provider laut voice.bot.provider
         (ollama = lokal/eigener Server, gemini = Google-Cloud). Das Modell darf mit
         SKIP schweigen. Liefert "" wenn der Bot nicht antworten soll.
-        with_raw=True → (verarbeitete Antwort, roher Modell-Output) für den Test."""
-        system, messages = self._bot_build_prompt(bot, hist)
+        with_raw=True → (verarbeitete Antwort, roher Modell-Output) für den Test.
+        search_query: erkannter Websuche-Auftrag (siehe _BOT_SEARCH_RE) —
+        wird vor dem LLM-Aufruf per SearXNG aufgelöst und in den Kontext
+        eingespeist."""
+        search_context = ""
+        if search_query:
+            _t0 = time.time()
+            search_context = await self._bot_websearch(bot, search_query)
+            log.info("KI-Funker Websuche: %.1fs", time.time() - _t0)
+        system, messages = self._bot_build_prompt(bot, hist, search_context)
         provider = (bot.get("provider") or "ollama").strip().lower()
+        _t0 = time.time()
         if provider == "gemini":
             raw = await self._llm_gemini(bot, system, messages)
         else:
             raw = await self._llm_ollama(bot, system, messages)
+        log.info("KI-Funker LLM (%s): %.1fs", provider, time.time() - _t0)
         ans = ""
         if raw:
             # <think>…</think> entfernen (Reasoning-Modelle wie qwen3 geben es aus)
             cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip().strip('"')
+            # Manche Modelle haengen trotz Prompt-Anweisung ein "Robert: " vor
+            # die Antwort (imitiert das "Rufzeichen: Text"-Format aus dem
+            # Verlauf) -- als Sicherheitsnetz zusaetzlich zur Prompt-Regel
+            # weg damit, sonst wird der Name-Prefix live vorgelesen.
+            name = bot.get("name") or "Robert"
+            cleaned = re.sub(rf"^{re.escape(name)}\s*:\s*", "", cleaned,
+                             flags=re.IGNORECASE).strip()
             if cleaned and not cleaned.upper().startswith("SKIP"):
                 ans = cleaned   # sonst: nicht gemeint / nichts zu sagen
         return (ans, raw or "") if with_raw else ans
@@ -1965,12 +2180,21 @@ class TXServer:
         room_name = (body.get("room") or "").strip()
         hist      = list(self._room_hist.get(room_name, []))
         hist.append((time.time(), body.get("from") or "Testfunker", text))
+        search_query = (body.get("search_query") or "").strip()
+        if not search_query and (bot.get("websearch") or {}).get("enabled"):
+            m = self._BOT_SEARCH_RE.search(text)
+            if m:
+                q = (m.group(1) or m.group(2) or m.group(3) or "").strip(" .,!?;:\"'")
+                if len(q) >= 3:
+                    search_query = q[:200]
         t0 = time.time()
-        answer, raw = await self._bot_ollama(bot, hist, with_raw=True)
+        answer, raw = await self._bot_ollama(bot, hist, with_raw=True,
+                                             search_query=search_query)
         return web.json_response({
             "would_reply": bool(answer),
             "answer": answer or "SKIP",
             "raw": raw,
+            "search_query": search_query,
             "seconds": round(time.time() - t0, 1)})
 
     async def handle_admin_gemini_models(self, request):
@@ -2056,10 +2280,12 @@ class TXServer:
         return web.json_response(out)
 
     async def handle_admin_tts(self, request):
-        """GET: aktive TTS-Engine + URLs; POST {engine: piper|xtts}: umschalten.
+        """GET: aktive TTS-Engine + URLs; POST {engine: piper|xtts|google}: umschalten.
 
-        Schaltet voice.remote_url zwischen dem lokalen Piper-Dienst und dem
-        XTTS-Voice-Clone (GPU-Box) um. Gilt für alle Sprachausgabe-Funktionen.
+        piper/xtts schalten voice.remote_url zwischen dem lokalen Piper-Dienst
+        und dem XTTS-Voice-Clone (GPU-Box) um. google nutzt den kostenlosen,
+        inoffiziellen Google-Translate-TTS-Endpunkt (siehe _google_tts_pcm) --
+        braucht keine remote_url, die bleibt beim zuletzt aktiven Wert stehen.
         """
         _, err = await self._require_admin(request)
         if err:
@@ -2075,28 +2301,29 @@ class TXServer:
             except Exception:
                 return web.json_response({"error": "bad request"}, status=400)
             engine = (body.get("engine") or "").strip().lower()
-            if engine not in ("piper", "xtts"):
+            if engine not in ("piper", "xtts", "google"):
                 return web.json_response(
-                    {"error": "engine muss 'piper' oder 'xtts' sein"}, status=400)
-            url = piper if engine == "piper" else xtts
-            v.update({"remote_url": url, "tts_engine": engine,
-                      "piper_url": piper, "xtts_url": xtts})
+                    {"error": "engine muss 'piper', 'xtts' oder 'google' sein"},
+                    status=400)
+            update = {"tts_engine": engine, "piper_url": piper, "xtts_url": xtts}
+            if engine in ("piper", "xtts"):
+                update["remote_url"] = piper if engine == "piper" else xtts
+            v.update(update)
             try:
                 cfg_path = Path(self.args.config)
                 disk = json.loads(cfg_path.read_text(encoding="utf-8"))
-                dv = disk.setdefault("voice", {})
-                dv.update({"remote_url": url, "tts_engine": engine,
-                           "piper_url": piper, "xtts_url": xtts})
+                disk.setdefault("voice", {}).update(update)
                 cfg_path.write_text(
                     json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
                     encoding="utf-8")
             except Exception as e:
                 return web.json_response(
                     {"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
-            log.info("Sprachausgabe umgestellt auf %s (%s)", engine, url)
+            log.info("Sprachausgabe umgestellt auf %s (%s)", engine,
+                     update.get("remote_url", "kostenloser Google-Endpunkt"))
 
         engine = v.get("tts_engine")
-        if not engine:   # aus aktiver URL ableiten
+        if not engine:   # aus aktiver URL ableiten (Alt-Configs ohne tts_engine)
             cur = (v.get("remote_url") or "").strip()
             engine = "xtts" if cur == xtts else "piper"
         return web.json_response({"engine": engine,
@@ -3952,6 +4179,7 @@ def main():
             # Auto-Antwort-Hook: Namensnennung → Ollama-Vorschlag an Web-Clients
             pipeline.on_transcript = server.on_transcript
             pipeline.resolve_callsign = server.bot_archive_callsign
+            pipeline.resolve_known_text = server.resolve_known_text
             log.info("Transkription aktiviert (Aufnahmen via frn_stream.py)")
 
             # Tasks erst im laufenden Loop starten (on_startup)

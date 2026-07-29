@@ -66,7 +66,15 @@ def _transcribe_remote(wav_path: str, url: str, language: str) -> str:
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    # War 60s -- zu kurz fuer ungewoehnlich lange Aufnahmen (bis zu
+    # MAX_DURATION=300s in frn_stream.py), die auf der GPU auch mal 190s+
+    # brauchen. Client gab dann vorzeitig auf, obwohl der (single-threaded)
+    # Whisper-Server im Hintergrund trotzdem weiterrechnete -- 3 sinnlose
+    # Fehlversuche a 60s+30s Wartezeit spaeter blockierte das die ganze
+    # Warteschlange. Jetzt knapp unter dem aeusseren 300s-Timeout in
+    # process_wav (asyncio.wait_for), damit lange Clips eine faire Chance
+    # bekommen statt garantiert zu scheitern.
+    with urllib.request.urlopen(req, timeout=280) as resp:
         result = json.loads(resp.read())
     text = _remove_repetitions(result.get("text", "").strip())
     log.debug("Remote-Transkript (%.1fs): %s", result.get("duration_s", 0), text[:80])
@@ -266,11 +274,13 @@ class TranscriptionPipeline:
                 self._cleanup_old_wavs()
 
         async def meta_watcher():
-            """Alle 10s nach neuen .meta-Dateien aus frn_stream.py suchen."""
+            """Alle 2s nach neuen .meta-Dateien aus frn_stream.py suchen
+            (war 10s -- reine Warteschlangen-Latenz vor der Transkription,
+            ohne Zusatzkosten reduzierbar da nur ein Datei-Listing)."""
             # Beim Start: .meta.done ohne DB-Eintrag zurücksetzen
             await self._recover_lost_meta()
             while True:
-                await asyncio.sleep(10)
+                await asyncio.sleep(2)
                 await self._process_meta_files()
 
         loop = asyncio.get_event_loop()
@@ -305,8 +315,20 @@ class TranscriptionPipeline:
             log.info("_recover_lost_meta: %d Dateien zurückgesetzt", recovered)
 
     async def _process_meta_files(self):
-        """Verarbeitet .meta-Dateien die frn_stream.py abgelegt hat."""
-        for meta_path in sorted(self.wav_dir.glob("*.meta")):
+        """Verarbeitet .meta-Dateien die frn_stream.py abgelegt hat.
+
+        Verarbeitet immer die NEUESTE zuerst und scannt nach JEDER Datei neu
+        (statt einmal eine Liste zu bilden und die stur abzuarbeiten) — sonst
+        blockiert ein angestauter Rückstau alter Dateien den Live-Betrieb:
+        eine gerade eingehende Aufnahme müsste sonst hinter Dutzenden alten
+        Karteileichen warten, bis die durch sind. So bekommt Live immer
+        Vorrang, der Rückstau wird nebenbei aufgeholt, wenn gerade nichts
+        Neueres ansteht."""
+        while True:
+            pending = sorted(self.wav_dir.glob("*.meta"), reverse=True)
+            if not pending:
+                return
+            meta_path = pending[0]
             try:
                 import json as _json
                 meta = _json.loads(meta_path.read_text(encoding="utf-8"))
@@ -322,7 +344,9 @@ class TranscriptionPipeline:
                 # Als erledigt markieren BEVOR Verarbeitung (verhindert Doppelverarbeitung)
                 meta_path.rename(meta_path.with_suffix(".meta.done"))
 
-                log.info("[%s] Meta-Datei gefunden: %s (%s)", room, Path(wav_path).name, callsign)
+                poll_delay = time.time() - ts
+                log.info("[%s] Meta-Datei gefunden: %s (%s) — Warteschlange: %.1fs",
+                         room, Path(wav_path).name, callsign, poll_delay)
                 # Sequenziell abarbeiten — verhindert Timeout wenn viele Dateien warten
                 await self.process_wav(wav_path, room, callsign, ts)
 
@@ -335,58 +359,70 @@ class TranscriptionPipeline:
 
     async def process_wav(self, wav_path: str, room: str, callsign: str, ts: float):
         """Transkribiert eine fertige WAV-Datei (von frn_stream.py aufgezeichnet)."""
-        model_size = self.cfg.get("whisper_model", "medium")
-        language   = self.cfg.get("whisper_language", "de")
+        # Eigene KI-Funker-Sendungen (Robert) muessen NICHT durch Whisper --
+        # der Text ist bereits exakt bekannt (die generierte LLM-Antwort).
+        # frn_tx_server setzt pipeline.resolve_known_text und liefert ihn ueber
+        # dasselbe Zeitfenster wie die Echo-Erkennung fuers Rufzeichen. Spart
+        # ~10-15s GPU-Zeit pro Bot-Antwort und vermeidet, dass Whisper Roberts
+        # eigene synthetisierte Stimme fehlerhaft zurueck-transkribiert.
+        rkt = getattr(self, "resolve_known_text", None)
+        text = (rkt(room, ts) if rkt else None) or ""
+        if text:
+            log.info("[%s] Bekannter Bot-Text übernommen (kein Whisper nötig)", room)
+        else:
+            model_size = self.cfg.get("whisper_model", "medium")
+            language   = self.cfg.get("whisper_language", "de")
 
-        # Bei konfiguriertem Remote-Server: bei Fehler warten und erneut versuchen.
-        # Server-weg (Health-Check) zählt NICHT als Fehlversuch. Echte Timeouts/Fehler
-        # bei der Transkription werden gezählt — nach MAX_FAILS wird die Datei
-        # übersprungen, damit eine einzelne kaputte/zu große Datei nicht die ganze
-        # Warteschlange dauerhaft blockiert.
-        MAX_FAILS = 3
-        remote_url = _get_whisper_remote_url()
-        text  = ""
-        fails = 0
-        while True:
-            if remote_url:
-                loop = asyncio.get_event_loop()
-                while not await loop.run_in_executor(None, _is_remote_available, remote_url):
-                    log.warning("Remote-Whisper nicht erreichbar — Warteschlange pausiert, "
-                                "nächster Versuch in 30s …")
+            # Bei konfiguriertem Remote-Server: bei Fehler warten und erneut versuchen.
+            # Server-weg (Health-Check) zählt NICHT als Fehlversuch. Echte Timeouts/Fehler
+            # bei der Transkription werden gezählt — nach MAX_FAILS wird die Datei
+            # übersprungen, damit eine einzelne kaputte/zu große Datei nicht die ganze
+            # Warteschlange dauerhaft blockiert.
+            MAX_FAILS = 3
+            remote_url = _get_whisper_remote_url()
+            fails = 0
+            while True:
+                if remote_url:
+                    loop = asyncio.get_event_loop()
+                    while not await loop.run_in_executor(None, _is_remote_available, remote_url):
+                        log.warning("Remote-Whisper nicht erreichbar — Warteschlange pausiert, "
+                                    "nächster Versuch in 30s …")
+                        await asyncio.sleep(30)
+                try:
+                    _t0 = time.time()
+                    text = await asyncio.wait_for(
+                        transcribe_wav(wav_path, model_size, language),
+                        timeout=300.0
+                    )
+                    log.info("[%s] Whisper: %.1fs", room, time.time() - _t0)
+                    break  # Erfolg
+                except asyncio.TimeoutError:
+                    log.warning("[%s] Whisper-Timeout für %s", room, Path(wav_path).name)
+                    if not remote_url:
+                        break  # lokaler Fehler → überspringen
+                    fails += 1
+                    if fails >= MAX_FAILS:
+                        log.warning("[%s] %s nach %d Timeouts übersprungen",
+                                    room, Path(wav_path).name, fails)
+                        return
+                    log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
                     await asyncio.sleep(30)
-            try:
-                text = await asyncio.wait_for(
-                    transcribe_wav(wav_path, model_size, language),
-                    timeout=300.0
-                )
-                break  # Erfolg
-            except asyncio.TimeoutError:
-                log.warning("[%s] Whisper-Timeout für %s", room, Path(wav_path).name)
-                if not remote_url:
-                    break  # lokaler Fehler → überspringen
-                fails += 1
-                if fails >= MAX_FAILS:
-                    log.warning("[%s] %s nach %d Timeouts übersprungen",
-                                room, Path(wav_path).name, fails)
-                    return
-                log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
-                await asyncio.sleep(30)
-            except Exception as e:
-                log.warning("[%s] Whisper-Fehler für %s: %r", room, Path(wav_path).name, e)
-                # WAV inzwischen weg (z.B. vom Cleanup gelöscht) → permanent, nicht retryen
-                if not Path(wav_path).exists():
-                    log.warning("[%s] WAV %s existiert nicht mehr — übersprungen",
-                                room, Path(wav_path).name)
-                    return
-                if not remote_url:
-                    break  # lokaler Fehler → überspringen
-                fails += 1
-                if fails >= MAX_FAILS:
-                    log.warning("[%s] %s nach %d Fehlern übersprungen",
-                                room, Path(wav_path).name, fails)
-                    return
-                log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
-                await asyncio.sleep(30)
+                except Exception as e:
+                    log.warning("[%s] Whisper-Fehler für %s: %r", room, Path(wav_path).name, e)
+                    # WAV inzwischen weg (z.B. vom Cleanup gelöscht) → permanent, nicht retryen
+                    if not Path(wav_path).exists():
+                        log.warning("[%s] WAV %s existiert nicht mehr — übersprungen",
+                                    room, Path(wav_path).name)
+                        return
+                    if not remote_url:
+                        break  # lokaler Fehler → überspringen
+                    fails += 1
+                    if fails >= MAX_FAILS:
+                        log.warning("[%s] %s nach %d Fehlern übersprungen",
+                                    room, Path(wav_path).name, fails)
+                        return
+                    log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
+                    await asyncio.sleep(30)
 
         if not text:
             return

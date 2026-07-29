@@ -1420,6 +1420,7 @@ audio {
           <select id="tts-engine" onchange="saveTts()">
             <option value="piper">Piper (lokal, schnell)</option>
             <option value="xtts">XTTS (GPU-Box, geklont)</option>
+            <option value="google">Google (kostenlos, am schnellsten, Standardstimme)</option>
           </select>
         </div>
         <div class="form-field" style="flex:2">
@@ -3713,7 +3714,9 @@ async function saveTts() {
     });
     const d = await r.json();
     if (d.error) { showMsg("msg-bot", "Fehler: " + d.error, "error"); return; }
-    showMsg("msg-bot", "Sprachausgabe: " + (engine === "piper" ? "Piper (lokal)" : "XTTS (GPU-Box)"), "ok");
+    const ttsLabel = engine === "piper" ? "Piper (lokal)"
+                    : engine === "google" ? "Google (kostenlos)" : "XTTS (GPU-Box)";
+    showMsg("msg-bot", "Sprachausgabe: " + ttsLabel, "ok");
   } catch(e) {
     showMsg("msg-bot", "Fehler: " + e, "error");
   }
