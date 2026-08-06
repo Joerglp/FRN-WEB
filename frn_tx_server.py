@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import asyncio
+import collections
 import ctypes
 import ctypes.util
 import difflib
@@ -23,6 +24,7 @@ import logging
 import os
 import re
 import secrets
+import signal
 import struct
 import subprocess
 import time
@@ -707,6 +709,56 @@ class TXServer:
         self._bot_last_reply: dict[str, float] = {} # Raum → Zeit letzter Bot-Sendung
         self._bot_own_tx: dict[str, list] = {}      # Raum → [(t0, t1, text), …]
         self._bot_busy: set[str] = set()
+        # Debug-Ablaufverfolgung: jede gehoerte Durchsage bekommt eine "Spur"
+        # mit einzelnen Schritten (Aufnahme/Whisper/Bot-Trigger/LLM/TTS/
+        # Senden), je mit Status (ok/warn/error/skip) + Zeitmessung, fuers
+        # Debug-Panel im Admin-Bereich.
+        self._debug_traces: collections.deque = collections.deque(maxlen=80)
+        self._debug_trace_by_key: dict[tuple, dict] = {}
+
+    # ── Debug-Ablaufverfolgung ──────────────────────────────────────────────
+
+    def _debug_trace_get(self, room: str, ts: float) -> dict:
+        """Liefert die Spur fuer (Raum, Aufnahme-Zeit), legt bei Bedarf neu an.
+        ts wird gerundet, damit derselbe Aufruf aus verschiedenen Schritten
+        (Whisper, Bot, LLM, TTS) dieselbe Spur trifft, auch wenn er den
+        Zeitstempel als float minimal anders herumreicht."""
+        key = (room, round(ts, 1))
+        tr = self._debug_trace_by_key.get(key)
+        if tr is None:
+            tr = {"room": room, "ts": ts, "started": time.time(),
+                 "steps": [], "done": False, "total_s": None}
+            self._debug_trace_by_key[key] = tr
+            self._debug_traces.appendleft(tr)
+            # Key-Dict raeumen, sonst waechst es unbegrenzt (Anzeige-Deque
+            # begrenzt sich selbst per maxlen, das Zuordnungs-Dict nicht)
+            while len(self._debug_trace_by_key) > 200:
+                self._debug_trace_by_key.pop(next(iter(self._debug_trace_by_key)), None)
+        return tr
+
+    def debug_trace_step(self, room: str, ts: float, name: str, status: str,
+                         duration_s: float | None = None, detail: str = "",
+                         final: bool = False, audio: str = ""):
+        """Traegt einen Schritt in die Spur der Durchsage (room, ts) ein.
+        status: "ok" (gruen) | "warn" (gelb) | "error" (rot) | "skip" (grau).
+        final=True markiert die Spur als abgeschlossen (Gesamtzeit wird
+        berechnet, keine weiteren Schritte werden erwartet).
+        audio: Dateiname der zugehoerigen WAV-Aufnahme (nur Name, kein Pfad)
+        -- macht den Schritt im Debug-Panel per Klick abspielbar."""
+        try:
+            tr = self._debug_trace_get(room, ts)
+            tr["steps"].append({
+                "name": name, "status": status,
+                "duration_s": round(duration_s, 2) if duration_s is not None else None,
+                "detail": (detail or "")[:400],
+                "at": time.time(),
+                "audio": Path(audio).name if audio else "",
+            })
+            if final:
+                tr["done"] = True
+                tr["total_s"] = round(time.time() - tr["started"], 2)
+        except Exception as e:
+            log.debug("debug_trace_step fehlgeschlagen: %s", e)
 
     # ── Token Persistenz ───────────────────────────────────────────────────
 
@@ -1057,6 +1109,7 @@ class TXServer:
                     mp3_bytes = await resp.read()
                 ffm = await asyncio.create_subprocess_exec(
                     "ffmpeg", "-i", "pipe:0",
+                    "-af", "loudnorm=I=-16:TP=-1.5",
                     "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1",
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
@@ -1067,16 +1120,28 @@ class TXServer:
         return b"".join(pcm_parts)
 
     async def _get_voice_pcm(self, text: str, lang: str = "de",
-                             speaker: str = "default") -> bytes:
+                             speaker: str = "default",
+                             force_xtts: bool = False) -> bytes:
         """Liefert 8 kHz mono s16le PCM für die Sprachausgabe. Engine laut
         voice.tts_engine: "google" (kostenlos, schnell, feste Stimme) oder
-        piper/xtts (eigene Stimme/Charakter, über voice.remote_url)."""
+        piper/xtts (eigene Stimme/Charakter, über voice.remote_url).
+
+        force_xtts=True erzwingt XTTS über voice.xtts_url, unabhängig vom
+        gerade in der Verwaltung ausgewählten Engine fuer Robert (Piper/XTTS/
+        Google). Noetig fuer alles rund um geklonte PERSOENLICHE Stimmen
+        (Automatik-Antwort in eigener Stimme, SPEAK_VOICE, Stimm-Sample
+        hochladen/Hoerprobe) -- Piper und Google kennen keine hochgeladenen
+        Referenz-Stimmen, nur XTTS kann das. Robert selbst (KI-Funker) nutzt
+        weiterhin den frei waehlbaren Standard-Weg (remote_url)."""
         vcfg = self.cfg.get("voice", {})
         if not vcfg.get("enabled", False):
             raise RuntimeError("Voice-Funktion ist deaktiviert")
-        if (vcfg.get("tts_engine") or "").strip().lower() == "google":
-            return await self._google_tts_pcm(text, lang)
-        url = (vcfg.get("remote_url") or "").strip()
+        if force_xtts:
+            url = (vcfg.get("xtts_url") or "").strip()
+        else:
+            if (vcfg.get("tts_engine") or "").strip().lower() == "google":
+                return await self._google_tts_pcm(text, lang)
+            url = (vcfg.get("remote_url") or "").strip()
         if not url:
             raise RuntimeError("Voice-Funktion ist deaktiviert")
         payload = {"text": text, "language": lang, "speaker": speaker or "default"}
@@ -1089,6 +1154,11 @@ class TXServer:
                 wav_bytes = await resp.read()
         ffm = await asyncio.create_subprocess_exec(
             "ffmpeg", "-i", "pipe:0",
+            # Lautheits-Normalisierung (EBU R128) -- verschiedene TTS-Engines/
+            # Modelle (Piper "high" leiser als "medium", XTTS anders als
+            # Piper) hatten spuerbar unterschiedliche Pegel. Gilt fuer
+            # piper/xtts (die Google-Engine hat ihre eigene, s.o.).
+            "-af", "loudnorm=I=-16:TP=-1.5",
             "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -1183,7 +1253,8 @@ class TXServer:
             if auto_send:
                 log.info("[%s] Auto-SENDEN für %s (gehört: %.50s): %.70s",
                          room_name, uname or "global", heard, suggestion)
-                sent = await self._auto_send_voice(room, suggestion, speaker)
+                sent = await self._auto_send_voice(room, suggestion, speaker,
+                                                   force_xtts=True)
                 payload = {"type": "voice_autosent", "room": room_name,
                            "from": from_cs or "?", "heard": heard,
                            "text": suggestion, "ok": sent}
@@ -1208,7 +1279,8 @@ class TXServer:
             log.warning("[%s] Auto-Antwort (%s): %s", room_name, uname, e)
 
     async def _auto_send_voice(self, room: "FRNTXRoom", text: str,
-                               speaker: str = "default") -> bool:
+                               speaker: str = "default",
+                               force_xtts: bool = False) -> bool:
         """Synthetisiert Text und sendet ihn direkt in den Raum (ohne WS-Client).
 
         Gleicher Ablauf wie SPEAK_VOICE: erst Stimme erzeugen, dann Sender
@@ -1217,7 +1289,7 @@ class TXServer:
         try:
             vcfg = self.cfg.get("voice", {})
             pcm  = await self._get_voice_pcm(text, vcfg.get("language", "de"),
-                                             speaker)
+                                             speaker, force_xtts=force_xtts)
         except Exception as e:
             log.warning("[%s] Auto-Senden: TTS fehlgeschlagen: %s", room.name, e)
             return False
@@ -1315,6 +1387,15 @@ class TXServer:
         "cooldown_s": 20,
         "conversation_window_s": 180,
         "history_len": 10,
+        # Ollama-Kontextfenster (num_ctx) -- muss zu dem passen, mit dem
+        # andere Clients (z.B. Open WebUI) dasselbe Modell laden, sonst
+        # erzwingt jede Abweichung einen kompletten Neu-Load (~10-15s),
+        # siehe _llm_ollama. Konfigurierbar, da der Wert bei Bedarf noch
+        # nach oben angepasst wird.
+        "ollama_num_ctx": 30780,
+        # Personen-Gedaechtnis: manuell gepflegte Notizen pro Name, siehe
+        # _bot_build_prompt. Liste aus {"name": ..., "notes": ...}.
+        "memory": [],
         # System-Anweisung fürs Modell (leer = _BOT_SYSTEM_DEFAULT).
         # Platzhalter {name} und {persona} werden eingesetzt.
         "system_prompt": "",
@@ -1359,7 +1440,8 @@ class TXServer:
     # Person) oder ein blankes "Guten Morgen." sollen NICHT triggern, sonst
     # antwortet Robert auf jeden beliebigen Gruß im Kanal.
     _BOT_CALL_RE = re.compile(
-        r"\bqrv\b|\bcq\b"
+        r"\bqrv\b|\bcq\w*\b"  # cq, cqcq, cqcqr, cqde... (allgemeiner Anruf,
+                              # Whisper schreibt "CQ CQ" oft als ein Wort)
         r"|jemand\s+(da|dran|drauf|erreichbar|zu\s*h[öo]ren"
         r"|auf\s+dem\s+kanal|auf\s+der\s+frequenz)"
         r"|h[öo]rt\s+(mich|da|hier)\s+(irgend)?(jemand|einer|wer)\b"
@@ -1379,6 +1461,27 @@ class TXServer:
         r"\s+(?:mal\s+)?(?:bitte\s+)?nach\s+(.+)"
         r"|nach\s+(.+?)\s+(?:mal\s+)?such\w*\b",
         re.IGNORECASE)
+
+    # Echtes Ollama-Tool-Calling als Ergaenzung zum Regex-Trigger oben: der
+    # Regex fängt nur explizite Befehle ("such mal nach X"), das Modell kann
+    # damit zusaetzlich SELBST erkennen, wenn es ein erwaehntes Thema nicht
+    # kennt, und von sich aus nachschlagen -- bestaetigt getestet (Modell hat
+    # "tools"-Capability laut /api/show, reagiert mit sauberem tool_calls
+    # statt zu halluzinieren). Nur ~60 Prompt-Tokens Mehraufwand pro Anfrage.
+    _BOT_WEBSEARCH_TOOL = [{
+        "type": "function",
+        "function": {
+            "name": "websearch",
+            "description": ("Durchsucht das Internet nach aktuellen Informationen zu "
+                            "einem Thema/Begriff, den du nicht kennst oder wo du dir "
+                            "unsicher bist."),
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Suchbegriff"}},
+                "required": ["query"],
+            },
+        },
+    }]
 
     def _bot_cfg(self) -> dict:
         return {**self._BOT_DEFAULTS,
@@ -1427,6 +1530,19 @@ class TXServer:
     # weite Fenster, da sie kaum in normalen Sätzen zufällig auftauchen.
     _BOT_CMD_TIGHT_GAP = {"aus": 8, "an": 8}
     _BOT_CMD_DEFAULT_GAP = 18
+
+    # Sicherheitsnetz gegen Emojis in Roberts Antworten -- der Prompt verbietet
+    # sie explizit ("wird vorgelesen"), aber manche Modelle haengen trotzdem
+    # gelegentlich welche an (aehnlich dem "Robert: "-Praefix-Problem).
+    _EMOJI_RE = re.compile(
+        "["
+        "\U0001F300-\U0001FAFF"  # Piktogramme, Emoticons, Transport, Symbole
+        "\U00002600-\U000027BF"  # sonstige Symbole, Dingbats
+        "\U0001F1E6-\U0001F1FF"  # Flaggen (Regional Indicators)
+        "\U00002B00-\U00002BFF"  # weitere Symbole/Pfeile
+        "\U0000FE0F"             # Variationsselektor
+        "\U0000200D"             # Zero-Width-Joiner (verbindet Emoji-Sequenzen)
+        "]+", flags=re.UNICODE)
 
     def _bot_command(self, bot: dict, name: str, low: str) -> str | None:
         """Erkennt Sprach-Steuerbefehle: '<Name> aus' → 'off', '<Name> start'
@@ -1505,30 +1621,55 @@ class TXServer:
                      text))
         del hist[:-max(4, int(bot.get("history_len", 10)))]
         if own:
-            return
+            return   # eigenes Echo -- keine Spur, das ist kein "gehoerter" Funkspruch
         # Sprachsteuerung: greift AUCH bei deaktiviertem Bot (sonst kein Wecken).
         # No-Op (schon im Zielzustand) fällt durch zur normalen Antwort-Logik.
         cmd = self._bot_command(bot, name, low)
         if cmd == "off" and bot.get("enabled"):
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
+                                  detail="Sprachsteuerung: aus", final=True)
             asyncio.create_task(self._bot_apply_command(room, room_name, bot, "off"))
             return
         if cmd == "on" and not bot.get("enabled"):
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
+                                  detail="Sprachsteuerung: an", final=True)
             asyncio.create_task(self._bot_apply_command(room, room_name, bot, "on"))
             return
         if not bot.get("enabled"):
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                  detail="KI-Funker deaktiviert", final=True)
             return
         rooms = bot.get("rooms") or []
         if rooms and room_name not in rooms:
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                  detail="Raum nicht in Robert-Liste (z.B. Papagei-Testraum)",
+                                  final=True)
             return
         now  = time.time()
         last = self._bot_last_reply.get(room_name, 0.0)
         if now - last < float(bot.get("cooldown_s", 20)):
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                  detail="Cooldown aktiv", final=True)
             return
         in_conv  = (now - last) < float(bot.get("conversation_window_s", 180))
         triggers = [t.lower() for t in bot.get("trigger", []) if t.strip()]
         triggers.append(name.lower())
-        if not (in_conv or any(t in low for t in triggers)
-                or self._BOT_CALL_RE.search(low)):
+        name_or_call = any(t in low for t in triggers) or bool(self._BOT_CALL_RE.search(low))
+        # Nach laengerer Funkstille ist so gut wie jeder (auch kurze/durch
+        # Whisper verhunzte) Spruch praktisch immer ein allgemeiner Anruf
+        # ("ist wer da?") -- Vorfilter sonst zu streng (kein Name/Anruf-Muster
+        # im -- moeglicherweise falsch erkannten -- Text), Modell bekommt die
+        # Nachricht in dem Fall nie zu Gesicht. Gleicher Schwellwert wie der
+        # Pausen-Hinweis im Prompt (_bot_build_prompt GAP_NOTE_S), damit beides
+        # zusammenpasst: Vorfilter laesst durch, Prompt erklaert warum.
+        prev_ts      = hist[-2][0] if len(hist) >= 2 else None
+        silence_s    = (ts - prev_ts) if prev_ts is not None else None
+        long_silence = (silence_s is not None
+                        and silence_s >= float(bot.get("silence_call_threshold_s", 300)))
+        if not (in_conv or name_or_call or long_silence):
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                  detail="nicht angesprochen (kein Name/Anruf, kein laufendes Gespräch)",
+                                  final=True)
             return
         search_query = ""
         if (bot.get("websearch") or {}).get("enabled"):
@@ -1538,6 +1679,11 @@ class TXServer:
                      or "").strip(" .,!?;:\"'")
                 if len(q) >= 3:
                     search_query = q[:200]
+        reason = ("Gespräch läuft" if in_conv else
+                 "Websuche erkannt" if search_query else
+                 "Name/Anruf erkannt" if name_or_call else
+                 "Anruf nach langer Funkstille")
+        self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok", detail=reason)
         asyncio.create_task(self._bot_reply(room, room_name, bot, search_query))
 
     async def _bot_reply(self, room: "FRNTXRoom", room_name: str, bot: dict,
@@ -1551,9 +1697,12 @@ class TXServer:
             hist   = list(self._room_hist.get(room_name, []))
             if hist:
                 heard_ts = hist[-1][0]   # Zeitpunkt des ausloesenden Funkspruchs
-            answer = await self._bot_ollama(bot, hist, search_query=search_query)
+            answer = await self._bot_ollama(bot, hist, search_query=search_query,
+                                            room_name=room_name, trace_ts=heard_ts)
             if not answer:
                 log.info("[%s] KI-Funker: nicht gemeint (SKIP)", room_name)
+                self.debug_trace_step(room_name, heard_ts, "Ergebnis", "skip",
+                                      detail="Modell: SKIP (nicht gemeint)", final=True)
                 return
             log.info("[%s] KI-Funker antwortet: %.80s", room_name, answer)
             t0   = time.time()
@@ -1562,6 +1711,10 @@ class TXServer:
             t1   = time.time()
             log.info("[%s] KI-Funker TTS+Senden: %.1fs — Gesamt (gehört→gesendet): %.1fs",
                      room_name, t1 - t0, t1 - heard_ts)
+            self.debug_trace_step(room_name, heard_ts, "TTS+Senden",
+                                  "ok" if sent else "error", t1 - t0,
+                                  answer if sent else "Senden fehlgeschlagen",
+                                  final=True)
             if not sent:
                 return
             self._bot_last_reply[room_name] = t1
@@ -1584,6 +1737,8 @@ class TXServer:
         except Exception as e:
             log.warning("[%s] KI-Funker-Antwort fehlgeschlagen: %s",
                         room_name, e)
+            self.debug_trace_step(room_name, heard_ts, "Fehler", "error",
+                                  detail=str(e)[:200], final=True)
         finally:
             self._bot_busy.discard(room_name)
 
@@ -1649,16 +1804,53 @@ class TXServer:
         # wie einer von vor 10 Sekunden. Fix: uralte Eintraege raus, echte
         # Pausen dazwischen als Marker sichtbar machen.
         STALE_DROP_S = 3600   # aelter als 1h -- fuer die aktuelle Lage irrelevant
-        GAP_NOTE_S   = 180    # ab 3 Min. Pause einen Hinweis einfuegen
+        GAP_NOTE_S   = 300    # ab 5 Min. Pause einen Hinweis einfuegen (war 3 --
+                               # zu kurz auf einem belebten Kanal, wo Antworten
+                               # oft ein paar Minuten brauchen)
         now = time.time()
         recent = [(ts, who, txt)
                   for ts, who, txt in hist[-int(bot.get("history_len", 10)):]
                   if now - ts <= STALE_DROP_S]
         if recent:
             system += ("\n\nWenn eine Nachricht wie '[... 12 Minuten Pause ...]' "
-                       "erscheint, ist seitdem eine Pause im Funkverkehr "
-                       "vergangen -- was davor gesagt wurde, gilt NICHT mehr "
-                       "als gerade laufendes Gespräch.")
+                       "erscheint, ist seitdem eine Pause im Funkverkehr vergangen. "
+                       "Smalltalk ANDERER Sprecher von davor ist meist nicht mehr "
+                       "aktuell -- ABER: War deine eigene letzte Nachricht davor "
+                       "eine Frage, und kommt danach (ohne dass zwischendurch "
+                       "jemand anderes was Eigenes sagt) eine Antwort, ist das "
+                       "trotz der Pause meist die Antwort auf genau diese Frage "
+                       "-- geh darauf ein, tu nicht so als waere nichts gefragt "
+                       "worden.\nKommt direkt nach so einer Pause ein kurzer oder "
+                       "inhaltlich unklarer/unpassender Spruch (auch wenn er nur "
+                       "aus 1-2 Woertern besteht oder wie \"keine Ahnung, ja\" o.ae. "
+                       "wirkt -- Whisper verhoert kurze Sprueche nach Stille besonders "
+                       "oft), ist das so gut wie sicher ein allgemeiner Anruf/Check, "
+                       "ob ueberhaupt wer auf dem Kanal ist -- reagier entsprechend "
+                       "(z.B. kurz melden), auch wenn der Wortlaut selbst nicht "
+                       "danach aussieht.")
+        # Personen-Gedaechtnis: manuell gepflegte Notizen pro Name (Admin-
+        # Panel), da es hier KEIN verlaessliches Rufzeichen pro Aufnahme gibt
+        # (Sprecher-Zuordnung ist deaktiviert, siehe bot_archive_callsign) --
+        # Namen werden stattdessen im gesprochenen Text erkannt (simpler
+        # Substring-Match, genau wie ein Mensch am Funk mitbekommt "ah, das
+        # ist ja der Jörg"). Nur einspeisen, wenn der Name im aktuellen
+        # Gespraechsfenster tatsaechlich vorkommt -- sonst wuerde bei vielen
+        # Eintraegen der Prompt aufgeblaeht und Robert faengt an, unpassend
+        # ueber abwesende Leute zu reden.
+        memory = bot.get("memory") or []
+        if memory and recent:
+            window = " ".join(f"{who} {txt}" for _, who, txt in recent).lower()
+            hits = [m for m in memory
+                    if isinstance(m, dict) and (m.get("name") or "").strip()
+                    and m["name"].strip().lower() in window
+                    and (m.get("notes") or "").strip()]
+            if hits:
+                notes_txt = "\n".join(f"- {m['name'].strip()}: {m['notes'].strip()}"
+                                      for m in hits)
+                system += ("\n\nBekannte Infos zu Personen im aktuellen Gespräch "
+                           "(nutze sie nur, wenn's natürlich passt, erzähl nicht "
+                           "unaufgefordert alles auf einmal runter, und erwähne "
+                           "nicht, dass du dir das notiert hast):\n" + notes_txt)
         messages = []
         prev_ts = None
         for ts, who, txt in recent:
@@ -1674,27 +1866,38 @@ class TXServer:
         return system, messages
 
     async def _bot_ollama(self, bot: dict, hist: list, with_raw: bool = False,
-                          search_query: str = ""):
+                          search_query: str = "", room_name: str = "",
+                          trace_ts: float | None = None):
         """Entscheidung + Antwort des KI-Funkers. Provider laut voice.bot.provider
         (ollama = lokal/eigener Server, gemini = Google-Cloud). Das Modell darf mit
         SKIP schweigen. Liefert "" wenn der Bot nicht antworten soll.
         with_raw=True → (verarbeitete Antwort, roher Modell-Output) für den Test.
         search_query: erkannter Websuche-Auftrag (siehe _BOT_SEARCH_RE) —
         wird vor dem LLM-Aufruf per SearXNG aufgelöst und in den Kontext
-        eingespeist."""
+        eingespeist. room_name/trace_ts: Zuordnung fuers Debug-Panel, beide
+        leer/None beim Trockentest (kein Tracing noetig)."""
+        do_trace = bool(room_name) and trace_ts is not None
         search_context = ""
         if search_query:
             _t0 = time.time()
             search_context = await self._bot_websearch(bot, search_query)
-            log.info("KI-Funker Websuche: %.1fs", time.time() - _t0)
+            _sdt = time.time() - _t0
+            log.info("KI-Funker Websuche: %.1fs", _sdt)
+            if do_trace:
+                self.debug_trace_step(room_name, trace_ts, "Websuche",
+                                     "ok" if search_context else "warn", _sdt,
+                                     search_context[:200] if search_context
+                                     else "keine Treffer")
         system, messages = self._bot_build_prompt(bot, hist, search_context)
         provider = (bot.get("provider") or "ollama").strip().lower()
         _t0 = time.time()
         if provider == "gemini":
             raw = await self._llm_gemini(bot, system, messages)
         else:
-            raw = await self._llm_ollama(bot, system, messages)
-        log.info("KI-Funker LLM (%s): %.1fs", provider, time.time() - _t0)
+            raw = await self._llm_ollama(bot, system, messages,
+                                         room_name=room_name, trace_ts=trace_ts)
+        _lldt = time.time() - _t0
+        log.info("KI-Funker LLM (%s): %.1fs", provider, _lldt)
         ans = ""
         if raw:
             # <think>…</think> entfernen (Reasoning-Modelle wie qwen3 geben es aus)
@@ -1706,23 +1909,90 @@ class TXServer:
             name = bot.get("name") or "Robert"
             cleaned = re.sub(rf"^{re.escape(name)}\s*:\s*", "", cleaned,
                              flags=re.IGNORECASE).strip()
+            # Emojis raus (werden vorgelesen, Prompt-Verbot reicht nicht immer)
+            cleaned = self._EMOJI_RE.sub("", cleaned)
+            cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
             if cleaned and not cleaned.upper().startswith("SKIP"):
                 ans = cleaned   # sonst: nicht gemeint / nichts zu sagen
+        if do_trace:
+            self.debug_trace_step(room_name, trace_ts, "LLM",
+                                 "ok" if raw else "error", _lldt,
+                                 (ans or raw or "(keine Antwort)")[:300])
         return (ans, raw or "") if with_raw else ans
 
-    async def _llm_ollama(self, bot: dict, system: str, messages: list) -> str:
-        """Chat-Aufruf an einen Ollama-Server. Liefert rohen Antworttext ("" bei Fehler)."""
+    async def _llm_ollama(self, bot: dict, system: str, messages: list,
+                          room_name: str = "", trace_ts: float | None = None) -> str:
+        """Chat-Aufruf an einen Ollama-Server. Liefert rohen Antworttext ("" bei Fehler).
+
+        Bei aktivierter Websuche wird dem Modell zusaetzlich zum Regex-Trigger
+        (siehe _BOT_SEARCH_RE, faengt nur explizite "such mal nach X"-Befehle)
+        das echte websearch-Tool angeboten -- das Modell kann so auch von sich
+        aus nachschlagen, wenn es ein erwaehntes Thema nicht kennt, statt zu
+        halluzinieren. Bei Tool-Call: zweite Anfrage mit Suchergebnis als
+        tool-Nachricht, liefert dann die eigentliche Antwort."""
         ar    = self.cfg.get("voice", {}).get("auto_reply", {})
         url   = (bot.get("ollama_url") or ar.get("ollama_url")
                  or "http://192.0.0.17:11434").rstrip("/")
-        model = bot.get("ollama_model") or "qwen3:14b"
-        body = {"model": model,
-                "messages": [{"role": "system", "content": system}] + messages,
-                "stream": False, "keep_alive": bot.get("ollama_keep_alive", 0),
-                "options": {"num_predict": 150, "temperature": 0.6}}
-        if "qwen3" in model.lower() or "deepseek-r1" in model.lower():
-            body["think"] = False   # Thinking-Modelle: Grübel-Block abschalten
+        do_trace = bool(room_name) and trace_ts is not None
+        full_messages = [{"role": "system", "content": system}] + messages
         hdrs = self._ollama_headers(bot.get("ollama_token"))
+
+        # Bereits geladenes Modell bevorzugen statt stur das konfigurierte
+        # anzufordern -- vermeidet einen kompletten Neu-Load (~10-15s), wenn
+        # z.B. gerade interaktiv über Open WebUI ein anderes Modell laeuft.
+        # ACHTUNG: Persona/Prompt/Temperature sind speziell auf das konfigurierte
+        # Modell (Aura-Medium alias gemma4) abgestimmt -- laeuft zufaellig ein
+        # komplett anderes Modell, kann sich Robert dadurch spuerbar anders
+        # verhalten. Faellt still auf das konfigurierte Modell zurueck, wenn
+        # gerade nichts geladen ist oder die Abfrage fehlschlaegt.
+        model   = bot.get("ollama_model") or "qwen3:14b"
+        num_ctx = int(bot.get("ollama_num_ctx", 30780))
+        try:
+            ps_timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=ps_timeout) as sess:
+                async with sess.get(f"{url}/api/ps", headers=hdrs) as resp:
+                    if resp.status == 200:
+                        loaded = (await resp.json()).get("models") or []
+                        if loaded:
+                            entry = loaded[0]
+                            loaded_name = entry.get("name") or entry.get("model")
+                            if loaded_name and loaded_name != model:
+                                log.info("KI-Funker: nutze bereits geladenes Modell %s "
+                                        "statt konfiguriertem %s (spart Neu-Load)",
+                                        loaded_name, model)
+                                model = loaded_name
+                            # Kontextfenster des laufenden Modells ebenfalls
+                            # uebernehmen statt den konfigurierten Wert stur
+                            # anzufordern -- sonst laedt Ollama trotz gleichem
+                            # Modell neu, nur weil num_ctx abweicht.
+                            loaded_ctx = entry.get("context_length")
+                            if loaded_ctx and int(loaded_ctx) != num_ctx:
+                                log.info("KI-Funker: uebernehme geladenes Kontextfenster "
+                                        "%s statt konfiguriertem %s", loaded_ctx, num_ctx)
+                                num_ctx = int(loaded_ctx)
+        except Exception as e:
+            log.debug("KI-Funker: /api/ps nicht erreichbar (%s) -- nutze konfiguriertes Modell/Kontext", e)
+        body = {"model": model,
+                "messages": full_messages,
+                "stream": False, "keep_alive": bot.get("ollama_keep_alive", 0),
+                # num_ctx: bevorzugt vom gerade geladenen Modell übernommen
+                # (siehe oben), sonst voice.bot.ollama_num_ctx. Ohne num_ctx
+                # nimmt Ollama seinen eigenen Default (4096), der vom Kontext
+                # abweicht, mit dem andere Clients (z.B. Open WebUI) das
+                # Modell geladen haben. Weicht der angeforderte num_ctx vom
+                # gerade geladenen ab, laedt Ollama komplett neu (~10-15s) --
+                # Ping-Pong beim Wechsel zwischen KI-Funker und anderen Tools.
+                "options": {"num_predict": 150, "temperature": 0.4,
+                            "num_ctx": num_ctx},
+                # Immer aus: bei Thinking-Modellen (qwen3, gemma4, deepseek-r1, …)
+                # frisst der Grübel-Block sonst das ganze num_predict-Budget auf
+                # (done_reason="length" BEVOR ueberhaupt eine sichtbare Antwort
+                # entsteht -- Robert "antwortet" dann mit leerem Text, wirkt wie
+                # SKIP). Bei Modellen ohne Thinking-Modus wird das Feld einfach
+                # ignoriert, schadet also nicht.
+                "think": False}
+        if (bot.get("websearch") or {}).get("enabled"):
+            body["tools"] = self._BOT_WEBSEARCH_TOOL
         try:
             timeout = aiohttp.ClientTimeout(total=180)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
@@ -1736,7 +2006,44 @@ class TXServer:
         except Exception as e:
             log.warning("KI-Funker: Ollama nicht erreichbar (%s): %s", url, e)
             return ""
-        return (data.get("message", {}).get("content") or "").strip()
+
+        msg = data.get("message") or {}
+        tool_calls = msg.get("tool_calls") or []
+        if not tool_calls:
+            return (msg.get("content") or "").strip()
+
+        call  = tool_calls[0]
+        fn    = call.get("function") or {}
+        query = str((fn.get("arguments") or {}).get("query") or "").strip()[:200]
+        _t0 = time.time()
+        result = await self._bot_websearch(bot, query) if query else ""
+        _sdt = time.time() - _t0
+        log.info("KI-Funker Websuche (Tool-Call, Modell-Initiative): %.1fs -- %r",
+                 _sdt, query)
+        if do_trace:
+            self.debug_trace_step(room_name, trace_ts, "Websuche", "ok" if result else "warn",
+                                 _sdt, f"[Modell-Initiative] {query}: " +
+                                 (result[:200] if result else "keine Treffer"))
+        follow = full_messages + [
+            {"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls},
+            {"role": "tool", "content": result or "keine Treffer gefunden"},
+        ]
+        body2 = {**body, "messages": follow}
+        body2.pop("tools", None)   # zweite Runde: kein erneuter Tool-Call noetig
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(f"{url}/api/chat", json=body2,
+                                     headers=hdrs) as resp:
+                    if resp.status != 200:
+                        log.warning("KI-Funker Ollama (nach Tool-Call) HTTP %d: %s",
+                                    resp.status, (await resp.text())[:120])
+                        return ""
+                    data2 = await resp.json()
+        except Exception as e:
+            log.warning("KI-Funker: Ollama nicht erreichbar (Tool-Call-Folgeanfrage, %s): %s",
+                       url, e)
+            return ""
+        return ((data2.get("message") or {}).get("content") or "").strip()
 
     async def _llm_gemini(self, bot: dict, system: str, messages: list) -> str:
         """Chat-Aufruf an Google Gemini (generateContent). Liefert rohen
@@ -1803,8 +2110,11 @@ class TXServer:
         return web.json_response({"enabled": bool(ar.get("enabled", False))})
 
     def _voice_server_base(self) -> str:
-        """Basis-URL des Voice-Servers (remote_url ohne /tts)."""
-        url = (self.cfg.get("voice", {}).get("remote_url") or "").strip()
+        """Basis-URL des XTTS-Voice-Servers (xtts_url ohne /tts) fuer den
+        Stimm-Sample-Upload -- IMMER XTTS, unabhaengig davon welche Engine
+        Robert (remote_url) gerade nutzt, denn nur XTTS kennt hochgeladene
+        Referenz-Stimmen (Piper/Google nicht)."""
+        url = (self.cfg.get("voice", {}).get("xtts_url") or "").strip()
         return re.sub(r"/tts/?$", "", url)
 
     async def handle_voice_my_settings(self, request):
@@ -1942,7 +2252,10 @@ class TXServer:
         if not text:
             return web.json_response({"error": "kein Text"}, status=400)
         vcfg = self.cfg.get("voice", {})
-        url  = (vcfg.get("remote_url") or "").strip()
+        # Immer XTTS (nicht remote_url) -- die Hoerprobe soll die eigene
+        # geklonte Stimme vorspielen, das kann nur XTTS, egal welche Engine
+        # Robert gerade nutzt.
+        url  = (vcfg.get("xtts_url") or "").strip()
         if not vcfg.get("enabled", False) or not url:
             return web.json_response({"error": "Voice deaktiviert"}, status=503)
         speaker = self._user_speaker(info["user"])
@@ -2123,9 +2436,20 @@ class TXServer:
                 bot["trigger"] = _strlist(body["trigger"])
             if "rooms" in body:
                 bot["rooms"] = _strlist(body["rooms"])
+            if "memory" in body and isinstance(body["memory"], list):
+                mem = []
+                for m in body["memory"]:
+                    if not isinstance(m, dict):
+                        continue
+                    nm = (m.get("name") or "").strip()
+                    nt = (m.get("notes") or "").strip()
+                    if nm and nt:
+                        mem.append({"name": nm[:60], "notes": nt[:500]})
+                bot["memory"] = mem[:50]   # grosszuegige Obergrenze gegen Prompt-Aufblaehung
             for key, hi in (("cooldown_s", 3600),
                             ("conversation_window_s", 3600),
-                            ("history_len", 30)):
+                            ("history_len", 30),
+                            ("ollama_num_ctx", 262144)):   # Modell-Max laut /api/tags
                 if key in body:
                     try:
                         bot[key] = max(0, min(hi, float(body[key])))
@@ -3034,6 +3358,44 @@ class TXServer:
             "frn_port":      self.args.frn_port,
         })
 
+    async def handle_admin_debug_traces(self, request):
+        """GET /api/admin/debug-traces — Ablaufverfolgung fuer die letzten
+        gehoerten Durchsagen: pro Durchsage eine Spur mit einzelnen Schritten
+        (Aufnahme/Whisper/Bot-Trigger/Websuche/LLM/TTS+Senden), je mit Status
+        (ok/warn/error/skip) und Zeitmessung, neueste zuerst."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        traces = []
+        for tr in self._debug_traces:
+            traces.append({
+                "room":     tr["room"],
+                "ts":       tr["ts"],
+                "started":  tr["started"],
+                "done":     tr["done"],
+                "total_s":  tr["total_s"],
+                "steps":    tr["steps"],
+            })
+        return web.json_response({"traces": traces})
+
+    async def handle_admin_debug_audio(self, request):
+        """GET /api/admin/debug-audio/{name} — spielt die WAV-Aufnahme zu
+        einem "Aufnahme"-Schritt im Debug-Panel ab. Name wird auf den reinen
+        Dateinamen reduziert (kein Pfad-Escape aus wav_dir möglich)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        name = Path(request.match_info.get("name", "")).name
+        if not name or not name.lower().endswith(".wav"):
+            return web.json_response({"error": "ungültiger Dateiname"}, status=400)
+        wav_dir = Path(self.cfg.get("transcription", {}).get(
+            "wav_dir", "/opt/FRN/recordings"))
+        wav_path = wav_dir / name
+        if not wav_path.exists():
+            return web.json_response({"error": "Aufnahme nicht mehr vorhanden"},
+                                     status=404)
+        return web.FileResponse(wav_path)
+
     async def handle_admin_overview(self, request):
         """GET /api/admin/overview — alle wichtigen Einstellungen auf einen
         Blick (live aus config.json), gruppiert, mit Angabe wo man ändert.
@@ -3799,7 +4161,7 @@ class TXServer:
                             continue
                         vcfg = self.cfg.get("voice", {})
                         if not (vcfg.get("enabled", False)
-                                and (vcfg.get("remote_url") or "").strip()):
+                                and (vcfg.get("xtts_url") or "").strip()):
                             await ws.send_json({"type": "error",
                                                 "msg": "Sprach-Funktion ist deaktiviert"})
                             continue
@@ -3824,7 +4186,8 @@ class TXServer:
                                 # der Sender getastet wird — sonst toter Träger während TTS.
                                 try:
                                     pcm = await self._get_voice_pcm(
-                                        vt, vl, self._user_speaker(info["user"]))
+                                        vt, vl, self._user_speaker(info["user"]),
+                                        force_xtts=True)
                                 except Exception as e:
                                     room._tx_lock.release()
                                     waiting_tx = False
@@ -4108,6 +4471,8 @@ class TXServer:
         app.router.add_delete("/api/admin/rooms/{mount}", self.handle_admin_rooms_delete)
 
         app.router.add_get("/api/admin/status", self.handle_admin_status)
+        app.router.add_get("/api/admin/debug-traces", self.handle_admin_debug_traces)
+        app.router.add_get("/api/admin/debug-audio/{name}", self.handle_admin_debug_audio)
         app.router.add_get("/api/admin/overview", self.handle_admin_overview)
 
         app.router.add_get ("/api/admin/server",   self.handle_admin_server_get)
@@ -4180,20 +4545,80 @@ def main():
             pipeline.on_transcript = server.on_transcript
             pipeline.resolve_callsign = server.bot_archive_callsign
             pipeline.resolve_known_text = server.resolve_known_text
+            pipeline.debug_trace = server.debug_trace_step
             log.info("Transkription aktiviert (Aufnahmen via frn_stream.py)")
 
             # Tasks erst im laufenden Loop starten (on_startup)
             async def _start_pipeline(app):
                 pipeline._setup_cleanup()
 
+            # Ohne das hier laeuft der Meta-Watcher (alle 2s, Backlog-Aufholung)
+            # bei SIGTERM einfach unbeirrt weiter -- aiohttp kennt den Task nicht
+            # und wartet nicht auf ihn, aber der Prozess haengt trotzdem, bis
+            # systemd nach TimeoutStopSec (90s) mit SIGKILL nachhilft. Sauber
+            # abbrechen statt totschlagen lassen.
+            async def _stop_pipeline(app):
+                log.info("Beende Transkriptions-Pipeline (Meta-Watcher/Cleanup)...")
+                for t in (getattr(pipeline, "_task_cleanup", None),
+                          getattr(pipeline, "_task_meta", None)):
+                    if t:
+                        t.cancel()
+                try:
+                    # Obergrenze: falls die Kuendigung ausnahmsweise mitten in
+                    # einer laufenden Whisper-Anfrage (Thread-Pool, nicht
+                    # sofort abbrechbar) haengen bleibt, trotzdem spaetestens
+                    # nach 5s weitermachen statt wieder auf den 90s-SIGKILL
+                    # von systemd zu warten.
+                    await asyncio.wait_for(
+                        asyncio.gather(pipeline._task_cleanup, pipeline._task_meta,
+                                       return_exceptions=True),
+                        timeout=5.0)
+                except asyncio.TimeoutError:
+                    log.warning("Meta-Watcher reagiert nicht auf Abbruch (5s) — "
+                                "beende trotzdem weiter.")
+
             app = server.build_app()
             app.on_startup.append(_start_pipeline)
+            app.on_cleanup.append(_stop_pipeline)
         else:
             log.info("Transkription deaktiviert (enabled=no)")
             app = server.build_app()
     else:
         log.info("frn_transcription.py nicht gefunden — Transkription deaktiviert")
         app = server.build_app()
+
+    # SIGTERM/SIGINT-Sicherheitsnetz: normalerweise reicht aiohttps eigener
+    # Graceful-Shutdown (raise GracefulExit über den Signal-Handler). Aber ein
+    # laufender Whisper-Remote-Call haengt in einem Thread-Pool-Worker in einem
+    # blockierenden urllib.request.urlopen(..., timeout=280) -- ein
+    # ThreadPoolExecutor-Future, das schon laeuft, laesst sich von außen nicht
+    # abbrechen (siehe process_wav in frn_transcription.py). Trifft SIGTERM
+    # genau in so ein offenes Zeitfenster, wartet aiohttps runner.cleanup()
+    # brav auf dieses eine Future, bis es (im schlimmsten Fall nach 280s)
+    # natuerlich endet -- lange genug, dass systemd (TimeoutStopSec 90s)
+    # vorher SIGKILLt. Deshalb hier zusaetzlich ein hartes Zeitlimit: nach
+    # 15s ohne sauberes Ende erzwingen wir os._exit() selbst, statt auf den
+    # harten Kill von systemd zu warten.
+    async def _install_shutdown_watchdog(app):
+        loop = asyncio.get_event_loop()
+
+        def _on_alarm(signum, frame):
+            log.warning("Shutdown haengt (>15s, vermutlich laufender "
+                        "Whisper-Request) -- erzwinge Beendigung.")
+            os._exit(1)
+
+        def _on_term():
+            signal.signal(signal.SIGALRM, _on_alarm)
+            signal.alarm(15)
+            raise web.GracefulExit()
+
+        try:
+            loop.add_signal_handler(signal.SIGINT, _on_term)
+            loop.add_signal_handler(signal.SIGTERM, _on_term)
+        except NotImplementedError:
+            pass  # z.B. Windows
+
+    app.on_startup.append(_install_shutdown_watchdog)
 
     web.run_app(app, host=args.host, port=args.port,
                 access_log=log if args.debug else None)

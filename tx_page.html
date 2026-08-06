@@ -3,6 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- Zum Home-Bildschirm hinzufügen -> läuft im Vollbild ohne Safari-Chrome,
+     wird von iOS im Hintergrund weniger aggressiv terminiert als ein Tab. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="FRN">
 <title>FRN Webstreams</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -34,7 +40,9 @@ body {
   color: var(--text);
   max-width: 680px;
   margin: 0 auto;
-  padding: 0 0 calc(32px + env(safe-area-inset-bottom)) 0;
+  /* safe-area-inset-top: im Standalone-Modus (Home-Bildschirm, black-translucent)
+     zeichnet iOS sonst die Statusleiste über den Header. Im Safari-Tab = 0. */
+  padding: env(safe-area-inset-top) 0 calc(32px + env(safe-area-inset-bottom)) 0;
   min-height: 100dvh;
   background-image:
     linear-gradient(rgba(79,195,247,0.02) 1px, transparent 1px),
@@ -436,7 +444,7 @@ audio {
 .admin-panel {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 16px; width: 100%; max-width: 640px;
+  border-radius: 16px; width: 100%; max-width: 960px;
   overflow: hidden; flex-shrink: 0;
   box-shadow: 0 24px 80px rgba(0,0,0,0.8), 0 0 0 1px rgba(79,195,247,0.1);
 }
@@ -463,15 +471,16 @@ audio {
 
 /* Tabs */
 .admin-tabs {
-  display: flex; border-bottom: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--border);
   background: var(--inset);
 }
 .admin-tab {
-  flex: 1; padding: 10px 16px; background: none; border: none;
+  flex: 1 1 auto; min-width: 90px; padding: 10px 12px; background: none; border: none;
   font-family: 'Share Tech Mono', monospace;
   font-size: 0.7em; letter-spacing: 0.12em; text-transform: uppercase;
   color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent;
   transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
 }
 .admin-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 .admin-tab:hover:not(.active) { color: var(--text); }
@@ -506,6 +515,44 @@ audio {
 .badge-user  { background: rgba(138,171,191,0.15); color: var(--muted); }
 .badge-frn   { background: rgba(255,167,38,0.15); color: var(--orange); }
 .badge-ok    { background: rgba(76,175,80,0.15); color: var(--green2); }
+
+.dbg-dot {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  margin-right: 3px; vertical-align: middle;
+}
+.dbg-ok    { background: var(--green);  box-shadow: 0 0 4px rgba(76,175,80,0.6); }
+.dbg-warn  { background: var(--yellow); box-shadow: 0 0 4px rgba(255,238,88,0.6); }
+.dbg-error { background: var(--red);    box-shadow: 0 0 4px rgba(239,83,80,0.7); }
+.dbg-skip  { background: var(--muted);  opacity: 0.6; }
+.dbg-trace {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 10px; background: rgba(20,32,50,0.35);
+}
+.dbg-trace-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-family: 'Share Tech Mono', monospace; font-size: 0.78em;
+  color: var(--accent2); margin-bottom: 8px;
+}
+.dbg-trace-head .dbg-total { color: var(--muted); }
+.dbg-steps { display: flex; flex-wrap: wrap; gap: 6px; }
+.dbg-step {
+  font-family: 'Rajdhani', sans-serif; font-size: 0.85em;
+  border: 1px solid var(--dim); border-radius: 6px;
+  padding: 4px 9px; background: rgba(255,255,255,0.02);
+  cursor: default;
+}
+.dbg-step.dbg-playable {
+  cursor: pointer; border-color: var(--accent);
+}
+.dbg-step.dbg-playable:hover { background: rgba(79,195,247,0.08); }
+.dbg-step.dbg-playing { background: rgba(79,195,247,0.18); }
+.dbg-step .dbg-step-name { color: var(--text); font-weight: 600; }
+.dbg-step .dbg-step-dur  { color: var(--muted); font-size: 0.85em; margin-left: 3px; }
+.dbg-step-detail {
+  font-size: 0.72em; color: var(--muted); margin-top: 3px;
+  max-width: 320px; white-space: pre-wrap; word-break: break-word;
+}
+.dbg-arrow { color: var(--dim); align-self: center; }
 
 .btn-icon {
   background: none; border: 1px solid var(--dim);
@@ -1077,6 +1124,7 @@ audio {
       <button class="admin-tab" data-tab="autoreply" onclick="showAdminTab('autoreply')">AUTOMATIK</button>
       <button class="admin-tab" data-tab="bot"       onclick="showAdminTab('bot')">KI-FUNKER</button>
       <button class="admin-tab" data-tab="crosslink" onclick="showAdminTab('crosslink')">CROSSLINK</button>
+      <button class="admin-tab" data-tab="debug"     onclick="showAdminTab('debug')">DEBUG</button>
     </div>
 
     <!-- ── Übersicht tab ── -->
@@ -1462,6 +1510,13 @@ audio {
             <label>Ollama-Server (URL)</label>
             <input type="text" id="bot-ollama-url" placeholder="https://webserver.example.de/ollama">
           </div>
+          <div class="form-field" style="flex:0 0 140px">
+            <label>Kontextfenster <span style="color:var(--muted)">(num_ctx)</span></label>
+            <input type="number" id="bot-ollama-numctx" min="0" max="262144" placeholder="30780">
+          </div>
+        </div>
+        <div class="form-field" style="margin-top:2px;font-size:.72rem;color:var(--muted);line-height:1.4">
+          Muss zu dem Kontext passen, mit dem andere Clients (z.B. Open WebUI) dasselbe Modell laden — sonst lädt Ollama bei jedem Wechsel neu (~10-15s).
         </div>
         <div class="form-field" style="margin-top:8px">
           <label>Zugangs-Token (falls Server passwortgeschützt)</label>
@@ -1486,7 +1541,17 @@ audio {
         </div>
       </div>
 
-      <div style="margin-top:12px">
+      <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+      <div class="admin-section-title">Personen-Gedächtnis</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.5">
+        Notizen zu einzelnen Leuten. Werden nur ins Gespräch eingespeist, wenn der
+        Name gerade im aktuellen Funkverkehr vorkommt (einfacher Textabgleich —
+        es gibt hier keine verlässlichen Rufzeichen pro Aufnahme).
+      </div>
+      <div id="bot-memory-list"></div>
+      <button class="btn-save" style="margin-top:2px" onclick="addBotMemoryRow()">+ EINTRAG</button>
+
+      <div style="margin-top:16px">
         <button class="btn-save" onclick="saveBotAdmin()">SPEICHERN</button>
       </div>
       <div class="admin-msg" id="msg-bot"></div>
@@ -1557,6 +1622,29 @@ audio {
         <button class="btn-save" onclick="saveCrosslink()">SPEICHERN</button>
       </div>
       <div class="admin-msg" id="msg-crosslink"></div>
+    </div>
+
+    <!-- ── Debug tab ── -->
+    <div id="admin-tab-debug" class="admin-tab-content">
+      <div class="admin-section-title">Ablaufverfolgung Funksprüche</div>
+      <div style="font-size:.78rem;color:var(--muted);margin-bottom:14px;line-height:1.5">
+        Jede gehörte Durchsage von Aufnahme bis Senden, Schritt für Schritt:
+        <span class="dbg-dot dbg-ok"></span> ok ·
+        <span class="dbg-dot dbg-warn"></span> Warnung ·
+        <span class="dbg-dot dbg-error"></span> Fehler ·
+        <span class="dbg-dot dbg-skip"></span> übersprungen.
+        Zeit pro Schritt in Klammern. <b>Aufnahme</b>-Schritt anklicken, um die
+        WAV-Datei abzuspielen.
+      </div>
+      <audio id="dbg-audio-player" style="display:none"></audio>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer">
+        <input type="checkbox" id="dbg-autorefresh" checked
+               onchange="this.checked ? startDebugAutoRefresh() : stopDebugAutoRefresh()">
+        automatisch aktualisieren (alle 5s)
+      </label>
+      <div id="debug-traces"></div>
+      <button class="btn-save" onclick="loadDebugTraces()" style="margin-top:10px">AKTUALISIEREN</button>
+      <div class="admin-msg" id="msg-debug"></div>
     </div>
 
   </div>
@@ -1905,7 +1993,7 @@ function ensureRxAudioCtx() {
     // _bgAudioEl (siehe _initBgAudio).
 
     clearInterval(rxLevelTimer);
-    rxLevelTimer = setInterval(updateRxLevel, 100);
+    rxLevelTimer = setInterval(updateRxLevel, 200);
   } catch (e) {
     console.warn("RX AudioContext:", e);
   }
@@ -2302,6 +2390,11 @@ async function loadRoomClients(mount) {
   } catch {
     renderUserList([]);
   }
+  // Im Hintergrund NICHT weiterpollen: der visibilitychange-Handler löscht den
+  // Timer zwar, aber ein gerade laufender Fetch würde ihn hier wieder aufziehen —
+  // und weil das Hintergrund-Audio das JS am Leben hält, liefe das Polling dann
+  // dauerhaft weiter (Akku). Auf 'visible' startet loadRoomClients ohnehin neu.
+  if (document.visibilityState === "hidden") { clientPollTimer = null; return; }
   clientPollTimer = setTimeout(
     () => loadRoomClients(document.getElementById("room-select")?.value),
     15000
@@ -3207,6 +3300,7 @@ function openAdmin() {
 }
 function closeAdmin() {
   document.getElementById("admin-overlay").classList.remove("open");
+  stopDebugAutoRefresh();
 }
 
 function showAdminTab(name) {
@@ -3225,7 +3319,10 @@ function showAdminTab(name) {
     if (name === "autoreply") loadAutoReplyAdmin();
     if (name === "bot")       loadBotAdmin();
     if (name === "crosslink") loadCrosslink();
+    if (name === "debug")     loadDebugTraces();
   }
+  if (name !== "debug") stopDebugAutoRefresh();
+  else startDebugAutoRefresh();
 }
 
 // ── Übersicht (Read-only Zusammenfassung) ────────────────────────────────────
@@ -3674,6 +3771,7 @@ async function loadBotAdmin() {
     document.getElementById("bot-provider").value  = d.provider || "ollama";
     document.getElementById("bot-model").value     = d.ollama_model || "";
     document.getElementById("bot-ollama-url").value = d.ollama_url || "";
+    document.getElementById("bot-ollama-numctx").value = d.ollama_num_ctx ?? 30780;
     // Server liefert nur eine Maske (••••), nie das echte Geheimnis
     document.getElementById("bot-ollama-token").value = d.ollama_token || "";
     document.getElementById("bot-gemini-model").value = d.gemini_model || "";
@@ -3682,9 +3780,42 @@ async function loadBotAdmin() {
     updateBotProvider();
     loadTts();            // TTS-Engine-Dropdown
     loadOllamaModels();   // füllt die geteilte Modell-Datalist
+    renderBotMemory(d.memory || []);
   } catch(e) {
     showMsg("msg-bot", "Fehler beim Laden: " + e, "error");
   }
+}
+
+function renderBotMemory(list) {
+  const box = document.getElementById("bot-memory-list");
+  box.innerHTML = "";
+  if (!list.length) { addBotMemoryRow(); return; }
+  list.forEach(m => addBotMemoryRow(m.name || "", m.notes || ""));
+}
+
+function addBotMemoryRow(name = "", notes = "") {
+  const box = document.getElementById("bot-memory-list");
+  const row = document.createElement("div");
+  row.className = "bot-mem-row";
+  row.style.cssText = "display:flex;gap:8px;margin-bottom:8px;align-items:flex-start";
+  row.innerHTML = `
+    <input type="text" class="bm-name" placeholder="Name" value="${esc(name)}"
+           style="flex:0 0 140px;background:var(--panel);color:var(--text);
+                  border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:.85em">
+    <input type="text" class="bm-notes" placeholder="Notizen (z.B. wohnt in ..., neue Antenne, ...)" value="${esc(notes)}"
+           style="flex:1;background:var(--panel);color:var(--text);
+                  border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:.85em">
+    <button type="button" onclick="this.parentElement.remove()"
+            style="flex:0 0 auto;background:none;border:1px solid var(--dim);
+                   color:var(--muted);border-radius:6px;padding:6px 10px;cursor:pointer">✕</button>`;
+  box.appendChild(row);
+}
+
+function collectBotMemory() {
+  return Array.from(document.querySelectorAll("#bot-memory-list .bot-mem-row")).map(row => ({
+    name:  row.querySelector(".bm-name").value.trim(),
+    notes: row.querySelector(".bm-notes").value.trim(),
+  })).filter(m => m.name && m.notes);
 }
 
 async function loadGeminiModels() {
@@ -3736,9 +3867,11 @@ async function saveBotAdmin() {
     provider:              document.getElementById("bot-provider").value,
     ollama_model:          document.getElementById("bot-model").value,
     ollama_url:            document.getElementById("bot-ollama-url").value,
+    ollama_num_ctx:        parseFloat(document.getElementById("bot-ollama-numctx").value) || 30780,
     ollama_token:          document.getElementById("bot-ollama-token").value,
     gemini_model:          document.getElementById("bot-gemini-model").value,
     gemini_api_key:        document.getElementById("bot-gemini-key").value,
+    memory:                collectBotMemory(),
   };
   try {
     const r = await adminFetch("/api/admin/bot", {
@@ -3831,6 +3964,102 @@ async function saveCrosslink() {
     loadCrosslink();
   } catch(e) {
     showMsg("msg-crosslink", "Fehler: " + e, "error");
+  }
+}
+
+// ── Debug-Ablaufverfolgung ───────────────────────────────────────────────────
+let dbgTimer = null;
+let dbgAudioName = null;
+let dbgAudioUrl  = null;
+async function playDebugAudio(name, el) {
+  const player = document.getElementById("dbg-audio-player");
+  document.querySelectorAll(".dbg-step.dbg-playing").forEach(n => {
+    if (n !== el) n.classList.remove("dbg-playing");
+  });
+  if (dbgAudioName === name && !player.paused) {
+    player.pause();
+    el.classList.remove("dbg-playing");
+    return;
+  }
+  if (dbgAudioName === name && player.src) {
+    el.classList.add("dbg-playing");
+    player.play();
+    return;
+  }
+  try {
+    el.classList.add("dbg-playing");
+    const r = await adminFetch(`/api/admin/debug-audio/${encodeURIComponent(name)}`);
+    if (!r.ok) {
+      el.classList.remove("dbg-playing");
+      showMsg("msg-debug", "Aufnahme nicht verfügbar (evtl. schon aufgeräumt).", "error");
+      return;
+    }
+    const blob = await r.blob();
+    if (dbgAudioUrl) URL.revokeObjectURL(dbgAudioUrl);
+    dbgAudioUrl  = URL.createObjectURL(blob);
+    dbgAudioName = name;
+    player.src = dbgAudioUrl;
+    player.onended = () => el.classList.remove("dbg-playing");
+    await player.play();
+  } catch(e) {
+    el.classList.remove("dbg-playing");
+  }
+}
+function startDebugAutoRefresh() {
+  stopDebugAutoRefresh();
+  const cb = document.getElementById("dbg-autorefresh");
+  if (!cb || !cb.checked) return;
+  dbgTimer = setInterval(loadDebugTraces, 5000);
+}
+function stopDebugAutoRefresh() {
+  if (dbgTimer) { clearInterval(dbgTimer); dbgTimer = null; }
+}
+function fmtDur(s) {
+  return (s === null || s === undefined) ? "" : ` (${s.toFixed(2)}s)`;
+}
+function fmtTime(ts) {
+  return new Date(ts * 1000).toLocaleTimeString("de-DE");
+}
+async function loadDebugTraces() {
+  const box = document.getElementById("debug-traces");
+  try {
+    const r = await adminFetch("/api/admin/debug-traces");
+    const data = await r.json();
+    const traces = data.traces || [];
+    if (!traces.length) {
+      box.innerHTML = `<div style="color:var(--muted);font-size:0.85em">Noch keine Durchsagen aufgezeichnet.</div>`;
+      return;
+    }
+    box.innerHTML = traces.map(tr => {
+      const steps = (tr.steps || []).map((s, i) => {
+        const cls = "dbg-" + (s.status || "skip");
+        const detail = s.detail ? `<div class="dbg-step-detail">${esc(s.detail)}</div>` : "";
+        const arrow = i < tr.steps.length - 1 ? `<span class="dbg-arrow">→</span>` : "";
+        const playable = !!s.audio;
+        const stepCls = "dbg-step" + (playable ? " dbg-playable" : "");
+        const stepId = playable ? ` id="dbg-step-${esc(s.audio)}"` : "";
+        const click = playable ? ` onclick="playDebugAudio('${esc(s.audio)}', this)"` : "";
+        const playIcon = playable ? `<span title="abspielen">▶</span> ` : "";
+        return `<div class="${stepCls}"${stepId}${click}>
+                  <span class="dbg-dot ${cls}"></span>
+                  ${playIcon}<span class="dbg-step-name">${esc(s.name)}</span>
+                  <span class="dbg-step-dur">${fmtDur(s.duration_s)}</span>
+                  ${detail}
+                </div>${arrow}`;
+      }).join("");
+      const totalTxt = tr.done
+        ? (tr.total_s !== null && tr.total_s !== undefined ? `Gesamt: ${tr.total_s.toFixed(2)}s` : "abgeschlossen")
+        : "läuft …";
+      return `<div class="dbg-trace">
+                <div class="dbg-trace-head">
+                  <span>${esc(tr.room)} · ${fmtTime(tr.ts)}</span>
+                  <span class="dbg-total">${totalTxt}</span>
+                </div>
+                <div class="dbg-steps">${steps}</div>
+              </div>`;
+    }).join("");
+  } catch(e) {
+    box.innerHTML = `<div style="color:var(--red);font-size:0.85em">Fehler beim Laden: ${esc(String(e))}</div>`;
   }
 }
 

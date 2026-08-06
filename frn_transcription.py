@@ -347,6 +347,11 @@ class TranscriptionPipeline:
                 poll_delay = time.time() - ts
                 log.info("[%s] Meta-Datei gefunden: %s (%s) — Warteschlange: %.1fs",
                          room, Path(wav_path).name, callsign, poll_delay)
+                dbg = getattr(self, "debug_trace", None)
+                if dbg:
+                    dbg(room, ts, "Aufnahme", "ok", poll_delay,
+                        f"{Path(wav_path).name} ({callsign or 'kein Rufzeichen'})",
+                        audio=Path(wav_path).name)
                 # Sequenziell abarbeiten — verhindert Timeout wenn viele Dateien warten
                 await self.process_wav(wav_path, room, callsign, ts)
 
@@ -365,10 +370,13 @@ class TranscriptionPipeline:
         # dasselbe Zeitfenster wie die Echo-Erkennung fuers Rufzeichen. Spart
         # ~10-15s GPU-Zeit pro Bot-Antwort und vermeidet, dass Whisper Roberts
         # eigene synthetisierte Stimme fehlerhaft zurueck-transkribiert.
+        dbg = getattr(self, "debug_trace", None)
         rkt = getattr(self, "resolve_known_text", None)
         text = (rkt(room, ts) if rkt else None) or ""
         if text:
             log.info("[%s] Bekannter Bot-Text übernommen (kein Whisper nötig)", room)
+            if dbg:
+                dbg(room, ts, "Whisper", "skip", 0.0, "bekannter Bot-Text übernommen")
         else:
             model_size = self.cfg.get("whisper_model", "medium")
             language   = self.cfg.get("whisper_language", "de")
@@ -394,16 +402,25 @@ class TranscriptionPipeline:
                         transcribe_wav(wav_path, model_size, language),
                         timeout=300.0
                     )
-                    log.info("[%s] Whisper: %.1fs", room, time.time() - _t0)
+                    _wdt = time.time() - _t0
+                    log.info("[%s] Whisper: %.1fs", room, _wdt)
+                    if dbg:
+                        dbg(room, ts, "Whisper", "ok", _wdt, text[:200])
                     break  # Erfolg
                 except asyncio.TimeoutError:
                     log.warning("[%s] Whisper-Timeout für %s", room, Path(wav_path).name)
                     if not remote_url:
+                        if dbg:
+                            dbg(room, ts, "Whisper", "error", time.time() - _t0,
+                               "Timeout (lokal, kein Fallback)", final=True)
                         break  # lokaler Fehler → überspringen
                     fails += 1
                     if fails >= MAX_FAILS:
                         log.warning("[%s] %s nach %d Timeouts übersprungen",
                                     room, Path(wav_path).name, fails)
+                        if dbg:
+                            dbg(room, ts, "Whisper", "error", time.time() - _t0,
+                               f"nach {fails} Timeouts übersprungen", final=True)
                         return
                     log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
                     await asyncio.sleep(30)
@@ -413,18 +430,29 @@ class TranscriptionPipeline:
                     if not Path(wav_path).exists():
                         log.warning("[%s] WAV %s existiert nicht mehr — übersprungen",
                                     room, Path(wav_path).name)
+                        if dbg:
+                            dbg(room, ts, "Whisper", "error", None,
+                               "WAV existiert nicht mehr", final=True)
                         return
                     if not remote_url:
+                        if dbg:
+                            dbg(room, ts, "Whisper", "error", None, str(e)[:200], final=True)
                         break  # lokaler Fehler → überspringen
                     fails += 1
                     if fails >= MAX_FAILS:
                         log.warning("[%s] %s nach %d Fehlern übersprungen",
                                     room, Path(wav_path).name, fails)
+                        if dbg:
+                            dbg(room, ts, "Whisper", "error", None,
+                               f"nach {fails} Fehlern übersprungen: {e}"[:200], final=True)
                         return
                     log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
                     await asyncio.sleep(30)
 
         if not text:
+            if dbg:
+                dbg(room, ts, "Whisper", "skip", None,
+                   "kein Text erkannt (Stille/VAD)", final=True)
             return
 
         # Rufzeichen-Auflösung: frn_tx_server setzt pipeline.resolve_callsign,
