@@ -23,6 +23,75 @@ log = logging.getLogger(__name__)
 
 _whisper_lock = asyncio.Lock()
 
+# Generische Whisper-Halluzinationen (leere/rauschende Audiodateien) -- bisher
+# nur im lokalen CPU-Fallback gefiltert, obwohl die Remote-API (Produktion)
+# genau denselben Effekten unterliegt (2026-08-11 live beobachtet: "Vielen
+# Dank.", "Untertitelung des ZDF, 2020" auf reinem Rauschen).
+_HALLUCINATION_PHRASES = {
+    "", ".", "..", "...", "…",
+    "vielen dank.", "vielen dank", "danke.", "danke", "tschüss.", "auf wiedersehen.",
+    "untertitel", "untertitelung", "untertitel:",
+    "untertitel des zdf", "untertitel: zdf", "untertitel zdf",
+    "untertitel von zdf", "untertitel im ersten",
+    "untertitel der ard", "untertitel: ard",
+    "untertitel ndr", "untertitel: ndr",
+    "untertitel wdr", "untertitel: wdr",
+    "untertitel mdr", "untertitel: mdr",
+    "untertitel br", "untertitel: br",
+    "untertitelung des zdf", "untertitelung der ard",
+    "copyright", "www.", "alle rechte vorbehalten.",
+    "♪", "♫", "musik", "[musik]", "[applaus]", "[gelächter]",
+    "[stille]", "(stille)", "[no audio]",
+}
+_HALLUCINATION_SUBSTRINGS = (
+    "untertitel", "zdf 20", "ndr 20", "ard 20", "wdr 20", "mdr 20", "br 20",
+)
+
+
+def _is_generic_hallucination(text: str) -> bool:
+    t = text.strip().lower()
+    if t in _HALLUCINATION_PHRASES:
+        return True
+    return any(sub in t for sub in _HALLUCINATION_SUBSTRINGS)
+
+
+# Echte, oft als kompletter Einzel-Spruch gesagte CB-Jargon-Woerter -- kommen
+# im initial_prompt vor (damit Whisper sie erkennt), sind aber legitimer
+# Inhalt und duerfen die Prompt-Echo-Erkennung unten NICHT ausloesen.
+_CB_JARGON_ALLOWLIST = {
+    "roger", "over", "qrv", "kanal", "frei", "basis", "mobile", "standort",
+    "signalstärke", "rapport", "qrm", "guten", "morgen", "abend", "tschüss",
+    "später", "ja", "nein", "hallo", "danke", "ciao", "tag",
+}
+
+
+def _is_prompt_echo(text: str, prompt: str) -> bool:
+    """Erkennt kurze Ausgaben, die fast nur aus initial_prompt-eigenen Woertern
+    bestehen -- typisches Whisper-Verhalten bei Rauschsperren-Rauschen: es
+    halluziniert Bruchstuecke des Prompts zurueck statt echten Inhalt (live
+    beobachtet 2026-08-11: initial_prompt enthaelt "Eickelborn"/"CB-Funk",
+    Whisper macht aus purem Rauschen "Eickel"/"Eickel-Funk"). Nur bei sehr
+    kurzen Ausgaben aktiv, damit echte kurze Durchsagen nicht faelschlich
+    verworfen werden. Echte CB-Jargon-Einzelworte (Roger, Over, ...) sind
+    per Allowlist ausgenommen, da die genau deswegen im Prompt stehen, weil
+    sie oft als vollstaendiger, echter Spruch vorkommen.
+    """
+    words = [w.strip(".,!?…").lower() for w in _re.split(r"[\s-]+", text.strip())]
+    words = [w for w in words if len(w) >= 3]
+    if not words or len(words) > 2:
+        return False
+    prompt_tokens = [w.strip(".,!?…").lower() for w in _re.split(r"[\s-]+", prompt)]
+    prompt_tokens = [w for w in prompt_tokens if len(w) >= 4]
+    matched_distinctive = False
+    for w in words:
+        if w in _CB_JARGON_ALLOWLIST:
+            continue
+        if any(w in pt or pt in w for pt in prompt_tokens):
+            matched_distinctive = True
+        else:
+            return False
+    return matched_distinctive
+
 
 def _get_whisper_remote_url() -> str:
     """Liest remote_url: zuerst Umgebungsvariable, dann config.json."""
@@ -34,6 +103,15 @@ def _get_whisper_remote_url() -> str:
         cfg_path = Path(__file__).parent / "config.json"
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         return cfg.get("whisper", {}).get("remote_url", "").strip()
+    except Exception:
+        return ""
+
+
+def _get_whisper_initial_prompt() -> str:
+    try:
+        cfg_path = Path(__file__).parent / "config.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        return cfg.get("whisper", {}).get("initial_prompt", "").strip()
     except Exception:
         return ""
 
@@ -78,6 +156,13 @@ def _transcribe_remote(wav_path: str, url: str, language: str) -> str:
         result = json.loads(resp.read())
     text = _remove_repetitions(result.get("text", "").strip())
     log.debug("Remote-Transkript (%.1fs): %s", result.get("duration_s", 0), text[:80])
+    if _is_generic_hallucination(text):
+        log.info("Remote-Transkript als generische Halluzination verworfen: %.80s", text)
+        return ""
+    prompt = _get_whisper_initial_prompt()
+    if prompt and _is_prompt_echo(text, prompt):
+        log.info("Remote-Transkript als Prompt-Echo verworfen (Rauschsperre?): %.80s", text)
+        return ""
     return text
 
 
