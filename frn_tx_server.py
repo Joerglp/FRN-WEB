@@ -1392,7 +1392,7 @@ class TXServer:
         # erzwingt jede Abweichung einen kompletten Neu-Load (~10-15s),
         # siehe _llm_ollama. Konfigurierbar, da der Wert bei Bedarf noch
         # nach oben angepasst wird.
-        "ollama_num_ctx": 30780,
+        "ollama_num_ctx": 97280,
         # Personen-Gedaechtnis: manuell gepflegte Notizen pro Name, siehe
         # _bot_build_prompt. Liste aus {"name": ..., "notes": ...}.
         "memory": [],
@@ -1704,6 +1704,26 @@ class TXServer:
                 self.debug_trace_step(room_name, heard_ts, "Ergebnis", "skip",
                                       detail="Modell: SKIP (nicht gemeint)", final=True)
                 return
+            # Wiederhol-Schleifen-Bremse (2026-08-11): beobachtet, dass Robert
+            # gelegentlich seine eigenen Persona-/System-Prompt-Regeln als
+            # Antworttext ausgibt statt sie zu befolgen -- landet diese
+            # Fehlantwort einmal im Verlauf, sieht das Modell sich selbst
+            # diesen Text sagen und wiederholt ihn bei jedem folgenden
+            # kurzen/kontextarmen Spruch nahezu identisch weiter (reproduziert
+            # per Test bestaetigt). Bricht die Schleife spaetestens beim
+            # zweiten Versuch ab, statt endlos live zu senden.
+            own_prev = self._bot_own_tx.get(room_name, [])
+            if own_prev:
+                sim = difflib.SequenceMatcher(
+                    None, answer.lower(), own_prev[-1][2].lower()).ratio()
+                if sim > 0.7:
+                    log.warning("[%s] KI-Funker: Antwort zu aehnlich zur letzten eigenen "
+                               "(%.2f) -- unterdrueckt gegen Wiederhol-Schleife: %.80s",
+                               room_name, sim, answer)
+                    self.debug_trace_step(room_name, heard_ts, "Ergebnis", "skip",
+                                          detail=f"Wiederholung unterdrueckt (Aehnlichkeit {sim:.2f})",
+                                          final=True)
+                    return
             log.info("[%s] KI-Funker antwortet: %.80s", room_name, answer)
             t0   = time.time()
             sent = await self._auto_send_voice(room, answer,
@@ -1946,7 +1966,7 @@ class TXServer:
         # verhalten. Faellt still auf das konfigurierte Modell zurueck, wenn
         # gerade nichts geladen ist oder die Abfrage fehlschlaegt.
         model   = bot.get("ollama_model") or "qwen3:14b"
-        num_ctx = int(bot.get("ollama_num_ctx", 30780))
+        num_ctx = int(bot.get("ollama_num_ctx", 97280))
         try:
             ps_timeout = aiohttp.ClientTimeout(total=5)
             async with aiohttp.ClientSession(timeout=ps_timeout) as sess:
@@ -1961,27 +1981,24 @@ class TXServer:
                                         "statt konfiguriertem %s (spart Neu-Load)",
                                         loaded_name, model)
                                 model = loaded_name
-                            # Kontextfenster des laufenden Modells ebenfalls
-                            # uebernehmen statt den konfigurierten Wert stur
-                            # anzufordern -- sonst laedt Ollama trotz gleichem
-                            # Modell neu, nur weil num_ctx abweicht.
-                            loaded_ctx = entry.get("context_length")
-                            if loaded_ctx and int(loaded_ctx) != num_ctx:
-                                log.info("KI-Funker: uebernehme geladenes Kontextfenster "
-                                        "%s statt konfiguriertem %s", loaded_ctx, num_ctx)
-                                num_ctx = int(loaded_ctx)
+                            # ACHTUNG (2026-08-10, wieder entfernt): das
+                            # Kontextfenster des laufenden Modells NICHT mehr
+                            # uebernehmen -- wenn ein anderer Client (Open
+                            # WebUI) selbst mit wechselnden num_ctx anfragt,
+                            # jagt dieser Code dem jeweils zuletzt gesehenen
+                            # Wert hinterher und verursacht dadurch staendige
+                            # Neu-Loads (Ping-Pong), statt sie zu vermeiden.
+                            # Eigener fester Wert (ollama_num_ctx) ist stabiler.
         except Exception as e:
             log.debug("KI-Funker: /api/ps nicht erreichbar (%s) -- nutze konfiguriertes Modell/Kontext", e)
         body = {"model": model,
                 "messages": full_messages,
                 "stream": False, "keep_alive": bot.get("ollama_keep_alive", 0),
-                # num_ctx: bevorzugt vom gerade geladenen Modell übernommen
-                # (siehe oben), sonst voice.bot.ollama_num_ctx. Ohne num_ctx
-                # nimmt Ollama seinen eigenen Default (4096), der vom Kontext
-                # abweicht, mit dem andere Clients (z.B. Open WebUI) das
-                # Modell geladen haben. Weicht der angeforderte num_ctx vom
-                # gerade geladenen ab, laedt Ollama komplett neu (~10-15s) --
-                # Ping-Pong beim Wechsel zwischen KI-Funker und anderen Tools.
+                # num_ctx: fest aus voice.bot.ollama_num_ctx (Default 97280).
+                # Bewusst NICHT dynamisch vom gerade geladenen Modell
+                # uebernommen (siehe Kommentar oben) -- das verursachte
+                # Neu-Lade-Ping-Pong, wenn andere Clients (Open WebUI) selbst
+                # wechselnde num_ctx anfragen.
                 "options": {"num_predict": 150, "temperature": 0.4,
                             "num_ctx": num_ctx},
                 # Immer aus: bei Thinking-Modellen (qwen3, gemma4, deepseek-r1, …)

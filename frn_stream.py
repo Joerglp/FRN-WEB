@@ -28,6 +28,9 @@ import sys
 import threading
 import time
 import wave
+
+import numpy as np
+from scipy.signal import butter, sosfiltfilt
 from pathlib import Path
 
 # --- Constants ---
@@ -464,6 +467,17 @@ class RoomRecorder:
     SAMPLE_RATE     = 8000
     SAMPLE_WIDTH    = 2      # int16
 
+    # Rausch-Schwelle gegen kurze Rauschsperren-Oeffnungen (2026-08-11): die
+    # Rauschsperre oeffnet gelegentlich kurz durch ein Rauschen, ohne dass
+    # wirklich gesprochen wird -- PCM_SILENCE (echte digitale Stille) greift
+    # dabei NICHT, weil das Rauschen echte (wenn auch leise) Samples liefert.
+    # Ergebnis bisher: Whisper macht aus dem Rauschen ein Zufallswort wie
+    # "Ciao", Robert reagiert faelschlich. Schwelle konservativ UNTER echter
+    # (auch leiser) Sprache gewaehlt -- Referenzwerte aus echten Aufnahmen:
+    # Rausch-RMS ~160 (Uebergang Rauschsperre, gemessen 2026-08-01) vs.
+    # leise-aber-echte-Sprache-RMS ~1550 ("Ciao, schoenen Tag", 2026-08-04).
+    NOISE_RMS_THRESHOLD = 300
+
     def __init__(self, room_name: str, wav_dir: str):
         self.room_name = room_name
         self.wav_dir   = Path(wav_dir)
@@ -543,11 +557,57 @@ class RoomRecorder:
             log.debug("[%s] Session zu kurz — verworfen", self.room_name)
             return
 
+        rms = self._rms(pcm_data)
+        if rms < self.NOISE_RMS_THRESHOLD:
+            log.debug("[%s] Session nur Rauschen (RMS=%.0f < %.0f) — verworfen",
+                     self.room_name, rms, self.NOISE_RMS_THRESHOLD)
+            return
+
         threading.Thread(
             target=self._save,
             args=(pcm_data, callsign, start_ts),
             daemon=True,
         ).start()
+
+    @staticmethod
+    def _rms(pcm_data: bytes) -> float:
+        if not pcm_data:
+            return 0.0
+        audio = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float64)
+        return float(np.sqrt(np.mean(audio ** 2)))
+
+    @classmethod
+    def _clean_audio(cls, pcm_data: bytes) -> bytes:
+        """Bandpass (Sprachband) + sanfte Normalisierung vor dem Schreiben.
+
+        Bandpass 300-3400 Hz (klassisches Telefonie-/Sprachband) draengt
+        Brummen/Rauschen ausserhalb des Sprachbereichs zurueck, was Whisper
+        hilft. Normalisierung hebt leise Durchsagen an, damit Whisper genug
+        Pegel zum Erkennen hat -- Ziel bewusst nur 70% Vollaussteuerung (nicht
+        100%), weil GSM 06.10 bei sehr lauten/tonalen Passagen ueberschwingen
+        und klippen kann (siehe Kratz-Test 2026-08-04) -- Headroom lassen ist
+        hier wichtiger als maximale Lautstaerke. Verstaerkung zusaetzlich
+        gedeckelt, damit sehr leise Aufnahmen nicht nur hochgerauscht werden.
+        Bei jedem Fehler (z.B. zu kurzes Signal fuer den Filter) wird das
+        Original unveraendert zurueckgegeben -- lieber unbehandelt als eine
+        Aufnahme durch einen Bug verlieren.
+        """
+        try:
+            audio = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float64)
+            if len(audio) < 64:
+                return pcm_data
+            sos = butter(4, [300, 3400], btype="bandpass",
+                        fs=cls.SAMPLE_RATE, output="sos")
+            filtered = sosfiltfilt(sos, audio)
+            peak = np.max(np.abs(filtered))
+            if peak > 0:
+                target = 0.70 * 32767
+                gain = min(target / peak, 8.0)
+                filtered = filtered * gain
+            return np.clip(filtered, -32768, 32767).astype(np.int16).tobytes()
+        except Exception as e:
+            log.warning("Audio-Aufbereitung fehlgeschlagen, nutze Original: %s", e)
+            return pcm_data
 
     def _save(self, pcm_data: bytes, callsign: str, ts: float):
         from datetime import datetime
@@ -560,6 +620,8 @@ class RoomRecorder:
         name = dt.strftime(f"frn-%Y%m%d-%H%M%S-{safe_room}")
         wav_path  = self.wav_dir / f"{name}.wav"
         meta_path = self.wav_dir / f"{name}.meta"
+
+        pcm_data = self._clean_audio(pcm_data)
 
         # WAV schreiben
         try:
