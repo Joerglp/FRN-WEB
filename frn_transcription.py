@@ -27,9 +27,21 @@ _whisper_lock = asyncio.Lock()
 # nur im lokalen CPU-Fallback gefiltert, obwohl die Remote-API (Produktion)
 # genau denselben Effekten unterliegt (2026-08-11 live beobachtet: "Vielen
 # Dank.", "Untertitelung des ZDF, 2020" auf reinem Rauschen).
+# "Bis zum naechsten Mal." (+ Varianten) 2026-08-12 ergaenzt: erschien seit
+# Tagen dutzende Male, oft zu unplausiblen Uhrzeiten (00:37, 04:07, 04:11) --
+# betroffene Aufnahmen jeweils nur 2-4s, Peak exakt auf unserem
+# Normalisierungsziel (Rauschen wurde hochverstaerkt, wie beim Eickel-Fall).
+# Nur als EXAKTER Gesamttext gefiltert (siehe _is_generic_hallucination),
+# nicht als Substring -- ein echtes "...bis zum naechsten Mal" am Ende eines
+# laengeren echten Gespraechs bleibt daher unangetastet.
 _HALLUCINATION_PHRASES = {
     "", ".", "..", "...", "…",
     "vielen dank.", "vielen dank", "danke.", "danke", "tschüss.", "auf wiedersehen.",
+    "bis zum nächsten mal.", "bis zum nächsten mal",
+    "bis zum nächsten mal, tschüss.", "bis zum nächsten mal, tschüss",
+    "das war's für heute. bis zum nächsten mal. tschüss.",
+    "das war's für heute. bis zum nächsten mal.",
+    "das war's für heute. bis zum nächsten mal. auf wiedersehen.",
     "untertitel", "untertitelung", "untertitel:",
     "untertitel des zdf", "untertitel: zdf", "untertitel zdf",
     "untertitel von zdf", "untertitel im ersten",
