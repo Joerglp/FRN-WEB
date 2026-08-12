@@ -457,13 +457,25 @@ class RoomRecorder:
 
     SILENCE_TIMEOUT = 4.0    # Sekunden Stille nach letztem Audio → Session beendet
     MIN_DURATION    = 1.5    # Sekunden Mindestlänge (kürzere werden verworfen)
-    MAX_DURATION    = 90.0   # Sekunden Maximallänge (erzwungener Schnitt) --
-                             # war 300s: bei Dämmerungs-Bandöffnungen blieb COS
-                             # oft minutenlang "an" (Rauschen/Ferndurchgang),
-                             # 5-Min-Clips blockierten Whisper (single-threaded)
-                             # am Stück und stauten die ganze Warteschlange.
-                             # 90s deckt reguläre CB-Durchsagen ab und deckelt
-                             # den Worst-Case fuer diese Stör-Ereignisse.
+    MAX_DURATION    = 240.0  # Sekunden Maximallänge (erzwungener Schnitt) --
+                             # war 300s, dann 90s (2026-08-07): bei Whisper
+                             # large-v3 blockierten lange Clips den (single-
+                             # threaded) Server minutenlang und stauten die
+                             # Warteschlange. Seit Umstieg auf large-v3-turbo
+                             # (2026-08-11, ~3x schneller) faellt dieser Grund
+                             # weitgehend weg -- 240s brauchen jetzt nur noch
+                             # ~8s statt ~25s+. Wieder angehoben, weil User
+                             # beobachtete: durchgehende CB-Gespraeche ohne
+                             # Sendepause (schnelles Nachdruecken) wurden bei
+                             # 90s alle ~90s mitten im Wort zerschnitten, jeder
+                             # Schnipsel dann isoliert (condition_on_previous_
+                             # text=False) transkribiert -- Hauptursache fuer
+                             # fehlenden/falschen Inhalt bei langen Gespraechen.
+    CHUNK_OVERLAP_S = 1.5    # Bei erzwungenem MAX_DURATION-Schnitt werden die
+                             # letzten CHUNK_OVERLAP_S Sekunden in den naechsten
+                             # Chunk uebernommen (Session bleibt aktiv) --
+                             # verhindert, dass ein Wort exakt am Schnittpunkt
+                             # halb verloren geht.
     SAMPLE_RATE     = 8000
     SAMPLE_WIDTH    = 2      # int16
 
@@ -516,23 +528,29 @@ class RoomRecorder:
             self._buf.append(pcm)
             self._last_ts = time.time()
 
-            # Maximallänge überschritten → Session zwangsweise beenden
+            # Maximallänge überschritten → Chunk speichern, Session laeuft
+            # aber WEITER (nicht als beendet markieren) -- bei durchgehenden
+            # Gespraechen ohne echte Sendepause sonst dauerhafte Hart-Schnitte.
+            # Die letzten CHUNK_OVERLAP_S Sekunden wandern in den naechsten
+            # Chunk, damit kein Wort exakt am Schnittpunkt verloren geht.
             max_bytes = int(self.MAX_DURATION * self.SAMPLE_RATE) * self.SAMPLE_WIDTH
             if sum(len(b) for b in self._buf) >= max_bytes:
-                log.info("[%s] MAX_DURATION erreicht — Session wird gespeichert",
-                         self.room_name)
-                if self._timer:
-                    self._timer.cancel()
-                    self._timer = None
-                self._active  = False
+                log.info("[%s] MAX_DURATION erreicht — Chunk wird gespeichert, "
+                         "Session laeuft weiter", self.room_name)
                 pcm_data      = b"".join(self._buf)
                 callsign_snap = self._callsign
                 start_ts      = self._start_ts
-                self._buf     = []
+                overlap_bytes = (int(self.CHUNK_OVERLAP_S * self.SAMPLE_RATE)
+                                 * self.SAMPLE_WIDTH)
+                carry         = pcm_data[-overlap_bytes:] if overlap_bytes else b""
+                self._buf     = [carry] if carry else []
+                self._start_ts = time.time() - (
+                    len(carry) / (self.SAMPLE_RATE * self.SAMPLE_WIDTH))
                 threading.Thread(
                     target=self._save, args=(pcm_data, callsign_snap, start_ts),
                     daemon=True).start()
-                return
+                # Timer NICHT abbrechen -- Session bleibt aktiv, unten (nach
+                # dem with-Block) wird er wie bei normalem Audio neu gestartet.
 
         # Timer zurücksetzen — nur bei echtem Audio
         if self._timer:
