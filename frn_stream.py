@@ -457,20 +457,20 @@ class RoomRecorder:
 
     SILENCE_TIMEOUT = 4.0    # Sekunden Stille nach letztem Audio → Session beendet
     MIN_DURATION    = 1.5    # Sekunden Mindestlänge (kürzere werden verworfen)
-    MAX_DURATION    = 240.0  # Sekunden Maximallänge (erzwungener Schnitt) --
-                             # war 300s, dann 90s (2026-08-07): bei Whisper
-                             # large-v3 blockierten lange Clips den (single-
-                             # threaded) Server minutenlang und stauten die
-                             # Warteschlange. Seit Umstieg auf large-v3-turbo
-                             # (2026-08-11, ~3x schneller) faellt dieser Grund
-                             # weitgehend weg -- 240s brauchen jetzt nur noch
-                             # ~8s statt ~25s+. Wieder angehoben, weil User
-                             # beobachtete: durchgehende CB-Gespraeche ohne
-                             # Sendepause (schnelles Nachdruecken) wurden bei
-                             # 90s alle ~90s mitten im Wort zerschnitten, jeder
-                             # Schnipsel dann isoliert (condition_on_previous_
-                             # text=False) transkribiert -- Hauptursache fuer
-                             # fehlenden/falschen Inhalt bei langen Gespraechen.
+    MAX_DURATION    = 90.0   # Sekunden Maximallänge (erzwungener Schnitt) --
+                             # war 300s, dann 90s (2026-08-07), dann kurz 240s
+                             # (2026-08-12, seit large-v3-turbo kein Warte-
+                             # schlangen-Problem mehr). Wieder auf 90s zurueck
+                             # (2026-08-13): bei den laengeren Chunks (bis 165s)
+                             # begann Whisper trotz beam_size=5 auf undeutlichem
+                             # Audio zu "kreisen" -- inhaltliche Wiederholungs-
+                             # /Drift-Schleifen (z.B. dieselbe Passage leicht
+                             # variiert doppelt), User hat das an echten
+                             # Aufnahmen bestaetigt. Kuerzere Chunks sind fuers
+                             # Modell offenbar leichter sauber zu halten als die
+                             # verlorenen Wortfetzen an den Schnittpunkten wert
+                             # sind. CHUNK_OVERLAP_S unten faengt die Schnitt-
+                             # stellen weiterhin ab.
     CHUNK_OVERLAP_S = 1.5    # Bei erzwungenem MAX_DURATION-Schnitt werden die
                              # letzten CHUNK_OVERLAP_S Sekunden in den naechsten
                              # Chunk uebernommen (Session bleibt aktiv) --
