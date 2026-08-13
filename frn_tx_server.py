@@ -1280,11 +1280,16 @@ class TXServer:
 
     async def _auto_send_voice(self, room: "FRNTXRoom", text: str,
                                speaker: str = "default",
-                               force_xtts: bool = False) -> bool:
+                               force_xtts: bool = False,
+                               on_tx_start=None) -> bool:
         """Synthetisiert Text und sendet ihn direkt in den Raum (ohne WS-Client).
 
         Gleicher Ablauf wie SPEAK_VOICE: erst Stimme erzeugen, dann Sender
         tasten (kein toter Träger), Echtzeit-Sendeloop, sauberes end_tx.
+        on_tx_start: optionaler Callback, wird genau beim Tasten des Senders
+        aufgerufen (Beginn der eigentlichen Übertragung, nach der TTS-Synthese)
+        -- fürs Debug-Panel, damit neben "fertig" auch "Sendebeginn" sichtbar
+        ist. Kein Effekt auf andere Aufrufer (Default None = kein Callback).
         """
         try:
             vcfg = self.cfg.get("voice", {})
@@ -1301,6 +1306,8 @@ class TXServer:
                     log.info("[%s] Auto-Senden: TX nicht genehmigt (Kanal belegt)",
                              room.name)
                     return False
+                if on_tx_start:
+                    on_tx_start()
                 try:
                     for i in range(0, len(pcm), PCM_PACKET_BYTES):
                         await room.send_pcm(pcm[i:i + PCM_PACKET_BYTES])
@@ -1396,6 +1403,12 @@ class TXServer:
         # Personen-Gedaechtnis: manuell gepflegte Notizen pro Name, siehe
         # _bot_build_prompt. Liste aus {"name": ..., "notes": ...}.
         "memory": [],
+        # Notizbuch: Robert merkt sich SELBST Dinge per Tool-Call (siehe
+        # _BOT_NOTE_TOOL/_bot_save_note), im Unterschied zum Personen-
+        # Gedaechtnis oben (das pflegt der Admin manuell). Liste aus
+        # {"ts": ..., "text": ...}, aelteste zuerst raus (siehe _bot_save_note).
+        "notebook_enabled": False,
+        "notebook": [],
         # System-Anweisung fürs Modell (leer = _BOT_SYSTEM_DEFAULT).
         # Platzhalter {name} und {persona} werden eingesetzt.
         "system_prompt": "",
@@ -1479,6 +1492,30 @@ class TXServer:
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "Suchbegriff"}},
                 "required": ["query"],
+            },
+        },
+    }]
+
+    # Notizbuch-Tool: Robert kann sich per Tool-Call SELBST etwas dauerhaft
+    # merken (im Unterschied zum Personen-Gedaechtnis, das der Admin manuell
+    # pflegt). Bewusst als eigenstaendiges Tool statt automatisch aus jeder
+    # Antwort abzuleiten -- das Modell entscheidet selbst, was wirklich
+    # merkenswert ist, sonst wuerde bei jedem Smalltalk etwas gespeichert.
+    _BOT_NOTE_TOOL = [{
+        "type": "function",
+        "function": {
+            "name": "notiz_merken",
+            "description": ("Speichert eine kurze Notiz dauerhaft in deinem eigenen "
+                            "Notizbuch, die du dir fuer spaetere Gespraeche merken "
+                            "willst (z.B. wiederkehrende Themen auf dem Kanal, "
+                            "Ereignisse, Dinge die jemand erzaehlt hat). Nutze das "
+                            "sparsam -- nur fuer wirklich merkenswerte Dinge, nicht "
+                            "fuer jeden Smalltalk."),
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string",
+                                        "description": "Kurze Notiz (1 Satz)"}},
+                "required": ["text"],
             },
         },
     }]
@@ -1725,9 +1762,16 @@ class TXServer:
                                           final=True)
                     return
             log.info("[%s] KI-Funker antwortet: %.80s", room_name, answer)
-            t0   = time.time()
+            t0 = time.time()
+            def _on_tx_start():
+                tx_ts = time.time()
+                log.info("[%s] KI-Funker Sendebeginn: %.1fs nach Antwort (TTS-Zeit)",
+                         room_name, tx_ts - t0)
+                self.debug_trace_step(room_name, heard_ts, "Sende-Start", "ok",
+                                     tx_ts - t0, "Sender getastet, Übertragung beginnt")
             sent = await self._auto_send_voice(room, answer,
-                                               bot.get("speaker") or "default")
+                                               bot.get("speaker") or "default",
+                                               on_tx_start=_on_tx_start)
             t1   = time.time()
             log.info("[%s] KI-Funker TTS+Senden: %.1fs — Gesamt (gehört→gesendet): %.1fs",
                      room_name, t1 - t0, t1 - heard_ts)
@@ -1801,6 +1845,39 @@ class TXServer:
             lines.append(f"{i}. {title} — {content}"[:220])
         return "\n".join(lines)
 
+    _NOTEBOOK_MAX = 60   # aelteste Notizen fallen raus, sonst waechst der Prompt
+
+    def _bot_save_note(self, text: str) -> None:
+        """Haengt eine Notiz ans Notizbuch (voice.bot.notebook) an -- im
+        Speicher (fuer sofortige Wirkung) UND auf der Platte (ueberlebt
+        Neustarts). Read-modify-write gegen die Disk-Datei wie in
+        handle_admin_bot, damit ein zeitgleicher Admin-Edit nicht ueberschrieben
+        wird -- Robert schreibt hier autonom, potenziell waehrend der Admin
+        gerade was anderes speichert."""
+        text = text.strip()[:300]
+        if not text:
+            return
+        entry = {"ts": time.time(), "text": text}
+        bot = self.cfg.setdefault("voice", {}).setdefault("bot", {})
+        notebook = bot.setdefault("notebook", [])
+        notebook.append(entry)
+        del notebook[:-self._NOTEBOOK_MAX]
+        log.info("KI-Funker Notizbuch: %.80s", text)
+        try:
+            if not self.args.config:
+                return
+            cfg_path = Path(self.args.config)
+            disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+            blk = disk.setdefault("voice", {}).setdefault("bot", {})
+            disk_notebook = blk.setdefault("notebook", [])
+            disk_notebook.append(entry)
+            del disk_notebook[:-self._NOTEBOOK_MAX]
+            cfg_path.write_text(
+                json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8")
+        except Exception as e:
+            log.warning("KI-Funker Notizbuch nicht auf Platte gespeichert: %s", e)
+
     def _bot_build_prompt(self, bot: dict, hist: list,
                           search_context: str = "") -> tuple[str, list]:
         """Baut System-Anweisung + Nachrichtenverlauf (provider-neutral).
@@ -1871,6 +1948,21 @@ class TXServer:
                            "(nutze sie nur, wenn's natürlich passt, erzähl nicht "
                            "unaufgefordert alles auf einmal runter, und erwähne "
                            "nicht, dass du dir das notiert hast):\n" + notes_txt)
+        # Notizbuch: eigene, per Tool-Call selbst gemerkte Notizen (siehe
+        # _BOT_NOTE_TOOL/_bot_save_note) -- im Unterschied zum Personen-
+        # Gedaechtnis oben IMMER eingespeist (nicht an einen im Gespraech
+        # vorkommenden Namen gebunden), aber auf die letzten paar begrenzt,
+        # sonst blaeht sich der Prompt mit der Zeit unbegrenzt auf.
+        notebook = bot.get("notebook") or []
+        if notebook:
+            recent_notes = notebook[-12:]
+            notes_txt = "\n".join(f"- {n['text'].strip()}" for n in recent_notes
+                                  if isinstance(n, dict) and (n.get("text") or "").strip())
+            if notes_txt:
+                system += ("\n\nDeine eigenen bisherigen Notizen (was du dir "
+                           "schon gemerkt hast, nutze es nur wenn's passt, "
+                           "erwähne nicht, dass du dir das notiert hast):\n"
+                           + notes_txt)
         messages = []
         prev_ts = None
         for ts, who, txt in recent:
@@ -2008,8 +2100,13 @@ class TXServer:
                 # SKIP). Bei Modellen ohne Thinking-Modus wird das Feld einfach
                 # ignoriert, schadet also nicht.
                 "think": False}
+        tools = []
         if (bot.get("websearch") or {}).get("enabled"):
-            body["tools"] = self._BOT_WEBSEARCH_TOOL
+            tools += self._BOT_WEBSEARCH_TOOL
+        if bot.get("notebook_enabled"):
+            tools += self._BOT_NOTE_TOOL
+        if tools:
+            body["tools"] = tools
         try:
             timeout = aiohttp.ClientTimeout(total=180)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
@@ -2029,18 +2126,29 @@ class TXServer:
         if not tool_calls:
             return (msg.get("content") or "").strip()
 
-        call  = tool_calls[0]
-        fn    = call.get("function") or {}
-        query = str((fn.get("arguments") or {}).get("query") or "").strip()[:200]
-        _t0 = time.time()
-        result = await self._bot_websearch(bot, query) if query else ""
-        _sdt = time.time() - _t0
-        log.info("KI-Funker Websuche (Tool-Call, Modell-Initiative): %.1fs -- %r",
-                 _sdt, query)
-        if do_trace:
-            self.debug_trace_step(room_name, trace_ts, "Websuche", "ok" if result else "warn",
-                                 _sdt, f"[Modell-Initiative] {query}: " +
-                                 (result[:200] if result else "keine Treffer"))
+        call = tool_calls[0]
+        fn   = call.get("function") or {}
+        name = fn.get("name") or ""
+        args = fn.get("arguments") or {}
+        if name == "notiz_merken":
+            note = str(args.get("text") or "").strip()[:300]
+            self._bot_save_note(note)
+            result = "notiert" if note else "keine Notiz erhalten"
+            if do_trace:
+                self.debug_trace_step(room_name, trace_ts, "Notizbuch", "ok" if note else "warn",
+                                     None, f"[Modell-Initiative] {note[:200]}")
+        else:
+            query = str(args.get("query") or "").strip()[:200]
+            _t0 = time.time()
+            result = await self._bot_websearch(bot, query) if query else ""
+            _sdt = time.time() - _t0
+            log.info("KI-Funker Websuche (Tool-Call, Modell-Initiative): %.1fs -- %r",
+                     _sdt, query)
+            if do_trace:
+                self.debug_trace_step(room_name, trace_ts, "Websuche", "ok" if result else "warn",
+                                     _sdt, f"[Modell-Initiative] {query}: " +
+                                     (result[:200] if result else "keine Treffer"))
+            result = result or "keine Treffer gefunden"
         follow = full_messages + [
             {"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls},
             {"role": "tool", "content": result or "keine Treffer gefunden"},
@@ -2463,6 +2571,24 @@ class TXServer:
                     if nm and nt:
                         mem.append({"name": nm[:60], "notes": nt[:500]})
                 bot["memory"] = mem[:50]   # grosszuegige Obergrenze gegen Prompt-Aufblaehung
+            if "notebook_enabled" in body:
+                bot["notebook_enabled"] = bool(body["notebook_enabled"])
+            if "notebook" in body and isinstance(body["notebook"], list):
+                # Admin darf hier nur LOESCHEN/kuerzen (Checkbox-Liste im Panel) --
+                # Robert selbst schreibt per Tool-Call ueber _bot_save_note dazu.
+                nb = []
+                for n in body["notebook"]:
+                    if not isinstance(n, dict):
+                        continue
+                    tx = (n.get("text") or "").strip()
+                    if not tx:
+                        continue
+                    try:
+                        ts = float(n.get("ts") or time.time())
+                    except (TypeError, ValueError):
+                        ts = time.time()
+                    nb.append({"ts": ts, "text": tx[:300]})
+                bot["notebook"] = nb[-self._NOTEBOOK_MAX:]
             for key, hi in (("cooldown_s", 3600),
                             ("conversation_window_s", 3600),
                             ("history_len", 30),

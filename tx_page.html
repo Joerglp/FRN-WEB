@@ -1551,6 +1551,20 @@ audio {
       <div id="bot-memory-list"></div>
       <button class="btn-save" style="margin-top:2px" onclick="addBotMemoryRow()">+ EINTRAG</button>
 
+      <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+      <div class="admin-section-title">Notizbuch</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.5">
+        Robert merkt sich hier SELBST Dinge (per Tool-Call, eigene Entscheidung —
+        im Unterschied zum Personen-Gedächtnis oben, das du manuell pflegst).
+        Die letzten Einträge werden immer in den Prompt eingespeist. Hier kannst
+        du nur löschen, nicht hinzufügen.
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer">
+        <input type="checkbox" id="bot-notebook-enabled" style="accent-color:#f0b429">
+        Notizbuch aktiv (Robert darf sich selbst Notizen machen)
+      </label>
+      <div id="bot-notebook-list" style="font-size:.82rem;color:var(--text);margin-bottom:6px"></div>
+
       <div style="margin-top:16px">
         <button class="btn-save" onclick="saveBotAdmin()">SPEICHERN</button>
       </div>
@@ -3781,9 +3795,42 @@ async function loadBotAdmin() {
     loadTts();            // TTS-Engine-Dropdown
     loadOllamaModels();   // füllt die geteilte Modell-Datalist
     renderBotMemory(d.memory || []);
+    document.getElementById("bot-notebook-enabled").checked = !!d.notebook_enabled;
+    renderBotNotebook(d.notebook || []);
   } catch(e) {
     showMsg("msg-bot", "Fehler beim Laden: " + e, "error");
   }
+}
+
+function renderBotNotebook(list) {
+  const box = document.getElementById("bot-notebook-list");
+  box.innerHTML = "";
+  if (!list.length) {
+    box.innerHTML = '<div style="color:var(--text-muted)">Noch keine eigenen Notizen.</div>';
+    return;
+  }
+  // neueste zuerst anzeigen
+  [...list].reverse().forEach(n => {
+    const row = document.createElement("div");
+    row.className = "bot-notebook-row";
+    row.dataset.ts = n.ts;
+    row.style.cssText = "display:flex;gap:8px;margin-bottom:6px;align-items:flex-start";
+    const dt = n.ts ? new Date(n.ts * 1000).toLocaleString("de-DE") : "";
+    row.innerHTML = `
+      <div style="flex:0 0 130px;color:var(--text-muted);font-size:.78em;padding-top:2px">${esc(dt)}</div>
+      <div style="flex:1;padding-top:2px">${esc(n.text || "")}</div>
+      <button type="button" onclick="this.parentElement.remove()"
+              style="flex:0 0 auto;background:none;border:1px solid var(--dim);
+                     color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer">✕</button>`;
+    box.appendChild(row);
+  });
+}
+
+function collectBotNotebook() {
+  return Array.from(document.querySelectorAll("#bot-notebook-list .bot-notebook-row")).map(row => ({
+    ts:   parseFloat(row.dataset.ts) || 0,
+    text: row.querySelector("div:nth-child(2)").textContent,
+  }));
 }
 
 function renderBotMemory(list) {
@@ -3872,6 +3919,8 @@ async function saveBotAdmin() {
     gemini_model:          document.getElementById("bot-gemini-model").value,
     gemini_api_key:        document.getElementById("bot-gemini-key").value,
     memory:                collectBotMemory(),
+    notebook_enabled:      document.getElementById("bot-notebook-enabled").checked,
+    notebook:              collectBotNotebook(),
   };
   try {
     const r = await adminFetch("/api/admin/bot", {
