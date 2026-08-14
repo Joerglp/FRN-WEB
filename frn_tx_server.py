@@ -4466,6 +4466,15 @@ class TXServer:
             return web.FileResponse(html_path)
         return web.Response(text="Archive page not found.", content_type="text/html")
 
+    async def handle_debug_page(self, request):
+        """GET /debug -- eigenstaendige Seite fuer die Ablaufverfolgung
+        (Login + API-Aufrufe wie das DEBUG-Reiter im Hauptpanel, nur als
+        eigenes Fenster/Tab nutzbar, siehe debug_page.html)."""
+        html_path = Path(__file__).parent / "debug_page.html"
+        if html_path.exists():
+            return web.FileResponse(html_path)
+        return web.Response(text="Debug page not found.", content_type="text/html")
+
     async def handle_archive_api(self, request):
         if not _ARCHIVE_AVAILABLE:
             return web.json_response({"error": "archive not available"}, status=503)
@@ -4592,6 +4601,10 @@ class TXServer:
         app.router.add_post("/api/voice/preview",            self.handle_voice_preview)
         app.router.add_get ("/ws",                           self.handle_ws)
         app.router.add_get ("/rx",                           self.handle_rx_ws)
+
+        # Debug (eigene Seite -- User-Wunsch 2026-08-13, war nur Reiter im
+        # Hauptpanel und liess sich schwer als eigenes Fenster/Tab offen halten)
+        app.router.add_get("/debug",                          self.handle_debug_page)
 
         # Archiv
         app.router.add_get("/archive",                        self.handle_archive_page)

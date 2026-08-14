@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>FRN Debug</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:      #0d1117;
+  --panel:   #141c2b;
+  --inset:   #0e1520;
+  --border:  #2a3f5f;
+  --accent:  #4fc3f7;
+  --accent2: #81d4fa;
+  --text:    #dce8f0;
+  --muted:   #8aabbf;
+  --dim:     #2d3f55;
+  --red:     #ef5350;
+  --green:   #4caf50;
+  --green2:  #69f0ae;
+  --yellow:  #ffee58;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Rajdhani', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  max-width: 820px;
+  margin: 0 auto;
+  padding: env(safe-area-inset-top) 16px calc(32px + env(safe-area-inset-bottom)) 16px;
+  min-height: 100dvh;
+  background-image:
+    linear-gradient(rgba(79,195,247,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(79,195,247,0.02) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+h1 {
+  font-family: 'Orbitron', monospace;
+  font-size: 1.25em; font-weight: 900;
+  letter-spacing: 0.06em; color: var(--accent);
+  text-shadow: 0 0 16px rgba(79,195,247,0.4);
+  margin: 20px 0 4px;
+}
+.sub { font-family: 'Share Tech Mono', monospace; font-size: 0.72em;
+       color: var(--muted); margin-bottom: 18px; }
+.intro { font-size: .78rem; color: var(--muted); margin-bottom: 14px; line-height: 1.5; }
+.form-field input, .form-field select {
+  width: 100%; background: var(--inset); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 9px 12px; font-family: 'Rajdhani', sans-serif; font-size: 0.95em;
+}
+.form-field input:focus, .form-field select:focus {
+  outline: none; border-color: var(--accent);
+}
+.form-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.btn-save {
+  background: var(--accent); color: #06121c; border: none;
+  border-radius: 6px; padding: 10px 18px; font-family: 'Rajdhani', sans-serif;
+  font-weight: 600; font-size: 0.95em; cursor: pointer;
+}
+.btn-save:hover { filter: brightness(1.1); }
+.admin-msg { font-size: 0.85em; margin-top: 8px; min-height: 1.2em; }
+.admin-msg.ok    { color: var(--green2); }
+.admin-msg.error { color: var(--red); }
+
+#login-box { max-width: 340px; margin-top: 30px; }
+
+.dbg-dot {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  margin-right: 3px; vertical-align: middle;
+}
+.dbg-ok    { background: var(--green);  box-shadow: 0 0 4px rgba(76,175,80,0.6); }
+.dbg-warn  { background: var(--yellow); box-shadow: 0 0 4px rgba(255,238,88,0.6); }
+.dbg-error { background: var(--red);    box-shadow: 0 0 4px rgba(239,83,80,0.7); }
+.dbg-skip  { background: var(--muted);  opacity: 0.6; }
+.dbg-trace {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 10px; background: rgba(20,32,50,0.35);
+}
+.dbg-trace.dbg-stale { opacity: 0.45; }
+.dbg-trace-head .dbg-age { font-weight: bold; }
+.dbg-trace-head .dbg-age.dbg-age-fresh { color: var(--green); }
+.dbg-trace-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-family: 'Share Tech Mono', monospace; font-size: 0.78em;
+  color: var(--accent2); margin-bottom: 8px;
+}
+.dbg-trace-head .dbg-total { color: var(--muted); }
+.dbg-steps { display: flex; flex-wrap: wrap; gap: 6px; }
+.dbg-step {
+  font-family: 'Rajdhani', sans-serif; font-size: 0.85em;
+  border: 1px solid var(--dim); border-radius: 6px;
+  padding: 4px 9px; background: rgba(255,255,255,0.02);
+  cursor: default;
+}
+.dbg-step.dbg-playable { cursor: pointer; border-color: var(--accent); }
+.dbg-step.dbg-playable:hover { background: rgba(79,195,247,0.08); }
+.dbg-step.dbg-playing { background: rgba(79,195,247,0.18); }
+.dbg-step .dbg-step-name { color: var(--text); font-weight: 600; }
+.dbg-step .dbg-step-dur  { color: var(--muted); font-size: 0.85em; margin-left: 3px; }
+.dbg-step-detail {
+  font-size: 0.72em; color: var(--muted); margin-top: 3px;
+  max-width: 320px; white-space: pre-wrap; word-break: break-word;
+}
+.dbg-arrow { color: var(--dim); align-self: center; }
+</style>
+</head>
+<body>
+
+<div id="login-box">
+  <h1>FRN DEBUG</h1>
+  <div class="sub">Anmeldung erforderlich</div>
+  <div class="form-field">
+    <label>Benutzername</label>
+    <input type="text" id="login-user" autocomplete="username">
+  </div>
+  <div class="form-field">
+    <label>Passwort</label>
+    <input type="password" id="login-pass" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter') doLogin()">
+  </div>
+  <button class="btn-save" onclick="doLogin()">ANMELDEN</button>
+  <div class="admin-msg error" id="login-error"></div>
+</div>
+
+<div id="debug-box" style="display:none">
+  <h1>FRN DEBUG</h1>
+  <div class="sub" id="who"></div>
+  <div class="intro">
+    Jede gehörte Durchsage von Aufnahme bis Senden, Schritt für Schritt:
+    <span class="dbg-dot dbg-ok"></span> ok ·
+    <span class="dbg-dot dbg-warn"></span> Warnung ·
+    <span class="dbg-dot dbg-error"></span> Fehler ·
+    <span class="dbg-dot dbg-skip"></span> übersprungen.
+    Zeit pro Schritt in Klammern. <b>Aufnahme</b>-Schritt anklicken, um die
+    WAV-Datei abzuspielen. Ältere Einträge (&gt;10 Min) sind abgedunkelt.
+  </div>
+  <audio id="dbg-audio-player" style="display:none"></audio>
+  <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:10px">
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      <input type="checkbox" id="dbg-autorefresh" checked
+             onchange="this.checked ? startDebugAutoRefresh() : stopDebugAutoRefresh()">
+      automatisch aktualisieren (alle 5s)
+    </label>
+    <label style="display:flex;align-items:center;gap:8px">
+      Raum:
+      <select id="dbg-room-filter" onchange="loadDebugTraces()"
+              style="background:var(--panel);color:var(--text);border:1px solid var(--border);
+                     border-radius:6px;padding:4px 8px;font-size:.85em">
+        <option value="">alle</option>
+      </select>
+    </label>
+    <span id="dbg-last-refresh" style="font-size:.78em;color:var(--muted)"></span>
+  </div>
+  <div id="debug-traces"></div>
+  <button class="btn-save" onclick="loadDebugTraces()" style="margin-top:10px">AKTUALISIEREN</button>
+  <div class="admin-msg" id="msg-debug"></div>
+</div>
+
+<script>
+const TX_BASE = location.protocol + "//" + location.host;
+let authToken = localStorage.getItem("frn_token") || null;
+let dbgTimer  = null;
+
+function adminFetch(url, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers, { "X-Token": authToken });
+  return fetch(TX_BASE + url, opts);
+}
+
+async function doLogin() {
+  const user = document.getElementById("login-user").value.trim();
+  const pass = document.getElementById("login-pass").value;
+  document.getElementById("login-error").textContent = "";
+  try {
+    const resp = await fetch(`${TX_BASE}/api/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: user, password: pass }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      document.getElementById("login-error").textContent = data.error || "Fehler";
+      return;
+    }
+    if (!data.is_admin) {
+      document.getElementById("login-error").textContent =
+        "Kein Admin-Konto -- Debug-Ansicht ist nur für Admins.";
+      return;
+    }
+    authToken = data.token;
+    localStorage.setItem("frn_token", authToken);
+    localStorage.setItem("frn_callsign", data.callsign || "");
+    localStorage.setItem("frn_is_admin", true);
+    showDebug(data.callsign || "");
+  } catch(err) {
+    document.getElementById("login-error").textContent = "Verbindungsfehler: " + err.message;
+  }
+}
+
+async function tryStoredToken() {
+  if (!authToken) return;
+  try {
+    const r = await adminFetch("/api/admin/debug-traces");
+    if (r.ok) { showDebug(localStorage.getItem("frn_callsign") || ""); return; }
+  } catch(e) { /* fällt durch zum Login */ }
+  authToken = null;
+  localStorage.removeItem("frn_token");
+}
+
+function showDebug(who) {
+  document.getElementById("login-box").style.display = "none";
+  document.getElementById("debug-box").style.display = "block";
+  document.getElementById("who").textContent = who ? `angemeldet als ${who}` : "";
+  loadDebugTraces();
+  startDebugAutoRefresh();
+}
+
+function fmtDur(s) {
+  return (s === null || s === undefined) ? "" : ` (${s.toFixed(2)}s)`;
+}
+function fmtTime(ts) {
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const abs = sameDay
+    ? d.toLocaleTimeString("de-DE")
+    : d.toLocaleDateString("de-DE") + " " + d.toLocaleTimeString("de-DE");
+  const diffS = (Date.now() - ts * 1000) / 1000;
+  let rel;
+  if (diffS < 5)          rel = "gerade eben";
+  else if (diffS < 60)    rel = `vor ${Math.round(diffS)}s`;
+  else if (diffS < 3600)  rel = `vor ${Math.round(diffS/60)} Min`;
+  else if (diffS < 86400) rel = `vor ${Math.round(diffS/3600)} Std`;
+  else                    rel = `vor ${Math.round(diffS/86400)} Tagen`;
+  return { abs, rel, diffS };
+}
+function populateDebugRoomFilter(traces) {
+  const sel = document.getElementById("dbg-room-filter");
+  const cur = sel.value;
+  const rooms = [...new Set(traces.map(t => t.room))].sort();
+  sel.innerHTML = '<option value="">alle</option>' +
+    rooms.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join("");
+  sel.value = rooms.includes(cur) ? cur : "";
+}
+async function loadDebugTraces() {
+  const box = document.getElementById("debug-traces");
+  try {
+    const r = await adminFetch("/api/admin/debug-traces");
+    if (r.status === 401 || r.status === 403) {
+      stopDebugAutoRefresh();
+      document.getElementById("debug-box").style.display = "none";
+      document.getElementById("login-box").style.display = "block";
+      document.getElementById("login-error").textContent = "Sitzung abgelaufen -- bitte neu anmelden.";
+      return;
+    }
+    const data = await r.json();
+    let traces = data.traces || [];
+    populateDebugRoomFilter(traces);
+    const roomFilter = document.getElementById("dbg-room-filter").value;
+    if (roomFilter) traces = traces.filter(t => t.room === roomFilter);
+    document.getElementById("dbg-last-refresh").textContent =
+      "zuletzt aktualisiert: " + new Date().toLocaleTimeString("de-DE");
+    if (!traces.length) {
+      box.innerHTML = `<div style="color:var(--muted);font-size:0.85em">Noch keine Durchsagen aufgezeichnet.</div>`;
+      return;
+    }
+    box.innerHTML = traces.map(tr => {
+      const steps = (tr.steps || []).map((s, i) => {
+        const cls = "dbg-" + (s.status || "skip");
+        const detail = s.detail ? `<div class="dbg-step-detail">${esc(s.detail)}</div>` : "";
+        const arrow = i < tr.steps.length - 1 ? `<span class="dbg-arrow">→</span>` : "";
+        const playable = !!s.audio;
+        const stepCls = "dbg-step" + (playable ? " dbg-playable" : "");
+        const stepId = playable ? ` id="dbg-step-${esc(s.audio)}"` : "";
+        const click = playable ? ` onclick="playDebugAudio('${esc(s.audio)}', this)"` : "";
+        const playIcon = playable ? `<span title="abspielen">▶</span> ` : "";
+        return `<div class="${stepCls}"${stepId}${click}>
+                  <span class="dbg-dot ${cls}"></span>
+                  ${playIcon}<span class="dbg-step-name">${esc(s.name)}</span>
+                  <span class="dbg-step-dur">${fmtDur(s.duration_s)}</span>
+                  ${detail}
+                </div>${arrow}`;
+      }).join("");
+      const totalTxt = tr.done
+        ? (tr.total_s !== null && tr.total_s !== undefined ? `Gesamt: ${tr.total_s.toFixed(2)}s` : "abgeschlossen")
+        : "läuft …";
+      const t = fmtTime(tr.ts);
+      const staleCls = t.diffS > 600 ? " dbg-stale" : "";
+      const ageCls = t.diffS < 60 ? " dbg-age-fresh" : "";
+      return `<div class="dbg-trace${staleCls}">
+                <div class="dbg-trace-head">
+                  <span>${esc(tr.room)} · ${esc(t.abs)}
+                        <span class="dbg-age${ageCls}">(${esc(t.rel)})</span></span>
+                  <span class="dbg-total">${totalTxt}</span>
+                </div>
+                <div class="dbg-steps">${steps}</div>
+              </div>`;
+    }).join("");
+  } catch(e) {
+    box.innerHTML = `<div style="color:var(--red);font-size:0.85em">Fehler beim Laden: ${esc(String(e))}</div>`;
+  }
+}
+async function playDebugAudio(name, el) {
+  const player = document.getElementById("dbg-audio-player");
+  document.querySelectorAll(".dbg-playing").forEach(e => e.classList.remove("dbg-playing"));
+  el.classList.add("dbg-playing");
+  try {
+    const r = await adminFetch(`/api/admin/debug-audio/${encodeURIComponent(name)}`);
+    if (!r.ok) {
+      el.classList.remove("dbg-playing");
+      showMsg("msg-debug", "Aufnahme nicht verfügbar (evtl. schon aufgeräumt).", "error");
+      return;
+    }
+    const blob = await r.blob();
+    const url  = URL.createObjectURL(blob);
+    player.src = url;
+    player.onended = () => { el.classList.remove("dbg-playing"); URL.revokeObjectURL(url); };
+    await player.play();
+  } catch(e) {
+    el.classList.remove("dbg-playing");
+  }
+}
+function startDebugAutoRefresh() {
+  stopDebugAutoRefresh();
+  const cb = document.getElementById("dbg-autorefresh");
+  if (!cb || !cb.checked) return;
+  dbgTimer = setInterval(loadDebugTraces, 5000);
+}
+function stopDebugAutoRefresh() {
+  if (dbgTimer) { clearInterval(dbgTimer); dbgTimer = null; }
+}
+function showMsg(id, text, cls) {
+  const el = document.getElementById(id);
+  el.textContent = text; el.className = "admin-msg " + cls;
+  setTimeout(() => { if (el.textContent === text) el.textContent = ""; }, 4000);
+}
+function esc(s) {
+  return String(s ?? "")
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+tryStoredToken().then(() => {
+  if (!authToken) {
+    document.getElementById("login-box").style.display = "block";
+  }
+});
+</script>
+</body>
+</html>

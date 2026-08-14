@@ -528,6 +528,9 @@ audio {
   border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 14px; margin-bottom: 10px; background: rgba(20,32,50,0.35);
 }
+.dbg-trace.dbg-stale { opacity: 0.45; }
+.dbg-trace-head .dbg-age { font-weight: bold; }
+.dbg-trace-head .dbg-age.dbg-age-fresh { color: var(--green); }
 .dbg-trace-head {
   display: flex; justify-content: space-between; align-items: baseline;
   font-family: 'Share Tech Mono', monospace; font-size: 0.78em;
@@ -1651,11 +1654,22 @@ audio {
         WAV-Datei abzuspielen.
       </div>
       <audio id="dbg-audio-player" style="display:none"></audio>
-      <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer">
-        <input type="checkbox" id="dbg-autorefresh" checked
-               onchange="this.checked ? startDebugAutoRefresh() : stopDebugAutoRefresh()">
-        automatisch aktualisieren (alle 5s)
-      </label>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:10px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="dbg-autorefresh" checked
+                 onchange="this.checked ? startDebugAutoRefresh() : stopDebugAutoRefresh()">
+          automatisch aktualisieren (alle 5s)
+        </label>
+        <label style="display:flex;align-items:center;gap:8px">
+          Raum:
+          <select id="dbg-room-filter" onchange="loadDebugTraces()"
+                  style="background:var(--panel);color:var(--text);border:1px solid var(--border);
+                         border-radius:6px;padding:4px 8px;font-size:.85em">
+            <option value="">alle</option>
+          </select>
+        </label>
+        <span id="dbg-last-refresh" style="font-size:.78em;color:var(--muted)"></span>
+      </div>
       <div id="debug-traces"></div>
       <button class="btn-save" onclick="loadDebugTraces()" style="margin-top:10px">AKTUALISIEREN</button>
       <div class="admin-msg" id="msg-debug"></div>
@@ -4067,14 +4081,43 @@ function fmtDur(s) {
   return (s === null || s === undefined) ? "" : ` (${s.toFixed(2)}s)`;
 }
 function fmtTime(ts) {
-  return new Date(ts * 1000).toLocaleTimeString("de-DE");
+  // Absolut (mit Datum, falls nicht heute) + relativ ("vor X Min") in einem --
+  // sonst nicht erkennbar, ob ein Eintrag von gerade eben oder von vor
+  // Stunden/Tagen ist (User-Feedback 2026-08-13).
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const abs = sameDay
+    ? d.toLocaleTimeString("de-DE")
+    : d.toLocaleDateString("de-DE") + " " + d.toLocaleTimeString("de-DE");
+  const diffS = (Date.now() - ts * 1000) / 1000;
+  let rel;
+  if (diffS < 5)          rel = "gerade eben";
+  else if (diffS < 60)    rel = `vor ${Math.round(diffS)}s`;
+  else if (diffS < 3600)  rel = `vor ${Math.round(diffS/60)} Min`;
+  else if (diffS < 86400) rel = `vor ${Math.round(diffS/3600)} Std`;
+  else                    rel = `vor ${Math.round(diffS/86400)} Tagen`;
+  return { abs, rel, diffS };
+}
+function populateDebugRoomFilter(traces) {
+  const sel = document.getElementById("dbg-room-filter");
+  const cur = sel.value;
+  const rooms = [...new Set(traces.map(t => t.room))].sort();
+  sel.innerHTML = '<option value="">alle</option>' +
+    rooms.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join("");
+  sel.value = rooms.includes(cur) ? cur : "";
 }
 async function loadDebugTraces() {
   const box = document.getElementById("debug-traces");
   try {
     const r = await adminFetch("/api/admin/debug-traces");
     const data = await r.json();
-    const traces = data.traces || [];
+    let traces = data.traces || [];
+    populateDebugRoomFilter(traces);
+    const roomFilter = document.getElementById("dbg-room-filter").value;
+    if (roomFilter) traces = traces.filter(t => t.room === roomFilter);
+    document.getElementById("dbg-last-refresh").textContent =
+      "zuletzt aktualisiert: " + new Date().toLocaleTimeString("de-DE");
     if (!traces.length) {
       box.innerHTML = `<div style="color:var(--muted);font-size:0.85em">Noch keine Durchsagen aufgezeichnet.</div>`;
       return;
@@ -4099,9 +4142,13 @@ async function loadDebugTraces() {
       const totalTxt = tr.done
         ? (tr.total_s !== null && tr.total_s !== undefined ? `Gesamt: ${tr.total_s.toFixed(2)}s` : "abgeschlossen")
         : "läuft …";
-      return `<div class="dbg-trace">
+      const t = fmtTime(tr.ts);
+      const staleCls = t.diffS > 600 ? " dbg-stale" : "";
+      const ageCls = t.diffS < 60 ? " dbg-age-fresh" : "";
+      return `<div class="dbg-trace${staleCls}">
                 <div class="dbg-trace-head">
-                  <span>${esc(tr.room)} · ${fmtTime(tr.ts)}</span>
+                  <span>${esc(tr.room)} · ${esc(t.abs)}
+                        <span class="dbg-age${ageCls}">(${esc(t.rel)})</span></span>
                   <span class="dbg-total">${totalTxt}</span>
                 </div>
                 <div class="dbg-steps">${steps}</div>
