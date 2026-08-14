@@ -318,6 +318,19 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
     return _dedupe_cascade(_remove_repetitions(" ".join(parts).strip()))
 
 
+def _mark_discarded(wav_path: str) -> None:
+    """Benennt die zugehoerige .meta.done zu .meta.discarded um -- Marker fuer
+    "vollstaendig verarbeitet, aber bewusst nicht archiviert" (reines Rauschen/
+    Halluzination), damit _recover_lost_meta das beim naechsten Neustart nicht
+    faelschlich als verlorenen Lauf erneut durch Whisper jagt (siehe dort)."""
+    try:
+        done_path = Path(wav_path).with_suffix(".meta.done")
+        if done_path.exists():
+            done_path.rename(Path(wav_path).with_suffix(".meta.discarded"))
+    except Exception as e:
+        log.debug("_mark_discarded fehlgeschlagen (%s): %s", wav_path, e)
+
+
 def _is_remote_available(url: str) -> bool:
     """Prüft ob der Remote-Whisper-Server erreichbar ist (Health-Check)."""
     import urllib.request as _ur
@@ -456,7 +469,18 @@ class TranscriptionPipeline:
         self._task_meta    = loop.create_task(meta_watcher())
 
     async def _recover_lost_meta(self):
-        """Beim Start: .meta.done Dateien ohne DB-Eintrag zurück zu .meta setzen."""
+        """Beim Start: .meta.done Dateien ohne DB-Eintrag zurück zu .meta setzen.
+
+        Nur echte "verloren gegangene" Laeufe (z.B. Absturz/Neustart mitten in
+        der Verarbeitung) sollen hier erneut versucht werden. Aufnahmen, die
+        VOLLSTAENDIG verarbeitet, aber bewusst NICHT archiviert wurden (reines
+        Rauschen/Halluzination -- process_wav._mark_discarded benennt deren
+        .meta.done zu .meta.discarded um), tauchen hier gar nicht erst auf
+        (Glob unten matcht nur *.meta.done), werden also nicht mehr bei JEDEM
+        Neustart erneut sinnlos durch Whisper gejagt (2026-08-14 gefunden:
+        ~210 Dateien kamen bei zwei aufeinanderfolgenden Neustarts fast
+        identisch wieder -- allesamt korrekt verworfenes Rauschen, kein
+        echter Verlust)."""
         try:
             from frn_archive import _get_conn
             with _get_conn() as conn:
@@ -620,6 +644,7 @@ class TranscriptionPipeline:
             if dbg:
                 dbg(room, ts, "Whisper", "skip", None,
                    "kein Text erkannt (Stille/VAD)", final=True)
+            _mark_discarded(wav_path)
             return
 
         # Rufzeichen-Auflösung: frn_tx_server setzt pipeline.resolve_callsign,
@@ -677,10 +702,11 @@ class TranscriptionPipeline:
                 if p.with_suffix(".meta").exists():
                     continue
                 p.unlink()
-                # .meta.done Sidecar ebenfalls entfernen
-                done = p.with_suffix(".meta.done")
-                if done.exists():
-                    done.unlink()
+                # .meta.done/.meta.discarded Sidecar ebenfalls entfernen
+                for suffix in (".meta.done", ".meta.discarded"):
+                    sidecar = p.with_suffix(suffix)
+                    if sidecar.exists():
+                        sidecar.unlink()
                 removed += 1
             except Exception:
                 pass

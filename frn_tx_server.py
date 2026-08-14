@@ -718,18 +718,35 @@ class TXServer:
 
     # ── Debug-Ablaufverfolgung ──────────────────────────────────────────────
 
+    # Aufnahmen aelter als das duerfen zwar noch verarbeitet werden (Archiv-
+    # Rueckstau, siehe _process_meta_files -- absichtlich NEUESTE-ZUERST fuers
+    # Archiv), bekommen aber KEINE Spur im Debug-Panel angelegt.
+    _DEBUG_TRACE_MAX_AGE_S = 300
+
     def _debug_trace_get(self, room: str, ts: float) -> dict:
         """Liefert die Spur fuer (Raum, Aufnahme-Zeit), legt bei Bedarf neu an.
         ts wird gerundet, damit derselbe Aufruf aus verschiedenen Schritten
         (Whisper, Bot, LLM, TTS) dieselbe Spur trifft, auch wenn er den
-        Zeitstempel als float minimal anders herumreicht."""
+        Zeitstempel als float minimal anders herumreicht.
+
+        Alte Aufnahmen (aeltere als _DEBUG_TRACE_MAX_AGE_S) werden zwar wie
+        gewohnt intern verfolgt (falls doch mal ein Schritt reinschreibt),
+        aber NICHT in die sichtbare Anzeige-Deque eingehaengt -- sonst flutet
+        ein nachgeholter Archiv-Rueckstau (z.B. nach einem Neustart,
+        _recover_lost_meta) den knappen 80er-Speicher: der Rueckstau wird
+        bewusst NEUESTE-ZUERST abgearbeitet, appendleft() wuerde dadurch aber
+        gerade die relevanten frischen Eintraege zuerst wieder rauswerfen.
+        Live entdeckt (2026-08-14): nach einer Rueckstau-Verarbeitung zeigte
+        das Panel nur noch 2 Tage alte Eintraege, echte aktuelle Durchsagen
+        vom selben Morgen fehlten komplett."""
         key = (room, round(ts, 1))
         tr = self._debug_trace_by_key.get(key)
         if tr is None:
             tr = {"room": room, "ts": ts, "started": time.time(),
                  "steps": [], "done": False, "total_s": None}
             self._debug_trace_by_key[key] = tr
-            self._debug_traces.appendleft(tr)
+            if time.time() - ts <= self._DEBUG_TRACE_MAX_AGE_S:
+                self._debug_traces.appendleft(tr)
             # Key-Dict raeumen, sonst waechst es unbegrenzt (Anzeige-Deque
             # begrenzt sich selbst per maxlen, das Zuordnungs-Dict nicht)
             while len(self._debug_trace_by_key) > 200:
