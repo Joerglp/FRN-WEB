@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Löscht alle heutigen Archiv-Einträge und transkribiert alle WAV-Dateien
-von heute neu — mit den verbesserten Whisper-Einstellungen.
+Löscht Archiv-Einträge und transkribiert die zugehoerigen WAV-Dateien neu
+— mit den aktuellen Whisper-Einstellungen/Filtern.
 
-Usage: python3 retranscribe_today.py [YYYY-MM-DD]
+Usage: python3 retranscribe_today.py [YYYY-MM-DD] [HH:MM:SS]
+       Zweites Argument optional: nur Aufnahmen AB dieser Uhrzeit (sonst
+       der ganze Tag).
 """
-import sys, os, logging, sqlite3, wave, time
+import re, sys, os, logging, sqlite3, wave, time
 from datetime import datetime, date
 from pathlib import Path
 
@@ -24,21 +26,51 @@ from frn_transcription import _transcribe_sync
 from frn_archive import add_entry_sync, DB_PATH, AUDIO_DIR, _get_conn
 
 TARGET_DATE = sys.argv[1] if len(sys.argv) > 1 else date.today().isoformat()
-log.info("Zieldatum: %s", TARGET_DATE)
+TIME_FROM   = sys.argv[2] if len(sys.argv) > 2 else None   # z.B. "07:30:00"
+log.info("Zieldatum: %s%s", TARGET_DATE, f" ab {TIME_FROM}" if TIME_FROM else "")
 
 WAV_DIR = Path("/opt/FRN/recordings")
+# Dateiname-Muster: frn-YYYYMMDD-HHMMSS-<Raumname>.wav -- der Raumname-Suffix
+# hat frueher gefehlt, das urspruengliche strptime(stem, "frn-%Y%m%d-%H%M%S")
+# schlug deshalb bei JEDER aktuellen Datei fehl ("unconverted data remains")
+# und wurde still uebersprungen (2026-08-14 gefunden). Jetzt per Regex nur
+# den Datum/Zeit-Teil am Anfang ziehen, Rest (Raumname) ignorieren.
+FNAME_RE = re.compile(r"^frn-(\d{8})-(\d{6})")
 
-# ── 1. Heutige Opus-Dateien und DB-Einträge löschen ──────────────────────────
+cutoff_dt = None
+if TIME_FROM:
+    cutoff_dt = datetime.strptime(f"{TARGET_DATE} {TIME_FROM}", "%Y-%m-%d %H:%M:%S")
+
+# ── 1. WAV-Dateien laden + nach Zeit filtern ──────────────────────────────────
 prefix = "frn-" + TARGET_DATE.replace("-", "")
+all_wavs = sorted(WAV_DIR.glob(f"{prefix}-*.wav"))
+wavs = []
+for wp in all_wavs:
+    m = FNAME_RE.match(wp.stem)
+    if not m:
+        continue
+    ts_dt = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+    if cutoff_dt and ts_dt < cutoff_dt:
+        continue
+    wavs.append((wp, ts_dt))
 
+log.info("Gefundene WAV-Dateien gesamt: %d, im Zielfenster: %d", len(all_wavs), len(wavs))
+
+if not wavs:
+    log.warning("Keine passenden WAV-Dateien gefunden.")
+    sys.exit(0)
+
+# ── 2. Zugehoerige Archiv-Eintraege + Opus-Dateien loeschen (nur im Zeitfenster) ──
+cutoff_ts = wavs[0][1].timestamp()
 with _get_conn() as conn:
     rows = conn.execute(
         "SELECT id, audio_file FROM transmissions "
-        "WHERE date(datetime(timestamp,'unixepoch','localtime')) = ?",
-        (TARGET_DATE,)
+        "WHERE date(datetime(timestamp,'unixepoch','localtime')) = ? "
+        "AND timestamp >= ?",
+        (TARGET_DATE, cutoff_ts)
     ).fetchall()
 
-log.info("Lösche %d vorhandene Einträge vom %s …", len(rows), TARGET_DATE)
+log.info("Lösche %d vorhandene Einträge …", len(rows))
 deleted_opus = 0
 for row in rows:
     opus = AUDIO_DIR / row["audio_file"] if row["audio_file"] else None
@@ -49,19 +81,13 @@ for row in rows:
 with _get_conn() as conn:
     conn.execute(
         "DELETE FROM transmissions "
-        "WHERE date(datetime(timestamp,'unixepoch','localtime')) = ?",
-        (TARGET_DATE,)
+        "WHERE date(datetime(timestamp,'unixepoch','localtime')) = ? "
+        "AND timestamp >= ?",
+        (TARGET_DATE, cutoff_ts)
     )
 
 log.info("  → %d DB-Einträge + %d Opus-Dateien gelöscht", len(rows), deleted_opus)
-
-# ── 2. WAV-Dateien von heute laden ───────────────────────────────────────────
-wavs = sorted(WAV_DIR.glob(f"{prefix}-*.wav"))
-log.info("Gefundene WAV-Dateien: %d", len(wavs))
-
-if not wavs:
-    log.warning("Keine WAV-Dateien für %s gefunden.", TARGET_DATE)
-    sys.exit(0)
+wavs = [wp for wp, _ in wavs]
 
 # ── 3. Transkribieren ─────────────────────────────────────────────────────────
 MODEL   = "medium"
@@ -72,14 +98,13 @@ ok = err = skipped = 0
 t0 = time.time()
 
 for i, wav_path in enumerate(wavs, 1):
-    # Timestamp aus Dateiname: frn-YYYYMMDD-HHMMSS.wav
-    stem = wav_path.stem  # frn-20260415-073012
-    try:
-        ts = datetime.strptime(stem, "frn-%Y%m%d-%H%M%S").timestamp()
-    except ValueError:
+    # Timestamp aus Dateiname: frn-YYYYMMDD-HHMMSS-<Raum>.wav
+    m = FNAME_RE.match(wav_path.stem)
+    if not m:
         log.warning("Dateiname unbekannt: %s — übersprungen", wav_path.name)
         skipped += 1
         continue
+    ts = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").timestamp()
 
     # Raum aus Meta-Done-Datei oder unbekannt
     room     = "?"
