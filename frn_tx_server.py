@@ -2031,6 +2031,17 @@ class TXServer:
         if raw:
             # <think>…</think> entfernen (Reasoning-Modelle wie qwen3 geben es aus)
             cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip().strip('"')
+            # Abgeschnittener Denkblock OHNE Schluss-Tag (num_predict-Budget
+            # zu knapp fuers Modell, z.B. lfm2.5 -- 2026-08-14 live beim
+            # Testen beobachtet: think:false wird bei manchen neueren Ollama-
+            # Renderer/Parser-Kombis nicht sauber respektiert, das Reasoning
+            # geht dann bis zum Abbruch weiter statt zu enden). Ohne
+            # schliessendes </think> greift die Regex oben nicht -- alles ab
+            # dem offenen Tag ist unfertiges Raesonieren, kein echter
+            # Antworttext, deshalb hier zusaetzlich abschneiden.
+            if "<think>" in cleaned.lower():
+                cleaned = re.sub(r"<think>.*", "", cleaned,
+                                 flags=re.S | re.IGNORECASE).strip()
             # Manche Modelle haengen trotz Prompt-Anweisung ein "Robert: " vor
             # die Antwort (imitiert das "Rufzeichen: Text"-Format aus dem
             # Verlauf) -- als Sicherheitsnetz zusaetzlich zur Prompt-Regel
