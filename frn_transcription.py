@@ -454,13 +454,14 @@ class TranscriptionPipeline:
                 self._cleanup_old_wavs()
 
         async def meta_watcher():
-            """Alle 2s nach neuen .meta-Dateien aus frn_stream.py suchen
-            (war 10s -- reine Warteschlangen-Latenz vor der Transkription,
-            ohne Zusatzkosten reduzierbar da nur ein Datei-Listing)."""
+            """Alle 0.5s nach neuen .meta-Dateien aus frn_stream.py suchen
+            (war 10s, dann 2s -- reine Warteschlangen-Latenz vor der
+            Transkription, ohne Zusatzkosten reduzierbar da nur ein
+            Datei-Listing)."""
             # Beim Start: .meta.done ohne DB-Eintrag zurücksetzen
             await self._recover_lost_meta()
             while True:
-                await asyncio.sleep(2)
+                await asyncio.sleep(0.5)
                 await self._process_meta_files()
 
         loop = asyncio.get_event_loop()
