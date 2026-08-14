@@ -6,6 +6,7 @@ Remote-Whisper-API (KI-Rechner) oder lokal als Fallback.
 """
 
 import asyncio
+import difflib
 import json
 import logging
 import re as _re
@@ -135,6 +136,71 @@ def _remove_repetitions(text: str) -> str:
     return text.strip()
 
 
+_CASCADE_SIM = 0.62   # ab dieser SequenceMatcher-Aehnlichkeit gilt ein Satz
+                      # als Wiederholung eines frueheren (nicht 1.0, weil
+                      # Whisper beim "Kreisen" den Satz meist leicht variiert
+                      # statt ihn exakt zu wiederholen)
+
+
+def _dedupe_cascade(text: str) -> str:
+    """Erkennt Whisper-Wiederhol-Kaskaden auf Satzebene -- im Unterschied zu
+    _remove_repetitions (nur EXAKTE Wort-/Phrasenwiederholung wie 'ja, ja,
+    ja') geht es hier um ganze Saetze, die sich leicht VARIIERT wiederholen
+    (beobachtet 2026-08-13 bei langen, unklaren Aufnahmen: z.B. "polierst du
+    den gerade die Augen da?" taucht mit anderem Drumherum ein zweites Mal
+    auf -- das Modell "kreist" um dieselbe Aussage statt neuen Inhalt zu
+    erkennen). Verfahren angelehnt an RadioTranscriber
+    (github.com/Nite01007/RadioTranscriber):
+      - Kaskade ueber die GANZE Aussage (>50% der Saetze sind Duplikate)
+        -> komplett verwerfen, vermutlich ohnehin kaum echter Inhalt.
+      - Kaskade am ENDE (durchgehende Duplikat-Serie bis zum Schluss)
+        -> abschneiden, den Anfang (meist der eigentliche Inhalt) behalten.
+      - Kaskade am ANFANG (Modell wiederholt sich zu Beginn, findet danach
+        aber zu echtem/neuem Inhalt) -> Kopf verwerfen, Rest behalten,
+        statt die ganze Aussage wegzuwerfen.
+      - Vereinzelte Duplikate dazwischen -> nur die einzelnen Saetze raus,
+        erstes Vorkommen bleibt.
+    """
+    parts = [p.strip() for p in _re.split(r'(?<=[.!?])\s+', text.strip()) if p.strip()]
+    if len(parts) < 3:
+        return text   # zu kurz fuer eine sinnvolle Kaskaden-Analyse
+
+    def sim(a, b):
+        return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+    def dup_flags(seq):
+        flags = [False] * len(seq)
+        for i in range(1, len(seq)):
+            for j in range(i):
+                if not flags[j] and sim(seq[i], seq[j]) > _CASCADE_SIM:
+                    flags[i] = True
+                    break
+        return flags
+
+    flags = dup_flags(parts)
+    if sum(flags) / len(parts) > 0.5:
+        return ""
+
+    # Kaskade am Ende: durchgehende Duplikat-Serie bis zum Schluss (min. 2)
+    tail = len(parts)
+    while tail > 0 and flags[tail - 1]:
+        tail -= 1
+    if len(parts) - tail >= 2:
+        parts, flags = parts[:tail], flags[:tail]
+
+    # Kaskade am Anfang: die ersten Saetze wiederholen sich untereinander,
+    # danach kommt (nicht mehr komplett doppelter) Inhalt.
+    if len(parts) >= 3 and flags[1] and not all(flags):
+        head_end = 1
+        while head_end < len(parts) and flags[head_end]:
+            head_end += 1
+        if head_end < len(parts):
+            parts, flags = parts[head_end:], flags[head_end:]
+
+    # Verstreute Einzel-Duplikate: raus, erstes Vorkommen bleibt.
+    return " ".join(p for p, d in zip(parts, flags) if not d).strip()
+
+
 def _transcribe_remote(wav_path: str, url: str, language: str) -> str:
     """Schickt WAV per multipart/form-data an den Remote-Whisper-Server."""
     import urllib.request
@@ -167,6 +233,10 @@ def _transcribe_remote(wav_path: str, url: str, language: str) -> str:
     with urllib.request.urlopen(req, timeout=280) as resp:
         result = json.loads(resp.read())
     text = _remove_repetitions(result.get("text", "").strip())
+    deduped = _dedupe_cascade(text)
+    if deduped != text:
+        log.info("Remote-Transkript Kaskade bereinigt: %.80s -> %.80s", text, deduped)
+        text = deduped
     log.debug("Remote-Transkript (%.1fs): %s", result.get("duration_s", 0), text[:80])
     if _is_generic_hallucination(text):
         log.info("Remote-Transkript als generische Halluzination verworfen: %.80s", text)
@@ -245,7 +315,7 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
     parts = [s.text.strip() for s in segments
              if getattr(s, "no_speech_prob", 0.0) <= 0.8
              and not _is_hallucination(s.text.strip())]
-    return _remove_repetitions(" ".join(parts).strip())
+    return _dedupe_cascade(_remove_repetitions(" ".join(parts).strip()))
 
 
 def _is_remote_available(url: str) -> bool:
