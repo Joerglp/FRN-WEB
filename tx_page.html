@@ -1517,9 +1517,14 @@ audio {
             <label>Kontextfenster <span style="color:var(--muted)">(num_ctx)</span></label>
             <input type="number" id="bot-ollama-numctx" min="0" max="262144" placeholder="30780">
           </div>
+          <div class="form-field" style="flex:0 0 140px">
+            <label>Max. Antwort <span style="color:var(--muted)">(num_predict)</span></label>
+            <input type="number" id="bot-ollama-numpredict" min="0" max="4096" placeholder="150">
+          </div>
         </div>
         <div class="form-field" style="margin-top:2px;font-size:.72rem;color:var(--muted);line-height:1.4">
-          Muss zu dem Kontext passen, mit dem andere Clients (z.B. Open WebUI) dasselbe Modell laden — sonst lädt Ollama bei jedem Wechsel neu (~10-15s).
+          Kontextfenster muss zu dem passen, mit dem andere Clients (z.B. Open WebUI) dasselbe Modell laden — sonst lädt Ollama bei jedem Wechsel neu (~10-15s).
+          Max. Antwort ggf. hochsetzen bei Modellen mit langem internem "Denken" (thinking) vor der eigentlichen Antwort, sonst bricht die Antwort mitten im Denken ab und wird verworfen.
         </div>
         <div class="form-field" style="margin-top:8px">
           <label>Zugangs-Token (falls Server passwortgeschützt)</label>
@@ -3800,6 +3805,7 @@ async function loadBotAdmin() {
     document.getElementById("bot-model").value     = d.ollama_model || "";
     document.getElementById("bot-ollama-url").value = d.ollama_url || "";
     document.getElementById("bot-ollama-numctx").value = d.ollama_num_ctx ?? 30780;
+    document.getElementById("bot-ollama-numpredict").value = d.ollama_num_predict ?? 150;
     // Server liefert nur eine Maske (••••), nie das echte Geheimnis
     document.getElementById("bot-ollama-token").value = d.ollama_token || "";
     document.getElementById("bot-gemini-model").value = d.gemini_model || "";
@@ -3929,6 +3935,7 @@ async function saveBotAdmin() {
     ollama_model:          document.getElementById("bot-model").value,
     ollama_url:            document.getElementById("bot-ollama-url").value,
     ollama_num_ctx:        parseFloat(document.getElementById("bot-ollama-numctx").value) || 30780,
+    ollama_num_predict:    parseFloat(document.getElementById("bot-ollama-numpredict").value) || 150,
     ollama_token:          document.getElementById("bot-ollama-token").value,
     gemini_model:          document.getElementById("bot-gemini-model").value,
     gemini_api_key:        document.getElementById("bot-gemini-key").value,

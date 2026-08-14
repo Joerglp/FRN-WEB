@@ -1417,6 +1417,15 @@ class TXServer:
         # siehe _llm_ollama. Konfigurierbar, da der Wert bei Bedarf noch
         # nach oben angepasst wird.
         "ollama_num_ctx": 97280,
+        # Max. Antwortlaenge in Tokens. Konfigurierbar (statt fest 150),
+        # weil manche Modelle (z.B. lfm2.5, getestet 2026-08-14) intern
+        # laenger "denken" bevor die eigentliche Antwort kommt -- bei zu
+        # knappem Budget bricht die Antwort mitten im Denken ab und wird
+        # dadurch komplett verworfen (siehe <think>-Kaputt-Filter in
+        # _bot_ollama). Bewusst NICHT pauschal global hochgesetzt, damit
+        # das eingespielte Hauptmodell (kurze, knappe CB-Antworten) nicht
+        # beeinflusst wird -- pro Bot-Konfiguration einstellbar.
+        "ollama_num_predict": 150,
         # Personen-Gedaechtnis: manuell gepflegte Notizen pro Name, siehe
         # _bot_build_prompt. Liste aus {"name": ..., "notes": ...}.
         "memory": [],
@@ -2119,8 +2128,8 @@ class TXServer:
                 # uebernommen (siehe Kommentar oben) -- das verursachte
                 # Neu-Lade-Ping-Pong, wenn andere Clients (Open WebUI) selbst
                 # wechselnde num_ctx anfragen.
-                "options": {"num_predict": 150, "temperature": 0.4,
-                            "num_ctx": num_ctx},
+                "options": {"num_predict": int(bot.get("ollama_num_predict", 150)),
+                            "temperature": 0.4, "num_ctx": num_ctx},
                 # Immer aus: bei Thinking-Modellen (qwen3, gemma4, deepseek-r1, …)
                 # frisst der Grübel-Block sonst das ganze num_predict-Budget auf
                 # (done_reason="length" BEVOR ueberhaupt eine sichtbare Antwort
@@ -2620,7 +2629,8 @@ class TXServer:
             for key, hi in (("cooldown_s", 3600),
                             ("conversation_window_s", 3600),
                             ("history_len", 30),
-                            ("ollama_num_ctx", 262144)):   # Modell-Max laut /api/tags
+                            ("ollama_num_ctx", 262144),   # Modell-Max laut /api/tags
+                            ("ollama_num_predict", 4096)):
                 if key in body:
                     try:
                         bot[key] = max(0, min(hi, float(body[key])))
