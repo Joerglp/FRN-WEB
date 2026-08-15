@@ -155,7 +155,6 @@ h1 {
     </label>
     <span id="dbg-last-refresh" style="font-size:.78em;color:var(--muted)"></span>
   </div>
-  <datalist id="dbg-model-list"></datalist>
   <div id="debug-traces"></div>
   <button class="btn-save" onclick="loadDebugTraces()" style="margin-top:10px">AKTUALISIEREN</button>
   <div class="admin-msg" id="msg-debug"></div>
@@ -220,13 +219,21 @@ function showDebug(who) {
   startDebugAutoRefresh();
 }
 
+let dbgModels = [];
 async function loadDebugModelList() {
   try {
     const r = await adminFetch("/api/admin/auto-reply/models");
     const d = await r.json();
-    document.getElementById("dbg-model-list").innerHTML = (d.models || []).map(m =>
-      `<option value="${esc(m.name)}">`).join("");
+    dbgModels = d.models || [];
+    document.querySelectorAll(".dbg-replay-model").forEach(fillDebugModelSelect);
   } catch(e) { /* still */ }
+}
+function dbgModelOptions() {
+  return '<option value="">config-Standard</option>' +
+    dbgModels.map(m => `<option value="${esc(m.name)}">${esc(m.name)} (${m.size_gb} GB)</option>`).join("");
+}
+function fillDebugModelSelect(sel) {
+  if (dbgModels.length) sel.innerHTML = dbgModelOptions();
 }
 
 async function replayTrace(room, ts, btn) {
@@ -337,9 +344,9 @@ async function loadDebugTraces() {
       const ageCls = t.diffS < 60 ? " dbg-age-fresh" : "";
       const replay = tr.replayable
         ? `<div class="dbg-replay" style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-             <input class="dbg-replay-model" list="dbg-model-list" placeholder="anderes Modell..."
-                    style="flex:0 0 200px;background:var(--bg);color:var(--text);border:1px solid var(--border);
-                           border-radius:6px;padding:5px 8px;font-size:.78rem">
+             <select class="dbg-replay-model"
+                    style="flex:0 0 220px;background:var(--bg);color:var(--text);border:1px solid var(--border);
+                           border-radius:6px;padding:5px 8px;font-size:.78rem">${dbgModelOptions()}</select>
              <button class="btn-save" style="padding:5px 10px;font-size:.78rem"
                      onclick="replayTrace('${esc(tr.room)}', ${tr.ts}, this)">Nochmal testen</button>
              <div class="dbg-replay-result" style="display:none;font-size:.8rem;flex-basis:100%"></div>
