@@ -1656,16 +1656,18 @@ class TXServer:
         denom = np.linalg.norm(va) * np.linalg.norm(vb)
         return float(np.dot(va, vb) / denom) if denom else 0.0
 
-    async def _speaker_identify(self, wav_path: str) -> str | None:
+    async def _speaker_identify(self, wav_path: str) -> tuple[str | None, float, float]:
         """Vergleicht das Stimm-Embedding der Aufnahme mit allen enrollten
-        Sprechern (bester Treffer je Person), liefert den Namen bei
-        Ueberschreiten der Schwelle, sonst None."""
+        Sprechern (bester Treffer je Person). Liefert (Name, Aehnlichkeit,
+        Schwelle) -- Name ist None, wenn kein Enrollment/kein Embedding/
+        unter der Schwelle. Aehnlichkeit/Schwelle immer gefuellt (auch bei
+        Nicht-Treffer), fuers Debug-Panel (siehe bot_archive_callsign)."""
+        threshold = float(self._speaker_id_cfg().get("threshold", 0.80))
         if not self._speaker_enrollments:
-            return None
+            return None, 0.0, threshold
         emb = await self._speaker_embed(wav_path)
         if not emb:
-            return None
-        threshold = float(self._speaker_id_cfg().get("threshold", 0.80))
+            return None, 0.0, threshold
         best_name, best_sim = None, 0.0
         for name, samples in self._speaker_enrollments.items():
             for sample in samples:
@@ -1673,9 +1675,12 @@ class TXServer:
                 if sim > best_sim:
                     best_sim, best_name = sim, name
         if best_name and best_sim >= threshold:
-            log.info("Speaker-ID: %s erkannt (Aehnlichkeit %.2f)", best_name, best_sim)
-            return best_name
-        return None
+            log.info("Speaker-ID: %s erkannt (Aehnlichkeit %.2f, Schwelle %.2f)",
+                     best_name, best_sim, threshold)
+            return best_name, best_sim, threshold
+        log.info("Speaker-ID: kein Treffer (bester Kandidat %s mit %.2f, "
+                "unter Schwelle %.2f)", best_name or "-", best_sim, threshold)
+        return None, best_sim, threshold
 
     async def _speaker_enroll(self, name: str, wav_path: str) -> bool:
         """Fuegt ein neues Stimm-Beispiel fuer eine Person hinzu (mehrere
@@ -1699,12 +1704,20 @@ class TXServer:
         if not callsign and self._bot_is_own(room, text, ts):
             return self._bot_cfg().get("name") or "Robert"
         if not callsign and wav_path and self._speaker_id_cfg().get("enabled"):
+            _t0 = time.time()
             try:
-                identified = await self._speaker_identify(wav_path)
-                if identified:
-                    return identified
+                identified, sim, threshold = await self._speaker_identify(wav_path)
             except Exception as e:
                 log.debug("Speaker-ID Fehler: %s", e)
+                identified, sim, threshold = None, 0.0, 0.0
+            _sdt = time.time() - _t0
+            if identified:
+                self.debug_trace_step(room, ts, "Sprecher-ID", "ok", _sdt,
+                                      f"{identified} (Aehnlichkeit {sim:.2f}, Schwelle {threshold:.2f})")
+                return identified
+            self.debug_trace_step(room, ts, "Sprecher-ID", "skip", _sdt,
+                                  f"kein Treffer (beste Aehnlichkeit {sim:.2f}, Schwelle {threshold:.2f})"
+                                  if sim else "kein Enrollment/Embedding verfuegbar")
         return callsign
 
     # Kurze, alltagssprachlich mehrdeutige Kommandowörter brauchen ein enges
