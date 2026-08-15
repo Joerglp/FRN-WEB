@@ -1658,10 +1658,22 @@ class TXServer:
 
     async def _speaker_identify(self, wav_path: str) -> tuple[str | None, float, float]:
         """Vergleicht das Stimm-Embedding der Aufnahme mit allen enrollten
-        Sprechern (bester Treffer je Person). Liefert (Name, Aehnlichkeit,
+        Sprechern -- gegen das DURCHSCHNITTS-Embedding (Centroid) je Person,
+        nicht gegen das beste Einzelbeispiel. Liefert (Name, Aehnlichkeit,
         Schwelle) -- Name ist None, wenn kein Enrollment/kein Embedding/
         unter der Schwelle. Aehnlichkeit/Schwelle immer gefuellt (auch bei
-        Nicht-Treffer), fuers Debug-Panel (siehe bot_archive_callsign)."""
+        Nicht-Treffer), fuers Debug-Panel (siehe bot_archive_callsign).
+
+        War urspruenglich Best-of-N (hoechste Aehnlichkeit ueber alle
+        Einzelbeispiele einer Person) -- Nachteil dabei: je mehr Beispiele
+        eine Person hat, desto groesser die Chance auf einen zufaelligen
+        Ausreisser-Treffer nach oben, was bei ungleich vielen Beispielen pro
+        Person (hier live beobachtet: 4 vs. 3) sogar MEHR Fehlerkennungen
+        begluenstigen kann statt weniger (User-Fall 2026-08-15: eigene
+        Stimme faelschlich als andere enrollte Person mit 0.86 erkannt).
+        Centroid-Vergleich (Durchschnitt aller Beispiel-Embeddings, dann EIN
+        Vergleich pro Person) ist der uebliche, robustere Ansatz bei
+        Sprecher-Verifikation."""
         threshold = float(self._speaker_id_cfg().get("threshold", 0.80))
         if not self._speaker_enrollments:
             return None, 0.0, threshold
@@ -1670,10 +1682,12 @@ class TXServer:
             return None, 0.0, threshold
         best_name, best_sim = None, 0.0
         for name, samples in self._speaker_enrollments.items():
-            for sample in samples:
-                sim = self._cosine_sim(emb, sample)
-                if sim > best_sim:
-                    best_sim, best_name = sim, name
+            if not samples:
+                continue
+            centroid = np.mean(np.array(samples), axis=0)
+            sim = self._cosine_sim(emb, centroid.tolist())
+            if sim > best_sim:
+                best_sim, best_name = sim, name
         if best_name and best_sim >= threshold:
             log.info("Speaker-ID: %s erkannt (Aehnlichkeit %.2f, Schwelle %.2f)",
                      best_name, best_sim, threshold)
@@ -3046,6 +3060,84 @@ class TXServer:
             del self._speaker_enrollments[name]
             self._save_speaker_enrollments()
         return web.json_response({"ok": True})
+
+    async def handle_admin_archive_enroll(self, request):
+        """POST /api/admin/archive/{id}/enroll — {name} lernt die Stimme aus
+        einem ARCHIV-Eintrag an (im Unterschied zu handle_admin_speaker_enroll,
+        das WAV-Dateien aus dem Debug-Panel/wav_dir nutzt). Archiv-Audio liegt
+        als Opus vor (siehe frn_archive.wav_to_opus) -- wird hier temporär
+        zurueck nach WAV konvertiert, weil der Speaker-ID-Server WAV erwartet."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if not _ARCHIVE_AVAILABLE:
+            return web.json_response({"error": "archive not available"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        name = (body.get("name") or "").strip()[:60]
+        if not name:
+            return web.json_response({"error": "name fehlt"}, status=400)
+        try:
+            entry_id = int(request.match_info.get("id", ""))
+        except ValueError:
+            return web.json_response({"error": "ungueltige id"}, status=400)
+        loop = asyncio.get_running_loop()
+        entry = await loop.run_in_executor(None, _archive.get_entry, entry_id)
+        if not entry or not entry.get("audio_file"):
+            return web.json_response({"error": "Eintrag/Aufnahme nicht gefunden"}, status=404)
+        opus_path = _archive.AUDIO_DIR / entry["audio_file"]
+        if not opus_path.exists():
+            return web.json_response({"error": "Audio-Datei fehlt"}, status=404)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_wav = tmp.name
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", str(opus_path), tmp_wav,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            await proc.wait()
+            if proc.returncode != 0:
+                return web.json_response({"error": "Audio-Konvertierung fehlgeschlagen"}, status=500)
+            ok = await self._speaker_enroll(name, tmp_wav)
+        finally:
+            try:
+                os.unlink(tmp_wav)
+            except OSError:
+                pass
+        if not ok:
+            return web.json_response(
+                {"error": "Speaker-ID-Server nicht erreichbar oder Fehler beim Embedding"},
+                status=502)
+        return web.json_response({
+            "ok": True, "name": name,
+            "samples": len(self._speaker_enrollments.get(name, [])),
+        })
+
+    async def handle_admin_archive_callsign(self, request):
+        """POST /api/admin/archive/{id}/callsign — {callsign} korrigiert das
+        Rufzeichen eines Archiv-Eintrags manuell (z.B. nach einer falschen
+        Sprecher-ID-Zuordnung)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if not _ARCHIVE_AVAILABLE:
+            return web.json_response({"error": "archive not available"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        callsign = (body.get("callsign") or "").strip()[:60]
+        try:
+            entry_id = int(request.match_info.get("id", ""))
+        except ValueError:
+            return web.json_response({"error": "ungueltige id"}, status=400)
+        loop = asyncio.get_running_loop()
+        ok = await loop.run_in_executor(None, _archive.update_callsign, entry_id, callsign)
+        if not ok:
+            return web.json_response({"error": "Eintrag nicht gefunden"}, status=404)
+        return web.json_response({"ok": True, "callsign": callsign})
 
     async def handle_admin_gemini_models(self, request):
         """Verfügbare Gemini-Modell-IDs (Text-Chat) für das Dropdown.
@@ -5018,6 +5110,8 @@ class TXServer:
         app.router.add_post("/api/admin/speaker-id/enroll", self.handle_admin_speaker_enroll)
         app.router.add_delete("/api/admin/speaker-id/enrollments/{name}",
                               self.handle_admin_speaker_delete)
+        app.router.add_post("/api/admin/archive/{id}/enroll", self.handle_admin_archive_enroll)
+        app.router.add_post("/api/admin/archive/{id}/callsign", self.handle_admin_archive_callsign)
         app.router.add_get("/api/admin/debug-audio/{name}", self.handle_admin_debug_audio)
         app.router.add_get("/api/admin/overview", self.handle_admin_overview)
 

@@ -422,7 +422,28 @@
     <span id="status-txt">BEREIT</span>
   </div>
   <div class="hdr-clock" id="hdr-clock">--:--:--</div>
+  <div style="margin-left:14px;font-family:'Share Tech Mono',monospace;font-size:11px">
+    <span id="login-status" style="color:var(--text-dim)"></span>
+    <button id="login-toggle-btn" onclick="toggleLoginBox()" style="
+      background:transparent;border:1px solid var(--border);color:var(--text-dim);
+      font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:.06em;
+      padding:3px 9px;cursor:pointer;border-radius:2px;text-transform:uppercase;margin-left:6px">
+      Anmelden</button>
+  </div>
 </header>
+
+<div id="login-box" style="display:none;background:var(--bg2);border-bottom:1px solid var(--border);
+     padding:10px 20px;gap:8px;align-items:center;font-family:'Share Tech Mono',monospace;font-size:12px">
+  <input type="text" id="login-user" placeholder="Benutzername" style="
+    background:var(--bg3);border:1px solid var(--border);color:var(--text);
+    padding:5px 8px;font-family:inherit;font-size:inherit;border-radius:2px">
+  <input type="password" id="login-pass" placeholder="Passwort"
+         onkeydown="if(event.key==='Enter') doLogin()" style="
+    background:var(--bg3);border:1px solid var(--border);color:var(--text);
+    padding:5px 8px;font-family:inherit;font-size:inherit;border-radius:2px">
+  <button class="btn" onclick="doLogin()">&#9654; Login</button>
+  <span id="login-error" style="color:var(--red)"></span>
+</div>
 
 <!-- TAB BAR -->
 <div style="background:var(--bg2);border-bottom:1px solid var(--border);padding:0 20px;display:flex;gap:0">
@@ -713,10 +734,36 @@ function renderMsg(e) {
     : '';
   const dur = e.duration_s > 0 ? `<span class="msg-duration">⏱ ${e.duration_s}s</span>` : '';
 
+  const adminTools = isAdmin ? `
+    <div style="margin-top:6px;display:flex;flex-direction:column;gap:5px">
+      <div class="callsign-fix" style="display:flex;gap:6px;align-items:center;font-size:11px">
+        <input type="text" class="callsign-input" placeholder="Rufzeichen korrigieren"
+               value="${esc(e.callsign || '')}" style="
+          flex:0 0 160px;background:var(--bg3);border:1px solid var(--border);color:var(--text);
+          padding:4px 7px;font-family:inherit;font-size:inherit;border-radius:2px">
+        <button onclick="fixCallsign(${e.id}, this)" style="
+          background:transparent;border:1px solid var(--border);color:var(--text-dim);
+          font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:.06em;
+          padding:3px 9px;cursor:pointer;border-radius:2px;text-transform:uppercase">Speichern</button>
+        <span class="callsign-result" style="color:var(--text-dim)"></span>
+      </div>
+      ${e.has_audio ? `
+      <div class="speaker-enroll" style="display:flex;gap:6px;align-items:center;font-size:11px">
+        <input type="text" class="enroll-name" placeholder="Als Sprecher einlernen (Name)" style="
+          flex:0 0 160px;background:var(--bg3);border:1px solid var(--border);color:var(--text);
+          padding:4px 7px;font-family:inherit;font-size:inherit;border-radius:2px">
+        <button onclick="enrollFromArchive(${e.id}, this)" style="
+          background:transparent;border:1px solid var(--border);color:var(--text-dim);
+          font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:.06em;
+          padding:3px 9px;cursor:pointer;border-radius:2px;text-transform:uppercase">Einlernen</button>
+        <span class="enroll-result" style="color:var(--text-dim)"></span>
+      </div>` : ''}
+    </div>` : '';
+
   html += `
   <div class="msg">
     <div class="msg-header">
-      <span class="msg-callsign" style="color:${color}">${esc(e.callsign || '—')}</span>
+      <span class="msg-callsign" data-entry="${e.id}" style="color:${color}">${esc(e.callsign || '—')}</span>
       <span class="msg-room" style="color:${rc};border-color:${rc}40">${esc(e.room || '?')}</span>
       <span class="msg-time">${esc(timeOnly)}</span>
     </div>
@@ -731,6 +778,7 @@ function renderMsg(e) {
     </div>
     <div id="cmts-${e.id}" style="display:none;margin-top:8px;padding:8px;
          background:var(--bg);border:1px solid var(--border);border-radius:2px"></div>
+    ${adminTools}
   </div>`;
   return html;
 }
@@ -955,6 +1003,118 @@ function cancelRefresh() {
 function setStatus(text, live) {
   document.getElementById('status-txt').textContent = text;
   document.getElementById('dot-live').classList.toggle('live', live);
+}
+
+// ── Admin-Login (optional -- Archiv bleibt fuer alle lesbar, Login schaltet
+// nur Korrektur-Funktionen frei: Rufzeichen aendern, Sprecher einlernen) ────
+let authToken = localStorage.getItem('frn_token') || null;
+let isAdmin   = localStorage.getItem('frn_is_admin') === 'true';
+
+function adminFetch(url, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers, { 'X-Token': authToken });
+  return fetch(url, opts);
+}
+
+function toggleLoginBox() {
+  if (authToken) { doLogout(); return; }
+  const box = document.getElementById('login-box');
+  box.style.display = box.style.display === 'none' ? 'flex' : 'none';
+}
+
+async function doLogin() {
+  const user = document.getElementById('login-user').value.trim();
+  const pass = document.getElementById('login-pass').value;
+  document.getElementById('login-error').textContent = '';
+  try {
+    const resp = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: user, password: pass }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      document.getElementById('login-error').textContent = data.error || 'Fehler';
+      return;
+    }
+    if (!data.is_admin) {
+      document.getElementById('login-error').textContent =
+        'Kein Admin-Konto -- keine Korrektur-Rechte im Archiv.';
+      return;
+    }
+    authToken = data.token;
+    isAdmin   = true;
+    localStorage.setItem('frn_token', authToken);
+    localStorage.setItem('frn_is_admin', 'true');
+    updateLoginUI();
+    document.getElementById('login-box').style.display = 'none';
+    loadEntries(false);   // neu rendern, jetzt mit Korrektur-Steuerelementen
+  } catch(err) {
+    document.getElementById('login-error').textContent = 'Verbindungsfehler: ' + err.message;
+  }
+}
+
+function doLogout() {
+  if (authToken) adminFetch('/api/logout', { method: 'POST' }).catch(() => {});
+  authToken = null; isAdmin = false;
+  localStorage.removeItem('frn_token');
+  localStorage.removeItem('frn_is_admin');
+  updateLoginUI();
+  loadEntries(false);
+}
+
+function updateLoginUI() {
+  document.getElementById('login-status').textContent = isAdmin ? 'angemeldet' : '';
+  document.getElementById('login-toggle-btn').textContent = isAdmin ? 'Abmelden' : 'Anmelden';
+}
+updateLoginUI();
+
+async function enrollFromArchive(entryId, btn) {
+  const wrap = btn.closest('.speaker-enroll');
+  const name = wrap.querySelector('.enroll-name').value.trim();
+  const out  = wrap.querySelector('.enroll-result');
+  if (!name) { out.textContent = 'Bitte Namen eingeben.'; return; }
+  btn.disabled = true;
+  out.textContent = '⏳ läuft …';
+  try {
+    const r = await adminFetch(`/api/admin/archive/${entryId}/enroll`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const d = await r.json();
+    out.textContent = d.error ? ('Fehler: ' + d.error)
+      : `✓ ${d.name} gelernt (${d.samples} Beispiel${d.samples === 1 ? '' : 'e'} insgesamt)`;
+  } catch(e) {
+    out.textContent = 'Fehler: ' + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function fixCallsign(entryId, btn) {
+  const wrap     = btn.closest('.callsign-fix');
+  const callsign = wrap.querySelector('.callsign-input').value.trim();
+  const out      = wrap.querySelector('.callsign-result');
+  btn.disabled = true;
+  out.textContent = '⏳ läuft …';
+  try {
+    const r = await adminFetch(`/api/admin/archive/${entryId}/callsign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callsign }),
+    });
+    const d = await r.json();
+    if (d.error) { out.textContent = 'Fehler: ' + d.error; }
+    else {
+      out.textContent = '✓ gespeichert';
+      const label = document.querySelector(`.msg-callsign[data-entry="${entryId}"]`);
+      if (label) label.textContent = callsign || '—';
+    }
+  } catch(e) {
+    out.textContent = 'Fehler: ' + e;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────

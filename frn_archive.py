@@ -395,3 +395,25 @@ def add_comment(entry_id: int, text: str) -> int:
             (entry_id, ts, text.strip())
         )
         return cur.lastrowid
+
+
+def get_entry(entry_id: int) -> dict | None:
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, timestamp, room, callsign, text, audio_file, duration_s "
+            "FROM transmissions WHERE id = ?", (entry_id,)
+        ).fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "timestamp": row["timestamp"], "room": row["room"],
+            "callsign": row["callsign"], "text": row["text"],
+            "audio_file": row["audio_file"], "duration_s": row["duration_s"]}
+
+
+def update_callsign(entry_id: int, callsign: str) -> bool:
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE transmissions SET callsign = ? WHERE id = ?",
+            (callsign.strip(), entry_id)
+        )
+        return cur.rowcount > 0
