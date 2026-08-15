@@ -654,7 +654,7 @@ class TranscriptionPipeline:
         rc = getattr(self, "resolve_callsign", None)
         if rc:
             try:
-                callsign = rc(room, callsign, ts, text) or callsign
+                callsign = await rc(room, callsign, ts, text, wav_path) or callsign
             except Exception as e:
                 log.debug("resolve_callsign-Hook: %s", e)
 

@@ -715,6 +715,13 @@ class TXServer:
         # Debug-Panel im Admin-Bereich.
         self._debug_traces: collections.deque = collections.deque(maxlen=80)
         self._debug_trace_by_key: dict[tuple, dict] = {}
+        # Sprecher-Erkennung (Speaker-ID) per Stimm-Embedding, siehe
+        # _speaker_identify/_speaker_enroll. Enrollments (Name -> Liste von
+        # 256-dim Embedding-Vektoren) liegen in einer eigenen Datei, nicht in
+        # config.json (waere dort zu gross/unhandlich).
+        self._speaker_enrollments_path = Path(__file__).parent / "speaker_enrollments.json"
+        self._speaker_enrollments: dict[str, list[list[float]]] = {}
+        self._load_speaker_enrollments()
 
     # ── Debug-Ablaufverfolgung ──────────────────────────────────────────────
 
@@ -1589,14 +1596,115 @@ class TXServer:
                 return sent
         return None
 
-    def bot_archive_callsign(self, room: str, callsign: str, ts: float,
-                             text: str) -> str:
-        """Eigene Bot-Sendungen in Log + Archiv unter dem Bot-Namen führen.
+    # ── Sprecher-Erkennung (Speaker-ID, experimentell) ──────────────────────
+    # Stimm-Embeddings (Resemblyzer, 256-dim) ueber einen kleinen Remote-
+    # Server auf der GPU-Box (analog zum Whisper-Remote-Muster). Standardmaessig
+    # AUS (voice.speaker_id.enabled) -- experimentelles Feature, User-Wunsch
+    # 2026-08-15 ("mal versuchen, mit der Option zum Ein- und Ausschalten").
+    # Sanity-Check vorab bestaetigt brauchbare Trennschaerfe selbst auf
+    # komprimiertem GSM-CB-Funk-Audio (intra-Sprecher-Aehnlichkeit ~0.98,
+    # cross-Sprecher im Schnitt ~0.75).
+
+    def _speaker_id_cfg(self) -> dict:
+        return self.cfg.get("voice", {}).get("speaker_id", {}) or {}
+
+    def _load_speaker_enrollments(self) -> None:
+        try:
+            data = json.loads(self._speaker_enrollments_path.read_text(encoding="utf-8"))
+            self._speaker_enrollments = data.get("enrollments", {})
+        except FileNotFoundError:
+            self._speaker_enrollments = {}
+        except Exception as e:
+            log.warning("Sprecher-Enrollments nicht geladen: %s", e)
+            self._speaker_enrollments = {}
+
+    def _save_speaker_enrollments(self) -> None:
+        try:
+            self._speaker_enrollments_path.write_text(
+                json.dumps({"enrollments": self._speaker_enrollments},
+                          ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8")
+        except Exception as e:
+            log.warning("Sprecher-Enrollments nicht gespeichert: %s", e)
+
+    async def _speaker_embed(self, wav_path: str) -> list[float] | None:
+        """Fragt den Speaker-ID-Server nach dem Stimm-Embedding einer WAV-
+        Datei. None bei Fehler/nicht erreichbar (Feature faellt still aus,
+        blockiert nie die normale Verarbeitung)."""
+        cfg = self._speaker_id_cfg()
+        url = (cfg.get("server_url") or "http://192.0.0.17:9004/embed").strip()
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                with open(wav_path, "rb") as f:
+                    data = aiohttp.FormData()
+                    data.add_field("file", f, filename="audio.wav",
+                                   content_type="audio/wav")
+                    async with sess.post(url, data=data) as resp:
+                        if resp.status != 200:
+                            log.debug("Speaker-ID HTTP %d", resp.status)
+                            return None
+                        result = await resp.json()
+                        return result.get("embedding")
+        except Exception as e:
+            log.debug("Speaker-ID nicht erreichbar (%s): %s", url, e)
+            return None
+
+    @staticmethod
+    def _cosine_sim(a: list[float], b: list[float]) -> float:
+        va, vb = np.array(a), np.array(b)
+        denom = np.linalg.norm(va) * np.linalg.norm(vb)
+        return float(np.dot(va, vb) / denom) if denom else 0.0
+
+    async def _speaker_identify(self, wav_path: str) -> str | None:
+        """Vergleicht das Stimm-Embedding der Aufnahme mit allen enrollten
+        Sprechern (bester Treffer je Person), liefert den Namen bei
+        Ueberschreiten der Schwelle, sonst None."""
+        if not self._speaker_enrollments:
+            return None
+        emb = await self._speaker_embed(wav_path)
+        if not emb:
+            return None
+        threshold = float(self._speaker_id_cfg().get("threshold", 0.80))
+        best_name, best_sim = None, 0.0
+        for name, samples in self._speaker_enrollments.items():
+            for sample in samples:
+                sim = self._cosine_sim(emb, sample)
+                if sim > best_sim:
+                    best_sim, best_name = sim, name
+        if best_name and best_sim >= threshold:
+            log.info("Speaker-ID: %s erkannt (Aehnlichkeit %.2f)", best_name, best_sim)
+            return best_name
+        return None
+
+    async def _speaker_enroll(self, name: str, wav_path: str) -> bool:
+        """Fuegt ein neues Stimm-Beispiel fuer eine Person hinzu (mehrere
+        Beispiele pro Person moeglich, verbessert die Erkennung)."""
+        emb = await self._speaker_embed(wav_path)
+        if not emb:
+            return False
+        self._speaker_enrollments.setdefault(name, []).append(emb)
+        self._save_speaker_enrollments()
+        return True
+
+    async def bot_archive_callsign(self, room: str, callsign: str, ts: float,
+                                   text: str, wav_path: str = "") -> str:
+        """Eigene Bot-Sendungen in Log + Archiv unter dem Bot-Namen führen,
+        sonst (wenn aktiviert) per Speaker-ID versuchen, den Sprecher zu
+        identifizieren.
 
         Greift nur, wenn die Aufnahme kein Rufzeichen hat (Normalfall, die
-        Sprecher-Zuordnung ist deaktiviert)."""
+        client_idx-basierte Sprecher-Zuordnung ist unzuverlaessig, siehe
+        _reader_loop-Kommentar in frn_stream.py)."""
         if not callsign and self._bot_is_own(room, text, ts):
             return self._bot_cfg().get("name") or "Robert"
+        if not callsign and wav_path and self._speaker_id_cfg().get("enabled"):
+            try:
+                identified = await self._speaker_identify(wav_path)
+                if identified:
+                    return identified
+            except Exception as e:
+                log.debug("Speaker-ID Fehler: %s", e)
         return callsign
 
     # Kurze, alltagssprachlich mehrdeutige Kommandowörter brauchen ein enges
@@ -2795,6 +2903,91 @@ class TXServer:
             "raw": raw,
             "model": bot.get("ollama_model"),
             "seconds": round(time.time() - t0, 1)})
+
+    async def handle_admin_speaker_id(self, request):
+        """GET: Sprecher-ID-Einstellungen + Enrollment-Uebersicht;
+        POST: enabled/threshold/server_url speichern."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+            cfg = self.cfg.setdefault("voice", {}).setdefault("speaker_id", {})
+            if "enabled" in body:
+                cfg["enabled"] = bool(body["enabled"])
+            if "threshold" in body:
+                try:
+                    cfg["threshold"] = max(0.5, min(0.99, float(body["threshold"])))
+                except (TypeError, ValueError):
+                    pass
+            if "server_url" in body and isinstance(body["server_url"], str):
+                cfg["server_url"] = body["server_url"].strip()
+            try:
+                if self.args.config:
+                    cfg_path = Path(self.args.config)
+                    disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+                    disk.setdefault("voice", {}).setdefault("speaker_id", {}).update(cfg)
+                    cfg_path.write_text(
+                        json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8")
+            except Exception as e:
+                log.warning("Speaker-ID-Einstellungen nicht gespeichert: %s", e)
+                return web.json_response({"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
+        cfg = self._speaker_id_cfg()
+        enrollments = [{"name": name, "samples": len(samples)}
+                       for name, samples in sorted(self._speaker_enrollments.items())]
+        return web.json_response({
+            "enabled": bool(cfg.get("enabled")),
+            "threshold": float(cfg.get("threshold", 0.80)),
+            "server_url": cfg.get("server_url") or "http://192.0.0.17:9004/embed",
+            "enrollments": enrollments,
+        })
+
+    async def handle_admin_speaker_enroll(self, request):
+        """POST /api/admin/speaker-id/enroll — {name, audio} lernt ein neues
+        Stimm-Beispiel an; audio = reiner WAV-Dateiname aus wav_dir (gleiche
+        Dateien, die auch im Debug-Panel abspielbar sind)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        name  = (body.get("name") or "").strip()[:60]
+        audio = Path((body.get("audio") or "").strip()).name
+        if not name or not audio:
+            return web.json_response({"error": "name/audio fehlt"}, status=400)
+        wav_dir = Path(self.cfg.get("transcription", {}).get(
+            "wav_dir", "/opt/FRN/recordings"))
+        wav_path = wav_dir / audio
+        if not wav_path.exists():
+            return web.json_response({"error": "Aufnahme nicht mehr vorhanden"}, status=404)
+        ok = await self._speaker_enroll(name, str(wav_path))
+        if not ok:
+            return web.json_response(
+                {"error": "Speaker-ID-Server nicht erreichbar oder Fehler beim Embedding"},
+                status=502)
+        return web.json_response({
+            "ok": True,
+            "name": name,
+            "samples": len(self._speaker_enrollments.get(name, [])),
+        })
+
+    async def handle_admin_speaker_delete(self, request):
+        """DELETE /api/admin/speaker-id/enrollments/{name} — Person komplett
+        entfernen (alle Beispiele)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        name = request.match_info.get("name", "")
+        if name in self._speaker_enrollments:
+            del self._speaker_enrollments[name]
+            self._save_speaker_enrollments()
+        return web.json_response({"ok": True})
 
     async def handle_admin_gemini_models(self, request):
         """Verfügbare Gemini-Modell-IDs (Text-Chat) für das Dropdown.
@@ -4762,6 +4955,11 @@ class TXServer:
         app.router.add_get("/api/admin/status", self.handle_admin_status)
         app.router.add_get("/api/admin/debug-traces", self.handle_admin_debug_traces)
         app.router.add_post("/api/admin/debug-replay", self.handle_admin_debug_replay)
+        app.router.add_get("/api/admin/speaker-id", self.handle_admin_speaker_id)
+        app.router.add_post("/api/admin/speaker-id", self.handle_admin_speaker_id)
+        app.router.add_post("/api/admin/speaker-id/enroll", self.handle_admin_speaker_enroll)
+        app.router.add_delete("/api/admin/speaker-id/enrollments/{name}",
+                              self.handle_admin_speaker_delete)
         app.router.add_get("/api/admin/debug-audio/{name}", self.handle_admin_debug_audio)
         app.router.add_get("/api/admin/overview", self.handle_admin_overview)
 

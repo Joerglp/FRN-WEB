@@ -158,6 +158,28 @@ h1 {
   <div id="debug-traces"></div>
   <button class="btn-save" onclick="loadDebugTraces()" style="margin-top:10px">AKTUALISIEREN</button>
   <div class="admin-msg" id="msg-debug"></div>
+
+  <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
+  <div id="speaker-id-box">
+    <h1 style="font-size:1.05em;margin-top:0">Sprecher-Erkennung (experimentell)</h1>
+    <div style="font-size:.78rem;color:var(--muted);margin-bottom:10px;line-height:1.5">
+      Erkennt Sprecher anhand der Stimme (Resemblyzer-Embedding), unabhängig
+      vom transkribierten Namen. Braucht mindestens ein eingelerntes Beispiel
+      pro Person (Knopf "Als Sprecher einlernen" bei einer Aufnahme oben).
+      Greift nur, wenn kein Rufzeichen bekannt ist.
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer">
+      <input type="checkbox" id="sid-enabled">
+      Sprecher-Erkennung aktiv
+    </label>
+    <div class="form-field" style="max-width:200px;margin-bottom:12px">
+      <label>Schwelle (Ähnlichkeit, 0.5–0.99)</label>
+      <input type="number" id="sid-threshold" min="0.5" max="0.99" step="0.01" value="0.80">
+    </div>
+    <button class="btn-save" onclick="saveSpeakerIdSettings()" style="margin-bottom:14px">SPEICHERN</button>
+    <div style="font-weight:600;font-size:.85em;margin-bottom:6px">Eingelernte Sprecher</div>
+    <div id="sid-enrollments"></div>
+  </div>
 </div>
 
 <script>
@@ -216,6 +238,7 @@ function showDebug(who) {
   document.getElementById("who").textContent = who ? `angemeldet als ${who}` : "";
   loadDebugTraces();
   loadDebugModelList();
+  loadSpeakerIdSettings();
   startDebugAutoRefresh();
 }
 
@@ -297,6 +320,75 @@ function populateDebugRoomFilter(traces) {
     rooms.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join("");
   sel.value = rooms.includes(cur) ? cur : "";
 }
+async function enrollSpeaker(audio, btn) {
+  const wrap = btn.closest(".dbg-enroll");
+  const name = wrap.querySelector(".dbg-enroll-name").value.trim();
+  const out  = wrap.querySelector(".dbg-enroll-result");
+  if (!name) { out.style.display = ""; out.textContent = "Bitte Namen eingeben."; return; }
+  btn.disabled = true;
+  out.style.display = "";
+  out.textContent = "⏳ läuft …";
+  try {
+    const r = await adminFetch("/api/admin/speaker-id/enroll", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ name, audio }),
+    });
+    const d = await r.json();
+    if (d.error) { out.textContent = "Fehler: " + d.error; }
+    else {
+      out.textContent = `✓ ${d.name} gelernt (${d.samples} Beispiel${d.samples === 1 ? "" : "e"} insgesamt)`;
+      loadSpeakerIdSettings();
+    }
+  } catch(e) {
+    out.textContent = "Fehler: " + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+async function loadSpeakerIdSettings() {
+  const box = document.getElementById("speaker-id-box");
+  if (!box) return;
+  try {
+    const r = await adminFetch("/api/admin/speaker-id");
+    const d = await r.json();
+    document.getElementById("sid-enabled").checked = !!d.enabled;
+    document.getElementById("sid-threshold").value = d.threshold;
+    const list = document.getElementById("sid-enrollments");
+    if (!d.enrollments || !d.enrollments.length) {
+      list.innerHTML = '<div style="color:var(--muted);font-size:.8rem">Noch keine Sprecher eingelernt.</div>';
+    } else {
+      list.innerHTML = d.enrollments.map(e => `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.82rem">
+          <span style="flex:1">${esc(e.name)} <span style="color:var(--muted)">(${e.samples} Beispiel${e.samples === 1 ? "" : "e"})</span></span>
+          <button type="button" onclick="deleteSpeakerEnrollment('${esc(e.name)}')"
+                  style="background:none;border:1px solid var(--dim);color:var(--muted);
+                         border-radius:6px;padding:3px 8px;cursor:pointer;font-size:.78rem">✕ löschen</button>
+        </div>`).join("");
+    }
+  } catch(e) { /* still */ }
+}
+async function saveSpeakerIdSettings() {
+  const enabled = document.getElementById("sid-enabled").checked;
+  const threshold = parseFloat(document.getElementById("sid-threshold").value) || 0.80;
+  try {
+    await adminFetch("/api/admin/speaker-id", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ enabled, threshold }),
+    });
+    showMsg("msg-debug", "Sprecher-ID-Einstellungen gespeichert.", "ok");
+  } catch(e) {
+    showMsg("msg-debug", "Fehler: " + e, "error");
+  }
+}
+async function deleteSpeakerEnrollment(name) {
+  try {
+    await adminFetch(`/api/admin/speaker-id/enrollments/${encodeURIComponent(name)}`,
+      { method: "DELETE" });
+    loadSpeakerIdSettings();
+  } catch(e) { /* still */ }
+}
 async function loadDebugTraces() {
   const box = document.getElementById("debug-traces");
   try {
@@ -352,6 +444,17 @@ async function loadDebugTraces() {
              <div class="dbg-replay-result" style="display:none;font-size:.8rem;flex-basis:100%"></div>
            </div>`
         : "";
+      const audioStep = (tr.steps || []).find(s => s.audio);
+      const enroll = audioStep
+        ? `<div class="dbg-enroll" style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+             <input type="text" class="dbg-enroll-name" placeholder="Name (Sprecher-ID einlernen)"
+                    style="flex:0 0 200px;background:var(--bg);color:var(--text);border:1px solid var(--border);
+                           border-radius:6px;padding:5px 8px;font-size:.78rem">
+             <button class="btn-save" style="padding:5px 10px;font-size:.78rem"
+                     onclick="enrollSpeaker('${esc(audioStep.audio)}', this)">Als Sprecher einlernen</button>
+             <div class="dbg-enroll-result" style="display:none;font-size:.8rem;flex-basis:100%"></div>
+           </div>`
+        : "";
       return `<div class="dbg-trace${staleCls}">
                 <div class="dbg-trace-head">
                   <span>${esc(tr.room)} · ${esc(t.abs)}
@@ -360,6 +463,7 @@ async function loadDebugTraces() {
                 </div>
                 <div class="dbg-steps">${steps}</div>
                 ${replay}
+                ${enroll}
               </div>`;
     }).join("");
   } catch(e) {
