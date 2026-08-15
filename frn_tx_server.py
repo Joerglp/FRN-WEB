@@ -1580,7 +1580,7 @@ class TXServer:
             if t0 - 3.0 <= ts <= t1 + 3.0:
                 return True
             if sent and difflib.SequenceMatcher(
-                    None, low, sent.lower()).ratio() > 0.7:
+                    None, low, sent.lower(), autojunk=False).ratio() > 0.7:
                 return True
         return False
 
@@ -1910,7 +1910,8 @@ class TXServer:
             own_prev = self._bot_own_tx.get(room_name, [])
             if own_prev:
                 sim = difflib.SequenceMatcher(
-                    None, answer.lower(), own_prev[-1][2].lower()).ratio()
+                    None, answer.lower(), own_prev[-1][2].lower(),
+                    autojunk=False).ratio()
                 if sim > 0.7:
                     log.warning("[%s] KI-Funker: Antwort zu aehnlich zur letzten eigenen "
                                "(%.2f) -- unterdrueckt gegen Wiederhol-Schleife: %.80s",
@@ -2149,8 +2150,47 @@ class TXServer:
         half = n // 2
         first  = " ".join(parts[:half])
         second = " ".join(parts[half:])
-        if difflib.SequenceMatcher(None, first.lower(), second.lower()).ratio() > 0.8:
+        if difflib.SequenceMatcher(None, first.lower(), second.lower(),
+                                   autojunk=False).ratio() > 0.8:
             return first
+        return text
+
+    def _strip_own_history_repeat(self, room_name: str, text: str) -> str:
+        """Sicherheitsnetz gegen KUMULATIVE Selbst-Wiederholung: manche
+        Modelle haengen bei zu grosszuegigem num_predict-Budget nach der
+        eigentlichen Antwort ungebremst weiter Text an und beginnen dabei,
+        eine oder mehrere FRUEHERE eigene Antworten aus dem Gespraechsverlauf
+        zu wiederholen (live beobachtet 2026-08-15: 4. Antwort in Folge
+        enthielt alle 3 vorherigen eigenen Antworten aneinandergehaengt,
+        ohne Trennung). Im Unterschied zu _collapse_self_repeat (nur 2x
+        dieselbe Antwort direkt hintereinander) prueft diese Methode gegen
+        den ECHTEN Verlauf (_bot_own_tx) und schneidet ab der Stelle ab, wo
+        eine fruehere Antwort erkennbar wiederkehrt -- der neue Teil davor
+        bleibt erhalten."""
+        own_prev = self._bot_own_tx.get(room_name, [])
+        if not own_prev or len(text) < 20:
+            return text
+        for _, _, prev_text in reversed(own_prev[-6:]):
+            if not prev_text or len(prev_text) < 15:
+                continue
+            # autojunk=False -- der Standard (True) stuft bei laengeren Texten
+            # (>200 Zeichen) haeufige Zeichen als "junk" ein und verhindert so
+            # zuverlaessig lange Matches (getestet: fand ohne dies nur 1
+            # Zeichen Uebereinstimmung statt der tatsaechlichen 224).
+            matcher = difflib.SequenceMatcher(None, text.lower(), prev_text.lower(),
+                                              autojunk=False)
+            match = matcher.find_longest_match(0, len(text), 0, len(prev_text))
+            if match.size < 20:
+                continue
+            before = text[:match.a].strip()
+            if before:
+                log.warning("[%s] KI-Funker: fruehere eigene Antwort in neuer Antwort "
+                           "wiedererkannt -- ab Position %d gekappt: %.60s",
+                           room_name, match.a, prev_text)
+                text = before
+            else:
+                # Wiederholung steht ganz am Anfang -- Rest nach dem Match behalten
+                text = text[match.a + match.size:].strip()
         return text
 
     async def _bot_ollama(self, bot: dict, hist: list, with_raw: bool = False,
@@ -2222,6 +2262,11 @@ class TXServer:
             # zweite Haelfte der ersten stark aehnelt, und wenn ja nur die
             # erste behalten.
             cleaned = self._collapse_self_repeat(cleaned)
+            # Kumulative Wiederholung frueherer eigener Antworten (siehe
+            # _strip_own_history_repeat) -- braucht room_name, deshalb erst
+            # hier moeglich (nicht in der staticmethod oben).
+            if room_name:
+                cleaned = self._strip_own_history_repeat(room_name, cleaned)
             if cleaned and not cleaned.upper().startswith("SKIP"):
                 ans = cleaned   # sonst: nicht gemeint / nichts zu sagen
         if do_trace:

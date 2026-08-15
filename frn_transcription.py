@@ -166,7 +166,7 @@ def _dedupe_cascade(text: str) -> str:
         return text   # zu kurz fuer eine sinnvolle Kaskaden-Analyse
 
     def sim(a, b):
-        return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+        return difflib.SequenceMatcher(None, a.lower(), b.lower(), autojunk=False).ratio()
 
     def dup_flags(seq):
         flags = [False] * len(seq)
