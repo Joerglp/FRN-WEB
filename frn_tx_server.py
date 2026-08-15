@@ -2010,7 +2010,8 @@ class TXServer:
 
     async def _bot_ollama(self, bot: dict, hist: list, with_raw: bool = False,
                           search_query: str = "", room_name: str = "",
-                          trace_ts: float | None = None):
+                          trace_ts: float | None = None,
+                          force_model: bool = False):
         """Entscheidung + Antwort des KI-Funkers. Provider laut voice.bot.provider
         (ollama = lokal/eigener Server, gemini = Google-Cloud). Das Modell darf mit
         SKIP schweigen. Liefert "" wenn der Bot nicht antworten soll.
@@ -2018,7 +2019,9 @@ class TXServer:
         search_query: erkannter Websuche-Auftrag (siehe _BOT_SEARCH_RE) —
         wird vor dem LLM-Aufruf per SearXNG aufgelöst und in den Kontext
         eingespeist. room_name/trace_ts: Zuordnung fuers Debug-Panel, beide
-        leer/None beim Trockentest (kein Tracing noetig)."""
+        leer/None beim Trockentest (kein Tracing noetig). force_model=True
+        erzwingt exakt bot['ollama_model'] (siehe _llm_ollama) -- fuers
+        gezielte Modell-Vergleichstesten im Debug-Panel."""
         do_trace = bool(room_name) and trace_ts is not None
         search_context = ""
         if search_query:
@@ -2038,7 +2041,8 @@ class TXServer:
             raw = await self._llm_gemini(bot, system, messages)
         else:
             raw = await self._llm_ollama(bot, system, messages,
-                                         room_name=room_name, trace_ts=trace_ts)
+                                         room_name=room_name, trace_ts=trace_ts,
+                                         force_model=force_model)
         _lldt = time.time() - _t0
         log.info("KI-Funker LLM (%s): %.1fs", provider, _lldt)
         ans = ""
@@ -2075,7 +2079,8 @@ class TXServer:
         return (ans, raw or "") if with_raw else ans
 
     async def _llm_ollama(self, bot: dict, system: str, messages: list,
-                          room_name: str = "", trace_ts: float | None = None) -> str:
+                          room_name: str = "", trace_ts: float | None = None,
+                          force_model: bool = False) -> str:
         """Chat-Aufruf an einen Ollama-Server. Liefert rohen Antworttext ("" bei Fehler).
 
         Bei aktivierter Websuche wird dem Modell zusaetzlich zum Regex-Trigger
@@ -2101,30 +2106,35 @@ class TXServer:
         # gerade nichts geladen ist oder die Abfrage fehlschlaegt.
         model   = bot.get("ollama_model") or "qwen3:14b"
         num_ctx = int(bot.get("ollama_num_ctx", 97280))
-        try:
-            ps_timeout = aiohttp.ClientTimeout(total=5)
-            async with aiohttp.ClientSession(timeout=ps_timeout) as sess:
-                async with sess.get(f"{url}/api/ps", headers=hdrs) as resp:
-                    if resp.status == 200:
-                        loaded = (await resp.json()).get("models") or []
-                        if loaded:
-                            entry = loaded[0]
-                            loaded_name = entry.get("name") or entry.get("model")
-                            if loaded_name and loaded_name != model:
-                                log.info("KI-Funker: nutze bereits geladenes Modell %s "
-                                        "statt konfiguriertem %s (spart Neu-Load)",
-                                        loaded_name, model)
-                                model = loaded_name
-                            # ACHTUNG (2026-08-10, wieder entfernt): das
-                            # Kontextfenster des laufenden Modells NICHT mehr
-                            # uebernehmen -- wenn ein anderer Client (Open
-                            # WebUI) selbst mit wechselnden num_ctx anfragt,
-                            # jagt dieser Code dem jeweils zuletzt gesehenen
-                            # Wert hinterher und verursacht dadurch staendige
-                            # Neu-Loads (Ping-Pong), statt sie zu vermeiden.
-                            # Eigener fester Wert (ollama_num_ctx) ist stabiler.
-        except Exception as e:
-            log.debug("KI-Funker: /api/ps nicht erreichbar (%s) -- nutze konfiguriertes Modell/Kontext", e)
+        # force_model=True (gezieltes Modell-Vergleichstesten im Debug-Panel)
+        # ueberspringt die Auto-Erkennung komplett -- sonst wuerde das dort
+        # explizit gewaehlte Modell sofort wieder durch das gerade geladene
+        # ersetzt werden (2026-08-15 als Bug gemeldet: Test griff nicht).
+        if not force_model:
+            try:
+                ps_timeout = aiohttp.ClientTimeout(total=5)
+                async with aiohttp.ClientSession(timeout=ps_timeout) as sess:
+                    async with sess.get(f"{url}/api/ps", headers=hdrs) as resp:
+                        if resp.status == 200:
+                            loaded = (await resp.json()).get("models") or []
+                            if loaded:
+                                entry = loaded[0]
+                                loaded_name = entry.get("name") or entry.get("model")
+                                if loaded_name and loaded_name != model:
+                                    log.info("KI-Funker: nutze bereits geladenes Modell %s "
+                                            "statt konfiguriertem %s (spart Neu-Load)",
+                                            loaded_name, model)
+                                    model = loaded_name
+                                # ACHTUNG (2026-08-10, wieder entfernt): das
+                                # Kontextfenster des laufenden Modells NICHT mehr
+                                # uebernehmen -- wenn ein anderer Client (Open
+                                # WebUI) selbst mit wechselnden num_ctx anfragt,
+                                # jagt dieser Code dem jeweils zuletzt gesehenen
+                                # Wert hinterher und verursacht dadurch staendige
+                                # Neu-Loads (Ping-Pong), statt sie zu vermeiden.
+                                # Eigener fester Wert (ollama_num_ctx) ist stabiler.
+            except Exception as e:
+                log.debug("KI-Funker: /api/ps nicht erreichbar (%s) -- nutze konfiguriertes Modell/Kontext", e)
         body = {"model": model,
                 "messages": full_messages,
                 "stream": False, "keep_alive": bot.get("ollama_keep_alive", 0),
@@ -2733,7 +2743,8 @@ class TXServer:
         if model:
             bot["ollama_model"] = model
         t0 = time.time()
-        answer, raw = await self._bot_ollama(bot, tr["hist"], with_raw=True)
+        answer, raw = await self._bot_ollama(bot, tr["hist"], with_raw=True,
+                                             force_model=bool(model))
         return web.json_response({
             "would_reply": bool(answer),
             "answer": answer or "SKIP",
