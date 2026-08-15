@@ -4258,6 +4258,11 @@ async function loadDebugTraces() {
   const box = document.getElementById("debug-traces");
   try {
     const r = await adminFetch("/api/admin/debug-traces");
+    if (r.status === 401 || r.status === 403) {
+      stopDebugAutoRefresh();
+      box.innerHTML = `<div style="color:var(--red);font-size:0.85em">Sitzung abgelaufen (z.B. durch Server-Neustart) -- bitte neu anmelden.</div>`;
+      return;
+    }
     const data = await r.json();
     let traces = data.traces || [];
     populateDebugRoomFilter(traces);
