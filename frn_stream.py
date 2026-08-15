@@ -455,22 +455,28 @@ class RoomRecorder:
     TX-Server (zentraler Whisper-Prozess).
     """
 
-    SILENCE_TIMEOUT = 0.5    # Sekunden Stille nach letztem Audio → Session beendet.
-                             # War 4.0s. Live per Vergleich mit dem offiziellen
-                             # FRN-Client verifiziert (2026-08-14): sobald die
+    SILENCE_TIMEOUT = 1.0    # Sekunden Stille nach letztem Audio → Session beendet.
+                             # War 4.0s, dann kurz 0.5s (2026-08-14, siehe unten
+                             # fuer die Begruendung dafuer). 0.5s erwies sich als
+                             # zu aggressiv: bei einem durchgehenden Hin-und-Her-
+                             # Gespraech (normale Sprechpausen, PTT bleibt quasi
+                             # laufend gehalten) wurde ständig mitten drin
+                             # zerschnitten -- jeder isolierte 2-4s-Schnipsel
+                             # ohne Zusammenhang liess Whisper haeufiger
+                             # halluzinieren (User bemerkt an einem echten
+                             # Gespraech, 2026-08-15: "Dr. Eickel" statt
+                             # zusammenhaengendem Text). 1.0s als Mittelweg zum
+                             # Testen -- deutlich schneller als die alten 4s,
+                             # aber mehr Puffer gegen normale Pausen als 0.5s.
+                             #
+                             # Ursprüngliche Begruendung fuer die drastische
+                             # Absenkung von 4.0s bleibt gueltig: live mit dem
+                             # offiziellen FRN-Client verglichen, sobald die
                              # Sendetaste wirklich losgelassen wird, kommen
                              # schlicht KEINE Netzwerk-Pakete mehr an -- die
                              # "Stille", die diese Klasse hier sieht, ist bereits
                              # lokal synthetisierte Fuellung (siehe output_thread
-                             # im __main__), kein unsicheres Rateergebnis. Der
-                             # offizielle Client reagiert auf denselben
-                             # Paket-Stopp praktisch sofort ("RX is stopped",
-                             # Millisekunden-genau mit dem Start-Ereignis
-                             # korreliert). 4s Puffer waren daher unnoetig lang
-                             # (Hauptursache der vom User bemerkten 6+s-Latenz
-                             # bis eine Aufnahme im Debug-Panel auftaucht). Nur
-                             # auf 0 wollten wir nicht gehen (kleine Marge gegen
-                             # Netzwerk-Jitter/vereinzelte Paketverluste).
+                             # im __main__), kein unsicheres Rateergebnis.
     MIN_DURATION    = 1.5    # Sekunden Mindestlänge (kürzere werden verworfen)
     MAX_DURATION    = 90.0   # Sekunden Maximallänge (erzwungener Schnitt) --
                              # war 300s, dann 90s (2026-08-07), dann kurz 240s
