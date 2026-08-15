@@ -1501,6 +1501,20 @@ class TXServer:
         r"|nach\s+(.+?)\s+(?:mal\s+)?such\w*\b",
         re.IGNORECASE)
 
+    # Wetter wird NICHT dem Modell ueberlassen (LLM-Tool-Calling hat sich bei
+    # manchen Modellen als unzuverlaessig erwiesen, z.B. qwen3.5 -- 2026-08-15
+    # getestet: hat auf eine klare Wetterfrage kein einziges Mal selbst die
+    # Websuche ausgeloest, stattdessen Wetter frei erfunden trotz explizitem
+    # Prompt-Verbot). Erzwingt die Suche deterministisch, sobald ein Wetter-
+    # Stichwort im gehoerten Text vorkommt -- unabhaengig von der genauen
+    # Formulierung (im Unterschied zu _BOT_SEARCH_RE, das eine explizite
+    # "such mal nach"-Phrase braucht).
+    _BOT_WEATHER_RE = re.compile(
+        r"\b(regen\w*|regnet|wetter\w*|sonne|sonnig\w*|schnee\w*|schneit\w*|"
+        r"gewitter\w*|sturm\w*|windig\w*|bew[öo]lkt\w*|wolke\w*|hagel\w*|"
+        r"frost\w*|nebel\w*|temperatur\w*|gradzahl\w*)\b",
+        re.IGNORECASE)
+
     # Echtes Ollama-Tool-Calling als Ergaenzung zum Regex-Trigger oben: der
     # Regex fängt nur explizite Befehle ("such mal nach X"), das Modell kann
     # damit zusaetzlich SELBST erkennen, wenn es ein erwaehntes Thema nicht
@@ -1735,6 +1749,7 @@ class TXServer:
                                   final=True)
             return
         search_query = ""
+        weather_forced = False
         if (bot.get("websearch") or {}).get("enabled"):
             m = self._BOT_SEARCH_RE.search(text)
             if m:
@@ -1742,7 +1757,11 @@ class TXServer:
                      or "").strip(" .,!?;:\"'")
                 if len(q) >= 3:
                     search_query = q[:200]
+            if not search_query and self._BOT_WEATHER_RE.search(text):
+                search_query = "Wetter Lippstadt heute"
+                weather_forced = True
         reason = ("Gespräch läuft" if in_conv else
+                 "Wetter-Stichwort -- Suche erzwungen" if weather_forced else
                  "Websuche erkannt" if search_query else
                  "Name/Anruf erkannt" if name_or_call else
                  "Anruf nach langer Funkstille")
