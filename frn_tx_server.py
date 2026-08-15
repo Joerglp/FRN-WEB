@@ -1760,6 +1760,11 @@ class TXServer:
             hist   = list(self._room_hist.get(room_name, []))
             if hist:
                 heard_ts = hist[-1][0]   # Zeitpunkt des ausloesenden Funkspruchs
+            # Verlauf an der Spur speichern (nicht nur den Einzelschritt-Text)
+            # -- damit das Debug-Panel diese echte Durchsage spaeter mit einem
+            # ANDEREN Modell nachstellen kann (siehe handle_admin_debug_replay),
+            # statt nur mit einem getippten Test-Satz ohne echten Kontext.
+            self._debug_trace_get(room_name, heard_ts)["hist"] = hist
             answer = await self._bot_ollama(bot, hist, search_query=search_query,
                                             room_name=room_name, trace_ts=heard_ts)
             if not answer:
@@ -2702,6 +2707,40 @@ class TXServer:
             "search_query": search_query,
             "seconds": round(time.time() - t0, 1)})
 
+    async def handle_admin_debug_replay(self, request):
+        """Trockenlauf mit dem ECHTEN Gespraechsverlauf einer bereits im
+        Debug-Panel aufgezeichneten Durchsage, aber wahlweise einem ANDEREN
+        Modell -- fuers Modell-Vergleichstesten (sendet NICHT), siehe
+        _bot_reply, das den Verlauf pro Spur ablegt (tr["hist"])."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        room  = (body.get("room") or "").strip()
+        ts    = body.get("ts")
+        model = (body.get("model") or "").strip()
+        if not room or ts is None:
+            return web.json_response({"error": "room/ts fehlt"}, status=400)
+        tr = self._debug_trace_by_key.get((room, round(float(ts), 1)))
+        if not tr or not tr.get("hist"):
+            return web.json_response(
+                {"error": "kein gespeicherter Verlauf zu dieser Spur (evtl. zu alt)"},
+                status=404)
+        bot = dict(self._bot_cfg())
+        if model:
+            bot["ollama_model"] = model
+        t0 = time.time()
+        answer, raw = await self._bot_ollama(bot, tr["hist"], with_raw=True)
+        return web.json_response({
+            "would_reply": bool(answer),
+            "answer": answer or "SKIP",
+            "raw": raw,
+            "model": bot.get("ollama_model"),
+            "seconds": round(time.time() - t0, 1)})
+
     async def handle_admin_gemini_models(self, request):
         """Verfügbare Gemini-Modell-IDs (Text-Chat) für das Dropdown.
         Verhindert, dass versehentlich ein Anzeigename statt der API-ID
@@ -3556,6 +3595,7 @@ class TXServer:
                 "done":     tr["done"],
                 "total_s":  tr["total_s"],
                 "steps":    tr["steps"],
+                "replayable": bool(tr.get("hist")),
             })
         return web.json_response({"traces": traces})
 
@@ -4666,6 +4706,7 @@ class TXServer:
 
         app.router.add_get("/api/admin/status", self.handle_admin_status)
         app.router.add_get("/api/admin/debug-traces", self.handle_admin_debug_traces)
+        app.router.add_post("/api/admin/debug-replay", self.handle_admin_debug_replay)
         app.router.add_get("/api/admin/debug-audio/{name}", self.handle_admin_debug_audio)
         app.router.add_get("/api/admin/overview", self.handle_admin_overview)
 

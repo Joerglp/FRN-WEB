@@ -1675,6 +1675,7 @@ audio {
         </label>
         <span id="dbg-last-refresh" style="font-size:.78em;color:var(--muted)"></span>
       </div>
+      <datalist id="dbg-model-list"></datalist>
       <div id="debug-traces"></div>
       <button class="btn-save" onclick="loadDebugTraces()" style="margin-top:10px">AKTUALISIEREN</button>
       <div class="admin-msg" id="msg-debug"></div>
@@ -3352,7 +3353,7 @@ function showAdminTab(name) {
     if (name === "autoreply") loadAutoReplyAdmin();
     if (name === "bot")       loadBotAdmin();
     if (name === "crosslink") loadCrosslink();
-    if (name === "debug")     loadDebugTraces();
+    if (name === "debug")     { loadDebugTraces(); loadDebugModelList(); }
   }
   if (name !== "debug") stopDebugAutoRefresh();
   else startDebugAutoRefresh();
@@ -4114,6 +4115,47 @@ function populateDebugRoomFilter(traces) {
     rooms.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join("");
   sel.value = rooms.includes(cur) ? cur : "";
 }
+async function loadDebugModelList() {
+  try {
+    const r = await adminFetch("/api/admin/auto-reply/models");
+    const d = await r.json();
+    document.getElementById("dbg-model-list").innerHTML = (d.models || []).map(m =>
+      `<option value="${esc(m.name)}">`).join("");
+  } catch(e) { /* still */ }
+}
+async function replayTrace(room, ts, btn) {
+  const wrap  = btn.closest(".dbg-replay");
+  const model = wrap.querySelector(".dbg-replay-model").value.trim();
+  const out   = wrap.querySelector(".dbg-replay-result");
+  btn.disabled = true;
+  out.style.display = "";
+  out.textContent = "⏳ läuft …";
+  try {
+    const r = await adminFetch("/api/admin/debug-replay", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ room, ts, model }),
+    });
+    const d = await r.json();
+    if (d.error) { out.textContent = "Fehler: " + d.error; }
+    else {
+      const head = d.would_reply
+        ? `🤖 [${esc(d.model)}] „${esc(d.answer)}" <span style="color:var(--muted)">(${d.seconds}s)</span>`
+        : `🤐 [${esc(d.model)}] SKIP <span style="color:var(--muted)">(${d.seconds}s)</span>`;
+      const raw = (d.raw || "").trim();
+      const rawBlock = raw
+        ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:.75rem;color:var(--muted)">Roh-Ausgabe</summary>
+             <pre style="white-space:pre-wrap;word-break:break-word;font-size:.75rem;margin:6px 0 0;padding:8px;
+                  background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">${esc(raw)}</pre></details>`
+        : "";
+      out.innerHTML = head + rawBlock;
+    }
+  } catch(e) {
+    out.textContent = "Fehler: " + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
 async function loadDebugTraces() {
   const box = document.getElementById("debug-traces");
   try {
@@ -4152,6 +4194,16 @@ async function loadDebugTraces() {
       const t = fmtTime(tr.ts);
       const staleCls = t.diffS > 600 ? " dbg-stale" : "";
       const ageCls = t.diffS < 60 ? " dbg-age-fresh" : "";
+      const replay = tr.replayable
+        ? `<div class="dbg-replay" style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+             <input class="dbg-replay-model" list="dbg-model-list" placeholder="anderes Modell..."
+                    style="flex:0 0 200px;background:var(--bg);color:var(--text);border:1px solid var(--border);
+                           border-radius:6px;padding:5px 8px;font-size:.78rem">
+             <button class="btn-save" style="padding:5px 10px;font-size:.78rem"
+                     onclick="replayTrace('${esc(tr.room)}', ${tr.ts}, this)">Nochmal testen</button>
+             <div class="dbg-replay-result" style="display:none;font-size:.8rem;flex-basis:100%"></div>
+           </div>`
+        : "";
       return `<div class="dbg-trace${staleCls}">
                 <div class="dbg-trace-head">
                   <span>${esc(tr.room)} · ${esc(t.abs)}
@@ -4159,6 +4211,7 @@ async function loadDebugTraces() {
                   <span class="dbg-total">${totalTxt}</span>
                 </div>
                 <div class="dbg-steps">${steps}</div>
+                ${replay}
               </div>`;
     }).join("");
   } catch(e) {
