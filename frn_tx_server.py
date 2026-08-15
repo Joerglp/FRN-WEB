@@ -2008,6 +2008,24 @@ class TXServer:
             prev_ts = ts
         return system, messages
 
+    @staticmethod
+    def _collapse_self_repeat(text: str) -> str:
+        """Erkennt, ob eine LLM-Antwort komplett aus zwei (leicht umformulierten)
+        Haelften besteht, die dasselbe sagen -- manche Modelle wiederholen
+        ihre gesamte Antwort so ein zweites Mal, ohne jede Trennung dazwischen
+        (live beobachtet 2026-08-15). Nur bei gerader Satzanzahl sinnvoll
+        pruefbar; bei ungerader oder zu kurzer Antwort unveraendert lassen."""
+        parts = [p.strip() for p in re.split(r"(?<=[.!?])(?=\s|[A-ZÄÖÜ])", text.strip()) if p.strip()]
+        n = len(parts)
+        if n < 2 or n % 2 != 0:
+            return text
+        half = n // 2
+        first  = " ".join(parts[:half])
+        second = " ".join(parts[half:])
+        if difflib.SequenceMatcher(None, first.lower(), second.lower()).ratio() > 0.8:
+            return first
+        return text
+
     async def _bot_ollama(self, bot: dict, hist: list, with_raw: bool = False,
                           search_query: str = "", room_name: str = "",
                           trace_ts: float | None = None,
@@ -2070,6 +2088,13 @@ class TXServer:
             # Emojis raus (werden vorgelesen, Prompt-Verbot reicht nicht immer)
             cleaned = self._EMOJI_RE.sub("", cleaned)
             cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+            # Modell wiederholt manchmal die KOMPLETTE Antwort ein zweites Mal
+            # (leicht umformuliert, live beobachtet 2026-08-15 bei qwen3.5 nach
+            # einer Websuche-Folgeantwort -- "...Zuschauen!Ich habe gerade..."
+            # ohne jede Trennung). Bei gerader Satzanzahl pruefen, ob die
+            # zweite Haelfte der ersten stark aehnelt, und wenn ja nur die
+            # erste behalten.
+            cleaned = self._collapse_self_repeat(cleaned)
             if cleaned and not cleaned.upper().startswith("SKIP"):
                 ans = cleaned   # sonst: nicht gemeint / nichts zu sagen
         if do_trace:
