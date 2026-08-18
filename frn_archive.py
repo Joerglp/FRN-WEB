@@ -7,6 +7,7 @@ Stellt JSON-API und Audio-Serving bereit.
 
 import asyncio
 import logging
+import os
 import shlex
 import sqlite3
 import subprocess
@@ -27,6 +28,7 @@ def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")   # sonst kaskadiert ON DELETE CASCADE nicht (siehe delete_entry)
     return conn
 
 
@@ -109,6 +111,37 @@ def wav_to_opus(wav_path: str, opus_path: str) -> float:
         return 0.0
 
 
+def _unique_opus_path(dt: datetime, safe_room: str) -> tuple[str, str]:
+    """Liefert (Dateiname, voller Pfad) fuer einen neuen Archiv-Eintrag,
+    kollisionssicher. Reiner Zeitstempel (Sekundenaufloesung) reicht NICHT
+    -- beim Zerlegen einer Aufnahme (siehe handle_admin_archive_split)
+    behaelt der erste Teil exakt denselben Start-Zeitstempel wie das
+    Original, was denselben Dateinamen ergab: die spaetere ffmpeg -y
+    Konvertierung ueberschrieb dabei unbemerkt die noch existierende
+    Original-Datei, und deren Loeschung (delete_entry) riss dann auch den
+    neuen Teil mit -- Datenverlust, live beobachtet am 2026-08-16.
+
+    Reserviert den Namen ATOMAR (os.O_CREAT|os.O_EXCL) statt nur per
+    exists()-Check zu pruefen -- ein reiner Check waere ein TOCTOU-Fenster:
+    zwei parallele add_entry()-Aufrufe koennten beide denselben freien Namen
+    sehen, bevor einer von ihnen tatsaechlich schreibt (2026-08-18 Review-
+    Fund, dieselbe Bug-Klasse nur enger). Die anschliessende WAV->Opus-
+    Konvertierung (ffmpeg -y) ueberschreibt die hier angelegte leere
+    Platzhalterdatei normal."""
+    base = dt.strftime(f"frn-%Y%m%d-%H%M%S-{safe_room}")
+    n = 1
+    filename = f"{base}.opus"
+    while True:
+        path = AUDIO_DIR / filename
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return filename, str(path)
+        except FileExistsError:
+            n += 1
+            filename = f"{base}-{n}.opus"
+
+
 # ── Eintrag hinzufügen ────────────────────────────────────────────────────────
 
 async def add_entry(
@@ -124,8 +157,7 @@ async def add_entry(
     """
     dt        = datetime.fromtimestamp(timestamp)
     safe_room = room.replace("/", "_").replace(" ", "_")
-    filename  = dt.strftime(f"frn-%Y%m%d-%H%M%S-{safe_room}.opus")
-    opus_path = str(AUDIO_DIR / filename)
+    filename, opus_path = _unique_opus_path(dt, safe_room)
 
     loop = asyncio.get_running_loop()
     try:
@@ -134,6 +166,12 @@ async def add_entry(
         )
     except Exception as e:
         log.warning("Opus-Konvertierung fehlgeschlagen (%s): %s", wav_path, e)
+        # Die per _unique_opus_path reservierte leere Platzhalterdatei wieder
+        # entfernen, sonst bleibt eine 0-Byte-Leiche liegen.
+        try:
+            os.unlink(opus_path)
+        except OSError:
+            pass
         filename = ""
         duration = 0.0
 
@@ -163,13 +201,16 @@ def add_entry_sync(
     """Synchrone Version für Batch-Verarbeitung."""
     dt        = datetime.fromtimestamp(timestamp)
     safe_room = room.replace("/", "_").replace(" ", "_")
-    filename  = dt.strftime(f"frn-%Y%m%d-%H%M%S-{safe_room}.opus")
-    opus_path = str(AUDIO_DIR / filename)
+    filename, opus_path = _unique_opus_path(dt, safe_room)
 
     try:
         duration = wav_to_opus(wav_path, opus_path)
     except Exception as e:
         log.warning("Opus-Konvertierung fehlgeschlagen (%s): %s", wav_path, e)
+        try:
+            os.unlink(opus_path)
+        except OSError:
+            pass
         filename = ""
         duration = 0.0
 
@@ -387,14 +428,24 @@ def get_comments(entry_id: int) -> list[dict]:
              "text": r["text"]} for r in rows]
 
 
-def add_comment(entry_id: int, text: str) -> int:
+def add_comment(entry_id: int, text: str) -> int | None:
+    """None, wenn entry_id nicht (mehr) existiert. Seit PRAGMA foreign_keys=ON
+    (siehe _get_conn, fuer delete_entry's Kaskade noetig) schlaegt das
+    INSERT dafuer jetzt mit IntegrityError fehl statt frueher eine
+    verwaiste Kommentar-Zeile anzulegen -- kann z.B. passieren, wenn ein
+    Browser-Tab noch einen Eintrag zeigt, der inzwischen zerlegt/geloescht
+    wurde (2026-08-18 Review-Fund)."""
     ts = time.time()
-    with _get_conn() as conn:
-        cur = conn.execute(
-            "INSERT INTO comments (entry_id, timestamp, text) VALUES (?, ?, ?)",
-            (entry_id, ts, text.strip())
-        )
-        return cur.lastrowid
+    try:
+        with _get_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO comments (entry_id, timestamp, text) VALUES (?, ?, ?)",
+                (entry_id, ts, text.strip())
+            )
+            return cur.lastrowid
+    except sqlite3.IntegrityError:
+        log.info("Kommentar verworfen: Eintrag #%d existiert nicht (mehr)", entry_id)
+        return None
 
 
 def get_entry(entry_id: int) -> dict | None:
@@ -417,3 +468,19 @@ def update_callsign(entry_id: int, callsign: str) -> bool:
             (callsign.strip(), entry_id)
         )
         return cur.rowcount > 0
+
+
+def delete_entry(entry_id: int) -> bool:
+    """Loescht einen Archiv-Eintrag inkl. Audio-Datei (z.B. nach dem
+    Zerlegen einer Mehr-Sprecher-Aufnahme in mehrere neue Eintraege)."""
+    entry = get_entry(entry_id)
+    if not entry:
+        return False
+    with _get_conn() as conn:
+        conn.execute("DELETE FROM transmissions WHERE id = ?", (entry_id,))
+    if entry.get("audio_file"):
+        try:
+            (AUDIO_DIR / entry["audio_file"]).unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("Audio-Datei nicht geloescht (%s): %s", entry["audio_file"], e)
+    return True

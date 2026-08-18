@@ -656,7 +656,19 @@ class RoomRecorder:
         # Räumen in derselben Sekunde starten — eine Aufnahme würde die andere
         # überschreiben (Datenverlust). safe_room wie in frn_archive.add_entry.
         safe_room = re.sub(r"[^A-Za-z0-9_-]", "_", self.room_name) or "room"
-        name = dt.strftime(f"frn-%Y%m%d-%H%M%S-{safe_room}")
+        base = dt.strftime(f"frn-%Y%m%d-%H%M%S-{safe_room}")
+        name = base
+        # Sekundenaufloesung deckt Raum-Kollisionen ab (safe_room oben), aber
+        # NICHT zwei Sessions im SELBEN Raum, die in derselben Sekunde starten
+        # (kurze Schnellwechsel, z.B. "ja"/"roger"-Antworten). Gleiche Klasse
+        # Bug wie beim Archiv-Zerlegen gefunden (2026-08-18, siehe
+        # frn_archive._unique_opus_path) -- dort hat genau dieses Muster
+        # eine Aufnahme durch ueberschreiben+loeschen zerstoert. Hier
+        # praeventiv dieselbe Kollisionssicherung.
+        n = 1
+        while (self.wav_dir / f"{name}.wav").exists():
+            n += 1
+            name = f"{base}-{n}"
         wav_path  = self.wav_dir / f"{name}.wav"
         meta_path = self.wav_dir / f"{name}.meta"
 
