@@ -757,6 +757,17 @@ function renderMsg(e) {
           font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:.06em;
           padding:3px 9px;cursor:pointer;border-radius:2px;text-transform:uppercase">Einlernen</button>
         <span class="enroll-result" style="color:var(--text-dim)"></span>
+      </div>
+      <div class="speaker-split" style="display:flex;flex-direction:column;gap:5px;font-size:11px">
+        <div style="display:flex;gap:6px;align-items:center">
+          <button onclick="suggestSplit(${e.id}, this)" style="
+            background:transparent;border:1px solid var(--border);color:var(--text-dim);
+            font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:.06em;
+            padding:3px 9px;cursor:pointer;border-radius:2px;text-transform:uppercase"
+            title="Mehrere Sprecher in dieser Aufnahme? Schnittstellen vorschlagen lassen (experimentell)">&#9986; Zerlegen (mehrere Sprecher)</button>
+          <span class="split-result" style="color:var(--text-dim)"></span>
+        </div>
+        <div class="split-panel" style="display:none;flex-wrap:wrap;gap:6px;align-items:center"></div>
       </div>` : ''}
     </div>` : '';
 
@@ -1114,6 +1125,89 @@ async function fixCallsign(entryId, btn) {
     out.textContent = 'Fehler: ' + e;
   } finally {
     btn.disabled = false;
+  }
+}
+
+function fmtSplitTime(s) {
+  const m = Math.floor(s / 60), sec = (s % 60).toFixed(1).padStart(4, '0');
+  return `${m}:${sec}`;
+}
+
+async function suggestSplit(entryId, btn) {
+  const wrap  = btn.closest('.speaker-split');
+  const out   = wrap.querySelector('.split-result');
+  const panel = wrap.querySelector('.split-panel');
+  btn.disabled = true;
+  out.textContent = '⏳ suche Schnittstellen …';
+  panel.style.display = 'none';
+  panel.innerHTML = '';
+  try {
+    const r = await adminFetch(`/api/admin/archive/${entryId}/split-suggest`);
+    const d = await r.json();
+    if (d.error) { out.textContent = 'Fehler: ' + d.error; return; }
+
+    out.textContent = !d.gaps || !d.gaps.length
+      ? 'Keine Stelle gefunden — Zeit von Hand eintragen (beim Anhoeren notieren):'
+      : (d.method === 'silence'
+          ? `${d.gaps.length} moegliche Stelle(n) gefunden — anklicken zum Zerlegen:`
+          : 'Keine echte Pause gefunden, unsichere Vermutung:');
+
+    panel.style.display = 'flex';
+    (d.gaps || []).forEach(g => {
+      const b = document.createElement('button');
+      b.textContent = fmtSplitTime(g.t) + (g.dur_ms ? ` (${g.dur_ms}ms)` : '');
+      if (g.note) b.title = g.note;
+      b.style.cssText = "background:transparent;border:1px solid var(--border);color:var(--text);" +
+        "font-family:'Share Tech Mono',monospace;font-size:10px;padding:3px 8px;cursor:pointer;border-radius:2px";
+      b.onclick = () => doSplit(entryId, g.t, wrap);
+      panel.appendChild(b);
+    });
+
+    const manual = document.createElement('span');
+    manual.style.cssText = "display:flex;gap:4px;align-items:center";
+    manual.innerHTML =
+      `<input type="number" step="0.1" min="0.3" placeholder="eigene Sek." style="width:75px;
+         background:var(--bg3);border:1px solid var(--border);color:var(--text);
+         padding:3px 6px;font-family:inherit;font-size:inherit;border-radius:2px">
+       <button style="background:transparent;border:1px solid var(--border);color:var(--text-dim);
+         font-family:'Share Tech Mono',monospace;font-size:10px;padding:3px 8px;cursor:pointer;
+         border-radius:2px;text-transform:uppercase">Schneiden</button>`;
+    const inp = manual.querySelector('input');
+    manual.querySelector('button').onclick = () => {
+      const v = parseFloat(inp.value);
+      if (!isNaN(v) && v > 0) doSplit(entryId, v, wrap);
+    };
+    panel.appendChild(manual);
+  } catch(e) {
+    out.textContent = 'Fehler: ' + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function doSplit(entryId, cutS, wrap) {
+  if (!confirm(`Bei ${fmtSplitTime(cutS)} zerlegen? Der Original-Eintrag wird durch zwei neue ersetzt.`)) return;
+  const out = wrap.querySelector('.split-result');
+  const panelBtns = wrap.querySelectorAll('.split-panel button');
+  panelBtns.forEach(b => b.disabled = true);   // Doppel-Klick-Schutz waehrend des Requests
+  out.textContent = '⏳ zerlege …';
+  try {
+    const r = await adminFetch(`/api/admin/archive/${entryId}/split`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cut_s: cutS }),
+    });
+    const d = await r.json();
+    if (d.error) { out.textContent = 'Fehler: ' + d.error; }
+    else {
+      out.textContent = `✓ geteilt bei ${fmtSplitTime(d.cut_s)}`;
+      wrap.querySelector('.split-panel').style.display = 'none';
+      loadEntries(false);
+    }
+  } catch(e) {
+    out.textContent = 'Fehler: ' + e;
+  } finally {
+    panelBtns.forEach(b => b.disabled = false);
   }
 }
 

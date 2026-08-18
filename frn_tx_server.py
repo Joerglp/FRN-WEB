@@ -19,6 +19,7 @@ import ctypes
 import ctypes.util
 import difflib
 import hashlib
+import io
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ import signal
 import struct
 import subprocess
 import time
+import wave
 from pathlib import Path
 
 import aiohttp
@@ -36,7 +38,7 @@ from aiohttp import web
 from scipy.signal import resample as sp_resample
 
 try:
-    from frn_transcription import TranscriptionPipeline
+    from frn_transcription import TranscriptionPipeline, transcribe_wav
     _TRANSCRIPTION_AVAILABLE = True
 except ImportError:
     _TRANSCRIPTION_AVAILABLE = False
@@ -722,6 +724,8 @@ class TXServer:
         self._speaker_enrollments_path = Path(__file__).parent / "speaker_enrollments.json"
         self._speaker_enrollments: dict[str, list[list[float]]] = {}
         self._load_speaker_enrollments()
+        self._transcription_cfg: dict = {}   # von main() befuellt (config.ini [transcription])
+        self._splitting_entries: set[int] = set()   # Doppel-Klick-Schutz fuer handle_admin_archive_split
 
     # ── Debug-Ablaufverfolgung ──────────────────────────────────────────────
 
@@ -1627,28 +1631,39 @@ class TXServer:
         except Exception as e:
             log.warning("Sprecher-Enrollments nicht gespeichert: %s", e)
 
-    async def _speaker_embed(self, wav_path: str) -> list[float] | None:
-        """Fragt den Speaker-ID-Server nach dem Stimm-Embedding einer WAV-
-        Datei. None bei Fehler/nicht erreichbar (Feature faellt still aus,
-        blockiert nie die normale Verarbeitung)."""
+    async def _speaker_embed_bytes(self, wav_bytes: bytes) -> list[float] | None:
+        """Fragt den Speaker-ID-Server nach dem Stimm-Embedding von WAV-Rohdaten
+        (im Speicher, ohne temporaere Datei -- fuer die Fenster-Analyse in
+        _find_speaker_split). None bei Fehler/nicht erreichbar."""
         cfg = self._speaker_id_cfg()
         url = (cfg.get("server_url") or "http://192.0.0.17:9004/embed").strip()
         try:
             timeout = aiohttp.ClientTimeout(total=15)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
-                with open(wav_path, "rb") as f:
-                    data = aiohttp.FormData()
-                    data.add_field("file", f, filename="audio.wav",
-                                   content_type="audio/wav")
-                    async with sess.post(url, data=data) as resp:
-                        if resp.status != 200:
-                            log.debug("Speaker-ID HTTP %d", resp.status)
-                            return None
-                        result = await resp.json()
-                        return result.get("embedding")
+                data = aiohttp.FormData()
+                data.add_field("file", wav_bytes, filename="audio.wav",
+                               content_type="audio/wav")
+                async with sess.post(url, data=data) as resp:
+                    if resp.status != 200:
+                        log.debug("Speaker-ID HTTP %d", resp.status)
+                        return None
+                    result = await resp.json()
+                    return result.get("embedding")
         except Exception as e:
             log.debug("Speaker-ID nicht erreichbar (%s): %s", url, e)
             return None
+
+    async def _speaker_embed(self, wav_path: str) -> list[float] | None:
+        """Fragt den Speaker-ID-Server nach dem Stimm-Embedding einer WAV-
+        Datei. None bei Fehler/nicht erreichbar (Feature faellt still aus,
+        blockiert nie die normale Verarbeitung)."""
+        try:
+            with open(wav_path, "rb") as f:
+                wav_bytes = f.read()
+        except OSError as e:
+            log.debug("Speaker-ID: WAV nicht lesbar (%s): %s", wav_path, e)
+            return None
+        return await self._speaker_embed_bytes(wav_bytes)
 
     @staticmethod
     def _cosine_sim(a: list[float], b: list[float]) -> float:
@@ -1705,6 +1720,190 @@ class TXServer:
         self._speaker_enrollments.setdefault(name, []).append(emb)
         self._save_speaker_enrollments()
         return True
+
+    # Sprecherwechsel-Erkennung fuers Archiv-"Zerlegen" (siehe
+    # handle_admin_archive_split_suggest/handle_admin_archive_split).
+    #
+    # Erster Ansatz (2026-08-16 frueh) war reine Embedding-Bisektion ueber
+    # die GANZE Aufnahme, weil ein Test an einer 90s-Aufnahme keine
+    # erkennbare Ruhephase zeigte (RMS-Perzentile 5..99 alle in derselben
+    # Groessenordnung -- schien wie durchgehender Traeger). War aber ein
+    # Trugschluss: an einer ECHTEN Zwei-Sprecher-Aufnahme (Eddi/Alex,
+    # 2026-08-16 06:18) fand die Bisektion GAR NICHTS, obwohl der User beim
+    # Anhoeren klar einen Sprecherwechsel + kurzes Rauschen (Squelch-Tail
+    # beim PTT-Loslassen) hoerte. Feinere Analyse (30ms-Fenster statt 2s)
+    # zeigte: es GIBT durchaus kurze (100-600ms) echte Stille-Luecken an
+    # PTT-Uebergaben -- die 2s/1s-Fenster der Bisektion waren einfach viel
+    # zu grob, um sie zu erfassen, und der binaere links/rechts-Vergleich
+    # scheitert ohnehin an mehrfachem Sprecherwechsel (hier: schneller
+    # Schlagabtausch zwischen 42s und 54s).
+    #
+    # Jetziger Ansatz: _find_silence_gaps() sucht zuerst nach echten
+    # Kurz-Stille-Luecken (feine 30ms-Fensterung, absoluter Pegel nahe Null
+    # -- kein Netzwerk-Call, quasi instant). Das ist der PRIMAERE, deutlich
+    # zuverlaessigere Signalweg: er fand alle 5 echten PTT-Luecken in der
+    # Eddi/Alex-Aufnahme praezise (±15ms). ABER: nicht jede kurze Pause ist
+    # ein Sprecherwechsel (auch ein einzelner Sprecher macht Sprechpausen) --
+    # eine Bestaetigung per Embedding-Vergleich vor/nach jeder Luecke war in
+    # der Praxis zu verrauscht (bei 1.5s wie 3s Kontextfenstern kippten die
+    # Ergebnisse je nach Fenstergroesse hin und her, auch bei vermutlich
+    # echtem Einzelsprecher). Deshalb: Luecken werden nur als VORSCHLAG an
+    # den Admin gezeigt (der den Wechsel ja am Rauschen/an der Stimme hoert)
+    # -- der tatsaechliche Schnitt braucht immer eine explizite cut_s-Angabe,
+    # keine Vollautomatik. _find_speaker_split() (Embedding-Bisektion) bleibt
+    # als Fallback fuer den Sonderfall "kein einziger Stille-Lueckenfund"
+    # (z.B. durchgehend gehaltene PTT ueber einen Wechsel hinweg).
+    _SILENCE_WIN_S    = 0.03
+    _SILENCE_HOP_S    = 0.015
+    _SILENCE_MIN_GAP_S = 0.10
+    _SILENCE_EDGE_MARGIN_S = 0.5
+    _SILENCE_THRESH_FLOOR = 150.0
+    _SILENCE_MAX_GAPS = 20
+
+    @staticmethod
+    def _find_silence_gaps(wav_path: str) -> list[dict]:
+        """Findet kurze echte Stille-Luecken (PTT-Uebergaenge) in einer WAV-
+        Datei -- rein lokale Signalverarbeitung, kein Netzwerk-Call. Liefert
+        eine nach Zeit sortierte Liste von {"t": Sekunden (Luecken-Mitte),
+        "dur_ms": Luecken-Dauer}. Absoluter statt relativer Schwellwert, weil
+        FRN-Funkaufnahmen durchgehend Traeger-/Rauschpegel im selben
+        Groessenbereich haben -- "Sprache" laesst sich per RMS nicht von
+        "Rauschen" trennen, wohl aber "irgendein Signal" von "echte digitale
+        Stille" (siehe Kommentar oben)."""
+        try:
+            with wave.open(wav_path, "rb") as w:
+                sr = w.getframerate()
+                sw = w.getsampwidth()
+                nch = w.getnchannels()
+                frames = w.readframes(w.getnframes())
+        except Exception:
+            return []
+        if sw != 2:
+            return []
+        data = np.frombuffer(frames, dtype=np.int16).astype(np.float64)
+        if nch > 1:
+            data = data.reshape(-1, nch).mean(axis=1)
+        dur = len(data) / sr
+        win = max(1, int(TXServer._SILENCE_WIN_S * sr))
+        hop = max(1, int(TXServer._SILENCE_HOP_S * sr))
+        n = max(0, (len(data) - win) // hop + 1)
+        if n < 4:
+            return []
+        rms = np.array([np.sqrt(np.mean(data[i * hop:i * hop + win] ** 2)) for i in range(n)])
+        times = np.arange(n) * hop / sr
+        thresh = max(TXServer._SILENCE_THRESH_FLOOR, 0.05 * np.percentile(rms, 90))
+        below = rms < thresh
+
+        gaps = []
+        i = 0
+        margin = TXServer._SILENCE_EDGE_MARGIN_S
+        while i < len(below):
+            if below[i]:
+                j = i
+                while j < len(below) and below[j]:
+                    j += 1
+                gap_dur = (j - i) * hop / sr
+                gap_mid = times[i] + gap_dur / 2
+                if gap_dur >= TXServer._SILENCE_MIN_GAP_S and margin < gap_mid < dur - margin:
+                    gaps.append({"t": round(float(gap_mid), 2), "dur_ms": round(gap_dur * 1000)})
+                i = j
+            else:
+                i += 1
+        gaps.sort(key=lambda g: g["t"])
+        if len(gaps) > TXServer._SILENCE_MAX_GAPS:
+            gaps = sorted(gaps, key=lambda g: -g["dur_ms"])[:TXServer._SILENCE_MAX_GAPS]
+            gaps.sort(key=lambda g: g["t"])
+        return gaps
+
+    _SPLIT_WINDOW_S    = 2.0
+    _SPLIT_HOP_S       = 1.0
+    _SPLIT_MIN_SIDE_S  = 1.5
+    _SPLIT_MAX_WINDOWS = 60
+    _SPLIT_CONFIDENCE  = 0.78
+    # Speaker-ID-Server ist effektiv einthreadig (Flask threaded=False,
+    # siehe speaker_id_server.py) -- unlimitiertes gather() ueber bis zu
+    # _SPLIT_MAX_WINDOWS=60 Fenster gleichzeitig ueberlastet ihn nur selbst
+    # und macht Timeouts wahrscheinlicher, ohne echten Geschwindigkeits-
+    # vorteil (2026-08-18 Review-Fund). Ausserdem kippte bisher SCHON EIN
+    # einziges fehlgeschlagenes Fenster die komplette Analyse -- bei 60
+    # Anfragen ist die Chance auf mind. einen Ausreisser (Timeout, kurzer
+    # Netz-Hickup) nicht klein. Jetzt: begrenzte Parallelitaet + vereinzelte
+    # Ausfaelle mit dem naechsten erfolgreichen Nachbarfenster auffuellen
+    # statt komplett abzubrechen.
+    _SPLIT_EMBED_CONCURRENCY = 4
+    _SPLIT_MAX_FAILED_FRACTION = 0.3
+
+    async def _find_speaker_split(self, wav_path: str) -> tuple[float, float] | None:
+        """Fallback fuer _find_silence_gaps(), wenn die Aufnahme KEINE
+        Stille-Luecke enthaelt (z.B. durchgehend gehaltene PTT). Sucht per
+        Embedding-Bisektion die wahrscheinlichste EINE Sprecherwechsel-Stelle.
+        Liefert (Schnittzeit_s, Kreuz-Aehnlichkeit) oder None. Braucht einen
+        Netzwerk-Call pro Zeitfenster an den Speaker-ID-Server -- deutlich
+        teurer als _find_silence_gaps(), daher nur als Rueckfallebene."""
+        with wave.open(wav_path, "rb") as w:
+            sr  = w.getframerate()
+            sw  = w.getsampwidth()
+            nch = w.getnchannels()
+            frames = w.readframes(w.getnframes())
+        if sw != 2:
+            return None
+        data = np.frombuffer(frames, dtype=np.int16)
+        if nch > 1:
+            data = data.reshape(-1, nch).mean(axis=1).astype(np.int16)
+        dur = len(data) / sr
+
+        win_s, hop_s = self._SPLIT_WINDOW_S, self._SPLIT_HOP_S
+        min_side_windows = max(2, int(self._SPLIT_MIN_SIDE_S / hop_s))
+        if dur < (2 * self._SPLIT_MIN_SIDE_S + win_s):
+            return None
+        starts = np.arange(0, dur - win_s, hop_s)
+        if len(starts) > self._SPLIT_MAX_WINDOWS:
+            hop_s = dur / self._SPLIT_MAX_WINDOWS
+            min_side_windows = max(2, int(self._SPLIT_MIN_SIDE_S / hop_s))
+            starts = np.arange(0, dur - win_s, hop_s)
+        if len(starts) < 2 * min_side_windows + 1:
+            return None
+
+        sem = asyncio.Semaphore(self._SPLIT_EMBED_CONCURRENCY)
+
+        async def embed_window(s: float) -> list[float] | None:
+            async with sem:
+                i0, i1 = int(s * sr), int((s + win_s) * sr)
+                buf = io.BytesIO()
+                with wave.open(buf, "wb") as ww:
+                    ww.setnchannels(1); ww.setsampwidth(2); ww.setframerate(sr)
+                    ww.writeframes(data[i0:i1].tobytes())
+                return await self._speaker_embed_bytes(buf.getvalue())
+
+        embeddings = await asyncio.gather(*(embed_window(s) for s in starts))
+        n_failed = sum(1 for e in embeddings if e is None)
+        if n_failed:
+            if n_failed / len(embeddings) > self._SPLIT_MAX_FAILED_FRACTION:
+                log.warning("Sprecherwechsel-Analyse: zu viele Fenster fehlgeschlagen (%d/%d)",
+                            n_failed, len(embeddings))
+                return None
+            ok_idx = [i for i, e in enumerate(embeddings) if e is not None]
+            for i, e in enumerate(embeddings):
+                if e is None:
+                    nearest = min(ok_idx, key=lambda j: abs(j - i))
+                    embeddings[i] = embeddings[nearest]
+            log.info("Sprecherwechsel-Analyse: %d/%d Fenster fehlgeschlagen, mit Nachbarn aufgefuellt",
+                      n_failed, len(embeddings))
+        embs = np.array(embeddings)
+
+        best_k, best_sim = None, 1.0
+        for k in range(min_side_windows, len(embs) - min_side_windows):
+            left  = embs[:k].mean(axis=0)
+            right = embs[k:].mean(axis=0)
+            sim = self._cosine_sim(left.tolist(), right.tolist())
+            if sim < best_sim:
+                best_sim, best_k = sim, k
+        if best_k is None or best_sim >= self._SPLIT_CONFIDENCE:
+            log.info("Sprecherwechsel-Analyse: kein klarer Wechsel (beste Kreuz-Sim %.3f)", best_sim)
+            return None
+        cut_s = float(starts[best_k])
+        log.info("Sprecherwechsel-Analyse: Schnitt bei %.2fs (Kreuz-Sim %.3f)", cut_s, best_sim)
+        return cut_s, best_sim
 
     async def bot_archive_callsign(self, room: str, callsign: str, ts: float,
                                    text: str, wav_path: str = "") -> str:
@@ -3083,23 +3282,15 @@ class TXServer:
             entry_id = int(request.match_info.get("id", ""))
         except ValueError:
             return web.json_response({"error": "ungueltige id"}, status=400)
-        loop = asyncio.get_running_loop()
-        entry = await loop.run_in_executor(None, _archive.get_entry, entry_id)
-        if not entry or not entry.get("audio_file"):
-            return web.json_response({"error": "Eintrag/Aufnahme nicht gefunden"}, status=404)
-        opus_path = _archive.AUDIO_DIR / entry["audio_file"]
-        if not opus_path.exists():
-            return web.json_response({"error": "Audio-Datei fehlt"}, status=404)
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_wav = tmp.name
+        # War frueher eine eigene Kopie der Opus->WAV-Konvertierung (leicht
+        # abweichend von _archive_entry_wav: kein -ar 8000 -ac 1) -- beide
+        # Stellen waeren bei einer kuenftigen Aenderung (Fehlerbehandlung,
+        # Timeout, Format) sonst leicht auseinandergelaufen (2026-08-18
+        # Review-Fund). Jetzt gemeinsamer Helfer.
+        entry, tmp_wav, err = await self._archive_entry_wav(entry_id)
+        if err:
+            return err
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-i", str(opus_path), tmp_wav,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            await proc.wait()
-            if proc.returncode != 0:
-                return web.json_response({"error": "Audio-Konvertierung fehlgeschlagen"}, status=500)
             ok = await self._speaker_enroll(name, tmp_wav)
         finally:
             try:
@@ -3138,6 +3329,223 @@ class TXServer:
         if not ok:
             return web.json_response({"error": "Eintrag nicht gefunden"}, status=404)
         return web.json_response({"ok": True, "callsign": callsign})
+
+    async def _archive_entry_wav(self, entry_id: int):
+        """Laedt einen Archiv-Eintrag und konvertiert dessen Opus-Audio in
+        eine temporaere WAV-Datei (Aufrufer muss sie selbst loeschen).
+        Liefert (entry, wav_path, None) bei Erfolg, sonst (None, None,
+        error_response) fuer den direkten Rueckgabe-Kurzschluss im Handler."""
+        loop = asyncio.get_running_loop()
+        entry = await loop.run_in_executor(None, _archive.get_entry, entry_id)
+        if not entry or not entry.get("audio_file"):
+            return None, None, web.json_response({"error": "Eintrag/Aufnahme nicht gefunden"}, status=404)
+        opus_path = _archive.AUDIO_DIR / entry["audio_file"]
+        if not opus_path.exists():
+            return None, None, web.json_response({"error": "Audio-Datei fehlt"}, status=404)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            wav_path = tmp.name
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", str(opus_path), "-ar", "8000", "-ac", "1", wav_path,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        await proc.wait()
+        if proc.returncode != 0:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+            return None, None, web.json_response({"error": "Audio-Konvertierung fehlgeschlagen"}, status=500)
+        return entry, wav_path, None
+
+    async def handle_admin_archive_split_suggest(self, request):
+        """GET /api/admin/archive/{id}/split-suggest — schlaegt moegliche
+        Schnittstellen fuer eine Mehr-Sprecher-Aufnahme vor (siehe
+        _find_silence_gaps -- primaer echte Stille-Luecken/PTT-Uebergaenge,
+        mit Embedding-Bisektion als Rueckfall, wenn gar keine Luecke
+        existiert). Aendert nichts -- der tatsaechliche Schnitt passiert
+        erst ueber POST .../split mit einer vom Admin gewaehlten cut_s
+        (Vorschlag uebernehmen oder per Gehoer/Player selbst bestimmen)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if not _ARCHIVE_AVAILABLE:
+            return web.json_response({"error": "archive not available"}, status=503)
+        try:
+            entry_id = int(request.match_info.get("id", ""))
+        except ValueError:
+            return web.json_response({"error": "ungueltige id"}, status=400)
+        entry, wav_path, err = await self._archive_entry_wav(entry_id)
+        if err:
+            return err
+        try:
+            loop = asyncio.get_running_loop()
+            gaps = await loop.run_in_executor(None, self._find_silence_gaps, wav_path)
+            method = "silence"
+            if not gaps:
+                fallback = await self._find_speaker_split(wav_path)
+                if fallback:
+                    cut_s, sim = fallback
+                    gaps = [{"t": round(cut_s, 2), "dur_ms": 0,
+                             "note": f"unsicher (Embedding-Kreuz-Sim {sim:.2f})"}]
+                    method = "embedding"
+            with wave.open(wav_path, "rb") as w:
+                duration_s = w.getnframes() / w.getframerate()
+            return web.json_response({
+                "duration_s": round(duration_s, 1), "gaps": gaps, "method": method,
+            })
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+
+    async def handle_admin_archive_split(self, request):
+        """POST /api/admin/archive/{id}/split — {cut_s} zerlegt einen
+        Archiv-Eintrag mit mehreren Sprechern an einer EXPLIZIT angegebenen
+        Zeit (Sekunden ab Aufnahmebeginn) in zwei neue Eintraege. cut_s
+        stammt entweder aus einem Vorschlag (.../split-suggest) oder wird
+        vom Admin selbst per Player/Gehoer bestimmt -- volle Automatik ohne
+        Bestaetigung war unzuverlaessig genug (siehe Kommentar bei
+        _find_silence_gaps), um sie NICHT blind auszufuehren. Der
+        Original-Eintrag wird nur geloescht, wenn beide neuen Teile
+        erfolgreich angelegt wurden."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if not _ARCHIVE_AVAILABLE:
+            return web.json_response({"error": "archive not available"}, status=503)
+        try:
+            entry_id = int(request.match_info.get("id", ""))
+        except ValueError:
+            return web.json_response({"error": "ungueltige id"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            cut_s = float(body.get("cut_s"))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "cut_s (Sekunden) fehlt/ungueltig"}, status=400)
+
+        # Schutz gegen Doppel-Klick/zwei Admin-Tabs: ohne das wuerden zwei
+        # gleichzeitige Requests fuer denselben Eintrag beide durchlaufen
+        # und den Original-Eintrag doppelt in je zwei neue Teile zerlegen
+        # (4 Eintraege statt 2, zweites delete_entry laeuft ins Leere).
+        if entry_id in self._splitting_entries:
+            return web.json_response({"error": "Zerlegen fuer diesen Eintrag laeuft bereits"}, status=409)
+        self._splitting_entries.add(entry_id)
+        try:
+            return await self._do_archive_split(entry_id, cut_s)
+        finally:
+            self._splitting_entries.discard(entry_id)
+
+    async def _do_archive_split(self, entry_id: int, cut_s: float):
+        loop = asyncio.get_running_loop()
+        entry, full_wav, err = await self._archive_entry_wav(entry_id)
+        if err:
+            return err
+        part_paths: list[str] = []
+        try:
+            with wave.open(full_wav, "rb") as w:
+                sr = w.getframerate()
+                frames = w.readframes(w.getnframes())
+            data = np.frombuffer(frames, dtype=np.int16)
+            duration_s = len(data) / sr
+            if not (0.3 < cut_s < duration_s - 0.3):
+                return web.json_response(
+                    {"error": f"cut_s muss zwischen 0.3 und {duration_s - 0.3:.1f}s liegen"},
+                    status=400)
+            cut_i = int(cut_s * sr)
+            parts = [("a", data[:cut_i], 0.0), ("b", data[cut_i:], cut_s)]
+
+            transcfg = self._transcription_cfg or {}
+            model_size = transcfg.get("whisper_model", "medium")
+            language   = transcfg.get("whisper_language", "de")
+            speaker_id_on = self._speaker_id_cfg().get("enabled")
+
+            import tempfile
+            part_paths_by_label = {}
+            for label, part_data, ts_offset in parts:
+                with tempfile.NamedTemporaryFile(suffix=f"_{label}.wav", delete=False) as tf:
+                    part_path = tf.name
+                part_paths.append(part_path)
+                with wave.open(part_path, "wb") as w:
+                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+                    w.writeframes(part_data.tobytes())
+                part_paths_by_label[label] = part_path
+
+            async def _process_part(part_path: str) -> tuple[str, str]:
+                text = ""
+                if _TRANSCRIPTION_AVAILABLE:
+                    try:
+                        text = await transcribe_wav(part_path, model_size, language)
+                    except Exception as e:
+                        log.warning("Zerlegen: Transkription eines Teils fehlgeschlagen: %s", e)
+                callsign = ""
+                if speaker_id_on:
+                    try:
+                        identified, sim, threshold = await self._speaker_identify(part_path)
+                        callsign = identified or ""
+                    except Exception as e:
+                        log.debug("Zerlegen: Speaker-ID eines Teils fehlgeschlagen: %s", e)
+                return text, callsign
+
+            # Parallel statt strikt nacheinander -- transcribe_wav serialisiert
+            # intern ohnehin ueber den globalen Whisper-Lock (siehe
+            # frn_transcription._whisper_lock), aber so kann wenigstens die
+            # Speaker-ID-Anfrage des einen Teils waehrend der Whisper-
+            # Verarbeitung des anderen laufen statt strikt zu warten
+            # (2026-08-18 Review-Fund: blockierte unnoetig lange die Live-
+            # Transkription eingehender FRN-Uebertragungen, die denselben
+            # Lock brauchen).
+            results = await asyncio.gather(
+                *(_process_part(part_paths_by_label[label]) for label, _, _ in parts))
+
+            new_ids = []
+            for (label, part_data, ts_offset), (text, callsign) in zip(parts, results):
+                part_path = part_paths_by_label[label]
+                new_id = await _archive.add_entry(
+                    part_path, entry["room"], callsign,
+                    entry["timestamp"] + ts_offset, text)
+                # add_entry legt bei fehlgeschlagener Opus-Konvertierung
+                # TROTZDEM eine DB-Zeile an (audio_file="", Text bleibt --
+                # gewollt fuer den normalen Aufnahme-Pfad, damit wenigstens
+                # der Text nicht verloren geht). Fuer's Zerlegen ist das
+                # gefaehrlich: new_id ist truthy, obwohl kein Audio da ist --
+                # ohne diese Pruefung wuerde unten der Original-Eintrag (mit
+                # funktionierendem Audio!) geloescht und dieser Teil bliebe
+                # fuer immer ohne Ton (das ist der Datenverlust-Bug vom
+                # 2026-08-18 nochmal, nur ueber einen anderen Ausloeser:
+                # ffmpeg-Fehler statt Dateinamen-Kollision).
+                if new_id:
+                    new_entry = await loop.run_in_executor(None, _archive.get_entry, new_id)
+                    if new_entry and new_entry.get("audio_file"):
+                        new_ids.append(new_id)
+                    else:
+                        log.warning("Zerlegen: Teil '%s' ohne Audio angelegt (#%d) -- zaehlt als Fehler", label, new_id)
+
+            if len(new_ids) != 2:
+                # Teilweise fehlgeschlagen -- Original NICHT loeschen, damit nichts verloren geht.
+                # Bereits erfolgreich angelegte Teile aber wieder entfernen,
+                # sonst haeufen sich bei jedem erneuten Versuch weitere
+                # verwaiste Duplikate an (Retry nach Teilfehler war bisher
+                # additiv statt idempotent).
+                for stray_id in new_ids:
+                    await loop.run_in_executor(None, _archive.delete_entry, stray_id)
+                return web.json_response({
+                    "error": "Zerlegen fehlgeschlagen — Original bleibt erhalten, keine Teile angelegt",
+                }, status=500)
+
+            await loop.run_in_executor(None, _archive.delete_entry, entry_id)
+            return web.json_response({
+                "ok": True, "new_ids": new_ids, "cut_s": round(cut_s, 2),
+            })
+        finally:
+            for p in (full_wav, *part_paths):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
     async def handle_admin_gemini_models(self, request):
         """Verfügbare Gemini-Modell-IDs (Text-Chat) für das Dropdown.
@@ -5003,6 +5411,8 @@ class TXServer:
             return web.json_response({"error": "text too long (max 500)"}, status=400)
         loop = asyncio.get_running_loop()
         cid = await loop.run_in_executor(None, _archive.add_comment, entry_id, text)
+        if cid is None:
+            return web.json_response({"error": "Eintrag existiert nicht (mehr)"}, status=404)
         return web.json_response({"ok": True, "id": cid})
 
     async def handle_archive_chat_api(self, request):
@@ -5112,6 +5522,8 @@ class TXServer:
                               self.handle_admin_speaker_delete)
         app.router.add_post("/api/admin/archive/{id}/enroll", self.handle_admin_archive_enroll)
         app.router.add_post("/api/admin/archive/{id}/callsign", self.handle_admin_archive_callsign)
+        app.router.add_get ("/api/admin/archive/{id}/split-suggest", self.handle_admin_archive_split_suggest)
+        app.router.add_post("/api/admin/archive/{id}/split", self.handle_admin_archive_split)
         app.router.add_get("/api/admin/debug-audio/{name}", self.handle_admin_debug_audio)
         app.router.add_get("/api/admin/overview", self.handle_admin_overview)
 
@@ -5174,6 +5586,7 @@ def main():
                 ini.read(ini_path)
                 if ini.has_section("transcription"):
                     transcfg = dict(ini["transcription"])
+        server._transcription_cfg = transcfg  # fuer handle_admin_archive_split (Whisper-Modell/Sprache)
         if transcfg.get("enabled", "yes").lower() in ("yes", "true", "1"):
             pipeline = TranscriptionPipeline.__new__(TranscriptionPipeline)
             pipeline.cfg      = transcfg
