@@ -136,6 +136,45 @@ def _remove_repetitions(text: str) -> str:
     return text.strip()
 
 
+# Wortlose "Deko-Schleife": ein kurzes Zeichen-Muster wird OHNE Leerzeichen/
+# Satzzeichen dutzende Male hintereinander wiederholt und bildet dabei ein
+# einziges, absurd langes "Wort" (live beobachtet 2026-08-18, 06:37:53, 4.3s
+# Aufnahme: "Ach, die Hotschleitleitleitleitleit..." -- "leit" > 100x in
+# Folge). _remove_repetitions greift hier nicht, weil es durch Leerzeichen
+# getrennte GANZE Wortwiederholungen erwartet (z.B. "ja, ja, ja"); dafuer ist
+# es zustaendig, nicht dieser Filter -- deshalb hier bewusst nur Treffer OHNE
+# Leerzeichen im Wiederholungslauf (Woerter mit Komma+Leerzeichen dazwischen
+# sollen weiterhin _remove_repetitions ueberlassen bleiben, das dabei den
+# Rest des Satzes NACH der Wiederholung erhaelt -- dieser Filter hier
+# schneidet ab dem Fundort einfach alles Weitere ab). _dedupe_cascade
+# arbeitet ausserdem auf Satzebene (Split an . ! ?), hier gibt es aber gar
+# keine Satzzeichen, das Muster steckt IN einem Token.
+_CHAR_REPEAT_RE = _re.compile(r'(\S{2,8}?)\1{4,}')
+
+
+def _strip_char_repeat_garbage(text: str) -> str:
+    """Entfernt Zeichen-Wiederholungsschleifen aus dem Text. Macht die
+    Wiederholung insgesamt den Grossteil des Textes aus, gilt die ganze
+    Aussage als Halluzination (analog zur >50%-Regel in _dedupe_cascade).
+    Sonst wird NUR der/die Wiederholungs-Lauf(e) entfernt und der Rest
+    (davor UND danach) zusammengefuegt erhalten -- ein simples "alles ab
+    Fundstelle abschneiden" waere falsch, wenn die Schleife nicht am Ende
+    sitzt: bei "leitleitleit..., guten Morgen hier ist DL1ABC mit einem
+    laengeren Wetterbericht" wuerde das faelschlich den ganzen echten Rest
+    nach der Schleife mit wegwerfen (2026-08-18 Review-Fund)."""
+    matches = list(_CHAR_REPEAT_RE.finditer(text))
+    if not matches:
+        return text
+    garbage_len = sum(len(m.group(0)) for m in matches)
+    if garbage_len > 0.4 * len(text):
+        log.info("Transkript als Zeichen-Wiederholungsschleife verworfen: %.60s...", text)
+        return ""
+    cleaned = _CHAR_REPEAT_RE.sub(" ", text)
+    cleaned = _re.sub(r"\s+", " ", cleaned).strip()
+    log.info("Zeichen-Wiederholungsschleife(n) entfernt: %.60s -> %.60s", text, cleaned)
+    return cleaned
+
+
 _CASCADE_SIM = 0.62   # ab dieser SequenceMatcher-Aehnlichkeit gilt ein Satz
                       # als Wiederholung eines frueheren (nicht 1.0, weil
                       # Whisper beim "Kreisen" den Satz meist leicht variiert
@@ -232,7 +271,8 @@ def _transcribe_remote(wav_path: str, url: str, language: str) -> str:
     # bekommen statt garantiert zu scheitern.
     with urllib.request.urlopen(req, timeout=280) as resp:
         result = json.loads(resp.read())
-    text = _remove_repetitions(result.get("text", "").strip())
+    text = _strip_char_repeat_garbage(result.get("text", "").strip())
+    text = _remove_repetitions(text)
     deduped = _dedupe_cascade(text)
     if deduped != text:
         log.info("Remote-Transkript Kaskade bereinigt: %.80s -> %.80s", text, deduped)
@@ -315,7 +355,7 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
     parts = [s.text.strip() for s in segments
              if getattr(s, "no_speech_prob", 0.0) <= 0.8
              and not _is_hallucination(s.text.strip())]
-    return _dedupe_cascade(_remove_repetitions(" ".join(parts).strip()))
+    return _dedupe_cascade(_remove_repetitions(_strip_char_repeat_garbage(" ".join(parts).strip())))
 
 
 def _mark_discarded(wav_path: str) -> None:
