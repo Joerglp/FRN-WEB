@@ -29,6 +29,7 @@ import signal
 import struct
 import subprocess
 import time
+import uuid
 import wave
 from pathlib import Path
 
@@ -322,6 +323,14 @@ class FRNTXRoom:
             except Exception:
                 pass
         self._rx_clients.clear()
+        # Native GSM-Codec-Handles (gsm_create()) freigeben -- werden vom
+        # Python-GC NICHT automatisch verwaltet. Ohne diesen Aufruf leckt
+        # jede beendete Verbindung (Raumwechsel, Logout) zwei native
+        # Handles fuer die Lebensdauer des Prozesses (2026-08-19 Review-
+        # Fund).
+        self._encoder.close()
+        if self._gsm_dec:
+            self._gsm_dec.close()
 
     async def send_text(self, text: str):
         """Send a text message to the FRN room."""
@@ -354,6 +363,39 @@ class FRNTXRoom:
             result[m.group(1)] = m.group(2)
         return result
 
+    _MSG_TM_RE = re.compile(r"<TM>")
+
+    @classmethod
+    def _parse_message_line(cls, line: str) -> dict:
+        """Sicherer als die generische _parse_xml_tags() speziell fuer
+        Chat-Nachrichten (MARKER_MESSAGE) -- ON (und andere Metadaten-Tags)
+        werden NUR aus dem Praefix VOR dem ersten <TM> gelesen; alles ab dort
+        gilt als opaker Nachrichtentext und wird NICHT nochmal nach Tags
+        durchsucht.
+
+        Grund: _parse_xml_tags() scannt die GESAMTE Zeile Tag-fuer-Tag und
+        die zuletzt gefundene <ON>...</ON> gewinnt (letzter Treffer
+        ueberschreibt). Der Nachrichtentext (TM) ist aber freier, vom
+        Absender kontrollierter Text OHNE jede Escaping-Garantie durch das
+        FRN-Protokoll -- ein Chat-Text wie "...</TM><ON>ADMIN</ON><TM>!web
+        adduser ..." liess die generische Funktion faelschlich glauben, die
+        Nachricht sei vom echten "ADMIN" abgeschickt worden. Kritisch, weil
+        _handle_frn_command() !web-Admin-Befehle rein anhand des ON-Feldes
+        autorisiert -- jeder FRN-Teilnehmer (bei dieser Standalone-Instanz
+        mit offenem Login praktisch jeder) haette so beliebige Admin-
+        Befehle (adduser/deluser/...) einschleusen koennen (2026-08-19
+        Review-Fund, Sicherheitsluecke)."""
+        m = cls._MSG_TM_RE.search(line)
+        if not m:
+            return {}
+        prefix = line[:m.start()]
+        text = line[m.end():]
+        if text.endswith("</TM>"):
+            text = text[:-5]
+        fields = dict(re.findall(r"<(\w+)>(.*?)</\1>", prefix))
+        fields["TM"] = text
+        return fields
+
     def _try_parse_messages(self, buf: bytes):
         """Try to parse a MARKER_MESSAGE (0x04) block from buf.
 
@@ -379,7 +421,7 @@ class FRNTXRoom:
                 return None, orig
             line = buf[:idx].decode(errors="replace")
             buf  = buf[idx + 2:]
-            parsed = self._parse_xml_tags(line)
+            parsed = self._parse_message_line(line)
             if parsed:
                 messages.append(parsed)
         return messages, buf
@@ -696,6 +738,17 @@ class TXServer:
         # Persistente User-TX-Verbindungen (email+mount → FRNTXRoom)
         # bleiben zwischen PTT-Drücken am Leben → kein AL=BLOCK
         self._user_tx_conns: dict[tuple, "FRNTXRoom"] = {}
+        # Pro E-Mail ein Lock, das den "vorhandene Verbindung pruefen /
+        # Verbindungen in ANDEREN Raeumen derselben E-Mail trennen / neue
+        # Verbindung anlegen"-Ablauf serialisiert. Ohne das konnten zwei
+        # gleichzeitige Aktionen desselben Users (zwei Tabs/Raeume, oder ein
+        # racender Logout) sich gegenseitig die gerade aufgebaute bzw.
+        # AKTIV SENDENDE Verbindung wegreissen (2026-08-19 Review-Fund).
+        # Pro E-Mail statt ein globales Lock, damit die (teils langsamen)
+        # FRN-Verbindungsaufbauten verschiedener User sich nicht gegenseitig
+        # blockieren -- das Anlegen selbst ist race-frei, weil zwischen dem
+        # dict.get() und der Zuweisung kein await liegt.
+        self._user_tx_locks: dict[str, asyncio.Lock] = {}
         self._users_path: Path | None = None
         self._rooms_path: Path | None = None
         self._tokens_path: Path = Path(__file__).parent / "tx_tokens.json"
@@ -3502,6 +3555,16 @@ class TXServer:
                     w.writeframes(part_data.tobytes())
                 part_paths_by_label[label] = part_path
 
+            # Begrenzt die Anzahl gleichzeitiger _speaker_identify()-Anfragen
+            # ueber alle Teile -- derselbe Speaker-ID-Server wie bei
+            # _find_speaker_split (effektiv einthreadig, siehe
+            # _SPLIT_EMBED_CONCURRENCY dort). Bei "Automatik" mit vielen
+            # Schnitten (bis zu _SILENCE_MAX_GAPS=20 -> 21 Teile) wuerde
+            # unbegrenztes gather() sonst genau das selbstverursachte
+            # Ueberlastungsproblem reproduzieren, das dort bereits gefixt
+            # wurde (2026-08-19 Review-Fund).
+            _speaker_id_sem = asyncio.Semaphore(self._SPLIT_EMBED_CONCURRENCY)
+
             async def _process_part(part_path: str) -> tuple[str, str]:
                 text = ""
                 if _TRANSCRIPTION_AVAILABLE:
@@ -3512,7 +3575,8 @@ class TXServer:
                 callsign = ""
                 if speaker_id_on:
                     try:
-                        identified, sim, threshold = await self._speaker_identify(part_path)
+                        async with _speaker_id_sem:
+                            identified, sim, threshold = await self._speaker_identify(part_path)
                         callsign = identified or ""
                     except Exception as e:
                         log.debug("Zerlegen: Speaker-ID eines Teils fehlgeschlagen: %s", e)
@@ -3707,15 +3771,77 @@ class TXServer:
         return web.json_response({"engine": engine,
                                   "piper_url": piper, "xtts_url": xtts})
 
+    def _user_tx_lock(self, email: str) -> asyncio.Lock:
+        lock = self._user_tx_locks.get(email)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._user_tx_locks[email] = lock
+        return lock
+
+    async def _resolve_user_tx_conn(self, user_key, frn_email: str, frn_password: str,
+                                    room: "FRNTXRoom", callsign: str, info: dict) -> "FRNTXRoom | None":
+        """Liefert die persoenliche FRN-TX-Verbindung eines Users fuer ein
+        Raum (email+mount), legt bei Bedarf eine neue an -- gemeinsame
+        Logik fuer PTT_START/PLAY_CLIP/SPEAK_VOICE (war 3x fast identisch
+        dupliziert). None, wenn keine FRN-Zugangsdaten vorhanden sind oder
+        der Verbindungsaufbau fehlschlaegt; Aufrufer faellt dann auf die
+        Stream-eigene Verbindung (room) zurueck.
+
+        Serialisiert ueber _user_tx_lock(frn_email): ohne das konnten zwei
+        gleichzeitige Aktionen desselben Users (zwei Tabs/Raeume, oder ein
+        gleichzeitiger Logout) sich die gerade aufgebaute bzw. AKTIV
+        SENDENDE Verbindung des jeweils anderen wegreissen -- eine
+        Race Condition ueber self._user_tx_conns, die vorher an jeder der
+        drei Kopien einzeln haette gefixt werden muessen (2026-08-19
+        Review-Fund)."""
+        if not (frn_email and frn_password):
+            return None
+        async with self._user_tx_lock(frn_email):
+            existing = self._user_tx_conns.get(user_key)
+            if existing and existing._connected:
+                return existing
+            # Verbindungen für andere Räume (gleiche Email) trennen
+            for k in list(self._user_tx_conns):
+                if k[0] == frn_email and k != user_key:
+                    old = self._user_tx_conns.pop(k)
+                    try:
+                        await old.disconnect()
+                    except Exception:
+                        pass
+                    log.info("[%s] User-TX anderer Raum getrennt: %s", room.name, k[1])
+            for attempt in range(4):
+                try:
+                    conn = FRNTXRoom(
+                        name=room.name,
+                        frn_server=room.server,
+                        frn_port=room.port,
+                        email=frn_email,
+                        password=frn_password,
+                        callsign=callsign,
+                    )
+                    await conn.ensure_connected()
+                    self._user_tx_conns[user_key] = conn
+                    log.info("[%s] User-TX verbunden: %s (%s)", room.name, info["user"], callsign)
+                    return conn
+                except Exception as e:
+                    if "BLOCK" in str(e) and attempt < 3:
+                        log.info("[%s] AL=BLOCK — warte 8s (Versuch %d/4)", room.name, attempt + 1)
+                        await asyncio.sleep(8)
+                    else:
+                        log.warning("[%s] User-TX fehlgeschlagen (%s) — Fallback", room.name, e)
+                        return None
+        return None
+
     async def _disconnect_user_tx(self, email: str):
         """Trennt alle persistenten User-TX-Verbindungen für eine E-Mail-Adresse."""
-        to_del = [k for k in self._user_tx_conns if k[0] == email]
-        for k in to_del:
-            conn = self._user_tx_conns.pop(k)
-            try:
-                await conn.disconnect()
-            except Exception:
-                pass
+        async with self._user_tx_lock(email):
+            to_del = [k for k in self._user_tx_conns if k[0] == email]
+            for k in to_del:
+                conn = self._user_tx_conns.pop(k)
+                try:
+                    await conn.disconnect()
+                except Exception:
+                    pass
 
     def _validate_token(self, token: str) -> dict | None:
         info = self.tokens.get(token)
@@ -4115,6 +4241,16 @@ class TXServer:
         now = time.time()
         fails = [t for t in self._login_fails.get(ip, ()) if now - t < 60]
         self._login_fails[ip] = fails
+        # Groessenbegrenzung MUSS hier greifen (jeder Request, nicht nur
+        # Fehlversuche) -- vorher stand die Begrenzung nur im Fehlerpfad
+        # unten, den erfolgreiche Logins nie erreichen. Bei ueberwiegend
+        # legitimem Traffic (viele verschiedene IPs, wenige Fehlversuche)
+        # waechst das Dict dann unbegrenzt (2026-08-19 Review-Fund).
+        if len(self._login_fails) > 1000:
+            cutoff = now - 60
+            self._login_fails = {k: [t for t in v if t > cutoff]
+                                 for k, v in self._login_fails.items()}
+            self._login_fails = {k: v for k, v in self._login_fails.items() if v}
         if len(fails) >= 5:
             log.warning("Login rate-limit für %s (user=%r)", ip, username)
             return web.json_response(
@@ -4147,6 +4283,20 @@ class TXServer:
             callsign = body.get("callsign", "").strip()
             if not callsign:
                 callsign = username.split("@")[0].upper()
+            # email/password/callsign landen unescaped als <EA>/<PW>/<ON> in
+            # der rohen CT:-Zeile, die WIR an den vertrauenswuerdigen
+            # Upstream-FRN-Server schicken (_try_frn_auth). Ohne diese
+            # Pruefung koennte ein Feld mit eingebettetem \r\n oder
+            # </PW><ON>x</ON>... zusaetzliche Protokoll-Angaben in unsere
+            # eigene Verbindung einschleusen (2026-08-19 Review-Fund,
+            # Sicherheitsluecke -- dieselbe Klasse Problem wie die Sender-
+            # Faelschung bei _parse_message_line, nur in die andere
+            # Richtung: WIR sind hier der potenzielle Angriffsvektor
+            # gegenueber dem Upstream-Server). Diese Zeichen ergeben in
+            # E-Mail/Passwort/Rufzeichen ohnehin nie einen legitimen Sinn.
+            if any(c in v for v in (username, password, callsign) for c in "\r\n<>"):
+                log.warning("FRN-Login abgelehnt: unzulaessiges Zeichen in Feld (ip=%s)", ip)
+                return web.json_response({"error": "Ungültige Zeichen in Zugangsdaten"}, status=400)
             ok = await self._try_frn_auth(username, password, callsign)
             if ok:
                 # Präferenzen aus gespeichertem FRN-Eintrag laden (falls vorhanden)
@@ -4186,11 +4336,6 @@ class TXServer:
                 })
 
         self._login_fails[ip].append(time.time())
-        if len(self._login_fails) > 1000:   # Speicher begrenzen (alte IPs raus)
-            cutoff = time.time() - 60
-            self._login_fails = {k: [t for t in v if t > cutoff]
-                                 for k, v in self._login_fails.items()}
-            self._login_fails = {k: v for k, v in self._login_fails.items() if v}
         await asyncio.sleep(1)
         return web.json_response(
             {"error": "Ungültiger Benutzername oder Passwort"}, status=401)
@@ -4772,10 +4917,17 @@ class TXServer:
             return web.json_response({"error": "Audio zu groß (max 10 MB)"}, status=400)
 
         self._CLIPS_DIR.mkdir(exist_ok=True)
-        tmp  = self._CLIPS_DIR / f"_{clip_id}.tmp"
+        # Eindeutiger Temp-Name pro Request (nicht nur clip_id-basiert) --
+        # sonst koennten zwei gleichzeitige Uploads fuer denselben Clip
+        # (Doppelklick, zwei Tabs) sich denselben Temp-Pfad teilen und beim
+        # Schreiben/ffmpeg-Lesen/Loeschen gegenseitig ins Gehege kommen,
+        # bis hin zu einer aus beiden Uploads vermischten dest-Datei
+        # (2026-08-19 Review-Fund).
+        tmp  = self._CLIPS_DIR / f"_{clip_id}-{uuid.uuid4().hex}.tmp"
         dest = self._CLIPS_DIR / f"{clip_id}.wav"
         try:
-            tmp.write_bytes(data)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, tmp.write_bytes, data)
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y", "-i", str(tmp),
                 "-ar", "8000", "-ac", "1", str(dest),
@@ -5011,49 +5163,11 @@ class TXServer:
                             try:
                                 try:
                                     # Eigene FRN-Verbindung aufbauen (lazy, Retry bei BLOCK)
-                                    if frn_email and frn_password:
-                                        # Bestehende Verbindung für diesen Raum wiederverwenden
-                                        existing = self._user_tx_conns.get(user_key)
-                                        if existing and existing._connected:
-                                            user_tx_conn = existing
-                                            tx_conn = existing
-                                        else:
-                                            # Verbindungen für andere Räume (gleiche Email) trennen
-                                            for k in list(self._user_tx_conns):
-                                                if k[0] == frn_email and k != user_key:
-                                                    old = self._user_tx_conns.pop(k)
-                                                    try:
-                                                        await old.disconnect()
-                                                    except Exception:
-                                                        pass
-                                                    log.info("[%s] User-TX anderer Raum getrennt: %s",
-                                                             room.name, k[1])
-                                            for attempt in range(4):
-                                                try:
-                                                    conn = FRNTXRoom(
-                                                        name=room.name,
-                                                        frn_server=room.server,
-                                                        frn_port=room.port,
-                                                        email=frn_email,
-                                                        password=frn_password,
-                                                        callsign=callsign,
-                                                    )
-                                                    await conn.ensure_connected()
-                                                    user_tx_conn = conn
-                                                    tx_conn = conn
-                                                    self._user_tx_conns[user_key] = conn
-                                                    log.info("[%s] User-TX verbunden: %s (%s)",
-                                                             room.name, info["user"], callsign)
-                                                    break
-                                                except Exception as e:
-                                                    if "BLOCK" in str(e) and attempt < 3:
-                                                        log.info("[%s] AL=BLOCK — warte 8s (Versuch %d/4)",
-                                                                 room.name, attempt + 1)
-                                                        await asyncio.sleep(8)
-                                                    else:
-                                                        log.warning("[%s] User-TX fehlgeschlagen (%s) — Fallback",
-                                                                    room.name, e)
-                                                        break
+                                    conn = await self._resolve_user_tx_conn(
+                                        user_key, frn_email, frn_password, room, callsign, info)
+                                    if conn:
+                                        user_tx_conn = conn
+                                        tx_conn = conn
                                     ok = await tx_conn.request_tx()
                                 finally:
                                     room._tx_lock.release()
@@ -5135,39 +5249,11 @@ class TXServer:
                             ok = False
                             try:
                                 try:
-                                    if frn_email and frn_password:
-                                        existing = self._user_tx_conns.get(user_key)
-                                        if existing and existing._connected:
-                                            user_tx_conn = existing
-                                            tx_conn = existing
-                                        else:
-                                            for k in list(self._user_tx_conns):
-                                                if k[0] == frn_email and k != user_key:
-                                                    old = self._user_tx_conns.pop(k)
-                                                    try:
-                                                        await old.disconnect()
-                                                    except Exception:
-                                                        pass
-                                            for attempt in range(4):
-                                                try:
-                                                    conn = FRNTXRoom(
-                                                        name=room.name,
-                                                        frn_server=room.server,
-                                                        frn_port=room.port,
-                                                        email=frn_email,
-                                                        password=frn_password,
-                                                        callsign=callsign,
-                                                    )
-                                                    await conn.ensure_connected()
-                                                    user_tx_conn = conn
-                                                    tx_conn = conn
-                                                    self._user_tx_conns[user_key] = conn
-                                                    break
-                                                except Exception as e:
-                                                    if "BLOCK" in str(e) and attempt < 3:
-                                                        await asyncio.sleep(8)
-                                                    else:
-                                                        break
+                                    conn = await self._resolve_user_tx_conn(
+                                        user_key, frn_email, frn_password, room, callsign, info)
+                                    if conn:
+                                        user_tx_conn = conn
+                                        tx_conn = conn
                                     ok = await tx_conn.request_tx(timeout=10.0)
                                 finally:
                                     room._tx_lock.release()
@@ -5236,6 +5322,19 @@ class TXServer:
                         async def _speak_voice_task(vt=voice_text, vl=voice_lang):
                             nonlocal in_tx, waiting_tx, user_tx_conn, tx_conn
                             ok = False
+                            # room._tx_lock wurde oben SYNCHRON vor dem Erzeugen dieses
+                            # Tasks belegt. lock_held verfolgt, ob WIR sie noch freigeben
+                            # muessen -- die zweite Phase (Verbindungsaufbau/request_tx)
+                            # hat ihr eigenes finally, das lock_held auf False setzt,
+                            # BEVOR sie selbst freigibt. Ohne dieses aeussere try/finally
+                            # (frueher: nur "except Exception" um die TTS-Synthese) blieb
+                            # der Lock fuer immer belegt, wenn der Task waehrend der
+                            # Synthese abgebrochen wurde (WS-Verbindung weg waehrend XTTS
+                            # noch rechnet) -- asyncio.CancelledError ist seit Python 3.8
+                            # eine BaseException, "except Exception" faengt sie NICHT,
+                            # der Raum blieb fuer ALLE Nutzer bis zum Prozess-Neustart
+                            # gesperrt (2026-08-19 Review-Fund, live-brechender Bug).
+                            lock_held = True
                             try:
                                 # Stimme ERST synthetisieren (dauert einige Sekunden), bevor
                                 # der Sender getastet wird — sonst toter Träger während TTS.
@@ -5243,53 +5342,25 @@ class TXServer:
                                     pcm = await self._get_voice_pcm(
                                         vt, vl, self._user_speaker(info["user"]),
                                         force_xtts=True)
+                                except asyncio.CancelledError:
+                                    raise
                                 except Exception as e:
-                                    room._tx_lock.release()
-                                    waiting_tx = False
                                     log.warning("[%s] Voice-TTS-Fehler: %s", room.name, e)
-                                    if not asyncio.current_task().cancelled():
-                                        await ws.send_json({"type": "error",
-                                                            "msg": f"Sprach-Fehler: {e}"})
+                                    await ws.send_json({"type": "error",
+                                                        "msg": f"Sprach-Fehler: {e}"})
                                     return
 
                                 await ws.send_json({"type": "tx_waiting"})
                                 try:
-                                    if frn_email and frn_password:
-                                        existing = self._user_tx_conns.get(user_key)
-                                        if existing and existing._connected:
-                                            user_tx_conn = existing
-                                            tx_conn = existing
-                                        else:
-                                            for k in list(self._user_tx_conns):
-                                                if k[0] == frn_email and k != user_key:
-                                                    old = self._user_tx_conns.pop(k)
-                                                    try:
-                                                        await old.disconnect()
-                                                    except Exception:
-                                                        pass
-                                            for attempt in range(4):
-                                                try:
-                                                    conn = FRNTXRoom(
-                                                        name=room.name,
-                                                        frn_server=room.server,
-                                                        frn_port=room.port,
-                                                        email=frn_email,
-                                                        password=frn_password,
-                                                        callsign=callsign,
-                                                    )
-                                                    await conn.ensure_connected()
-                                                    user_tx_conn = conn
-                                                    tx_conn = conn
-                                                    self._user_tx_conns[user_key] = conn
-                                                    break
-                                                except Exception as e:
-                                                    if "BLOCK" in str(e) and attempt < 3:
-                                                        await asyncio.sleep(8)
-                                                    else:
-                                                        break
+                                    conn = await self._resolve_user_tx_conn(
+                                        user_key, frn_email, frn_password, room, callsign, info)
+                                    if conn:
+                                        user_tx_conn = conn
+                                        tx_conn = conn
                                     ok = await tx_conn.request_tx(timeout=10.0)
                                 finally:
                                     room._tx_lock.release()
+                                    lock_held = False
                                     waiting_tx = False
 
                                 if ok:
@@ -5320,6 +5391,10 @@ class TXServer:
                                     await ws.send_json({"type": "error", "msg": f"TX-Fehler: {e}"})
                                 except Exception:
                                     pass
+                            finally:
+                                if lock_held:
+                                    room._tx_lock.release()
+                                    waiting_tx = False
 
                         _tx_approval_task = asyncio.create_task(_speak_voice_task())
 
