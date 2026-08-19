@@ -68,6 +68,49 @@ def _is_generic_hallucination(text: str) -> bool:
     return any(sub in t for sub in _HALLUCINATION_SUBSTRINGS)
 
 
+# Sprache wird an Whisper erzwungen (language=de), aber bei sehr unsicherem/
+# verrauschtem Audio kann das Modell trotzdem englische Woerter/Saetze
+# ausgeben -- der Sprach-Parameter steuert nur das Sprach-Token fuer die
+# Dekodierung, verbietet aber nicht grundsaetzlich englische Tokens im
+# Ergebnis (dokumentiertes Whisper-Verhalten, das Modell "faellt zurueck"
+# auf sein staerkstes Trainingssignal). Live beobachtet 2026-08-19: mehrere
+# Gotfried/Hans/Peter-Eintraege an einem Vormittag mit schlechtem Empfang
+# (Robert beklagte selbst mehrfach "Funkmuell") kamen komplett auf Englisch
+# zurueck, obwohl eindeutig deutsch gesprochen wurde -- z.B. "We are going
+# through, which I don't want to press, that's running through." Ueberpruefung
+# des GESAMTEN Archivs (11337 Eintraege, User-Nachfrage "manchmal englische
+# Texte") zeigt: kein Einzelfall, 24 weitere, teils Monate alte Faelle im
+# selben Muster, alle eindeutig Halluzination (z.B. "Could you love the
+# lungs?", "Robert, in order of you having used the information, it began to
+# rhyme."). Heuristik gegen den gesamten Bestand getestet: 0 Fehlalarme bei
+# 24 Treffern. "was"/"im" bewusst NICHT in der englischen Liste, weil sie
+# mit sehr haeufigen deutschen Woertern kollidieren (frueher Fehlalarme wie
+# "Was alle hier schreiben, Jörg!" -> faelschlich als Englisch erkannt).
+_EN_HALLUCINATION_WORDS = frozenset({
+    "the", "and", "you", "have", "that", "this", "are", "were", "don't",
+    "i'm", "its", "doesn't", "isn't", "didn't", "going", "would", "could",
+    "should", "been", "your", "with", "for", "not", "just", "like",
+    "get", "got", "want", "what", "house", "load", "press", "running",
+    "through", "morning", "breakfast", "leave", "now", "which", "we've",
+    "well",
+})
+_DE_MARKER_WORDS = frozenset({
+    "ich", "und", "ist", "nicht", "das", "der", "die", "ein", "eine",
+    "auf", "mit", "ja", "nein", "war", "habe", "hab", "auch", "wenn",
+    "aber", "da", "noch", "schon", "doch", "dann", "wir", "du", "sie",
+    "hat", "kann", "muss", "mal", "im", "was",
+})
+
+
+def _is_english_hallucination(text: str) -> bool:
+    words = _re.sub(r"[^\w äöüß']", " ", text.lower()).split()
+    if not words:
+        return False
+    en = sum(1 for w in words if w in _EN_HALLUCINATION_WORDS)
+    de = sum(1 for w in words if w in _DE_MARKER_WORDS)
+    return en >= 2 and en > de
+
+
 # Echte, oft als kompletter Einzel-Spruch gesagte CB-Jargon-Woerter -- kommen
 # im initial_prompt vor (damit Whisper sie erkennt), sind aber legitimer
 # Inhalt und duerfen die Prompt-Echo-Erkennung unten NICHT ausloesen.
@@ -285,6 +328,9 @@ def _transcribe_remote(wav_path: str, url: str, language: str) -> str:
     if prompt and _is_prompt_echo(text, prompt):
         log.info("Remote-Transkript als Prompt-Echo verworfen (Rauschsperre?): %.80s", text)
         return ""
+    if language.startswith("de") and _is_english_hallucination(text):
+        log.info("Remote-Transkript als Englisch-Halluzination verworfen (Sprache war %s): %.80s", language, text)
+        return ""
     return text
 
 
@@ -355,7 +401,11 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
     parts = [s.text.strip() for s in segments
              if getattr(s, "no_speech_prob", 0.0) <= 0.8
              and not _is_hallucination(s.text.strip())]
-    return _dedupe_cascade(_remove_repetitions(_strip_char_repeat_garbage(" ".join(parts).strip())))
+    text = _dedupe_cascade(_remove_repetitions(_strip_char_repeat_garbage(" ".join(parts).strip())))
+    if language.startswith("de") and _is_english_hallucination(text):
+        log.info("Lokales Transkript als Englisch-Halluzination verworfen (Sprache war %s): %.80s", language, text)
+        return ""
+    return text
 
 
 def _mark_discarded(wav_path: str) -> None:
