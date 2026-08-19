@@ -567,18 +567,35 @@ class RoomRecorder:
                 self._buf     = [carry] if carry else []
                 self._start_ts = time.time() - (
                     len(carry) / (self.SAMPLE_RATE * self.SAMPLE_WIDTH))
-                threading.Thread(
-                    target=self._save, args=(pcm_data, callsign_snap, start_ts),
-                    daemon=True).start()
-                # Timer NICHT abbrechen -- Session bleibt aktiv, unten (nach
-                # dem with-Block) wird er wie bei normalem Audio neu gestartet.
+                # Gleicher Rausch-Filter wie in _on_silence() -- ohne den
+                # koennte eine 90s durchgehend offene Rauschsperre (Traeger
+                # ohne Modulation, kein echtes Stille-Ende) ungefiltert bei
+                # Whisper landen (2026-08-19 Review-Fund: der Filter war
+                # bisher nur auf dem natuerlichen Stille-Ende-Pfad aktiv).
+                rms = self._rms(pcm_data)
+                if rms < self.NOISE_RMS_THRESHOLD:
+                    log.debug("[%s] MAX_DURATION-Chunk nur Rauschen (RMS=%.0f < %.0f) — verworfen",
+                             self.room_name, rms, self.NOISE_RMS_THRESHOLD)
+                else:
+                    threading.Thread(
+                        target=self._save, args=(pcm_data, callsign_snap, start_ts),
+                        daemon=True).start()
+                # Timer NICHT abbrechen -- Session bleibt aktiv, wird unten
+                # wie bei normalem Audio neu gestartet.
 
-        # Timer zurücksetzen — nur bei echtem Audio
-        if self._timer:
-            self._timer.cancel()
-        self._timer = threading.Timer(self.SILENCE_TIMEOUT, self._on_silence)
-        self._timer.daemon = True
-        self._timer.start()
+            # Timer zurücksetzen — nur bei echtem Audio (die is_silence-
+            # Zweige oben kehren beide vorher per return zurueck). MUSS
+            # innerhalb des Locks passieren, sonst Race mit _on_silence()
+            # (laeuft im Timer-Thread, liest/nullt self._timer ebenfalls
+            # unter self._lock) -- 2026-08-19 Review-Fund: stand frueher
+            # AUSSERHALB des with-Blocks, ein exakt zeitgleich feuernder
+            # alter Timer und diese Neuzuweisung konnten sich gegenseitig
+            # ueberschreiben.
+            if self._timer:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.SILENCE_TIMEOUT, self._on_silence)
+            self._timer.daemon = True
+            self._timer.start()
 
     def _on_silence(self):
         with self._lock:
@@ -657,19 +674,30 @@ class RoomRecorder:
         # überschreiben (Datenverlust). safe_room wie in frn_archive.add_entry.
         safe_room = re.sub(r"[^A-Za-z0-9_-]", "_", self.room_name) or "room"
         base = dt.strftime(f"frn-%Y%m%d-%H%M%S-{safe_room}")
-        name = base
         # Sekundenaufloesung deckt Raum-Kollisionen ab (safe_room oben), aber
         # NICHT zwei Sessions im SELBEN Raum, die in derselben Sekunde starten
         # (kurze Schnellwechsel, z.B. "ja"/"roger"-Antworten). Gleiche Klasse
         # Bug wie beim Archiv-Zerlegen gefunden (2026-08-18, siehe
         # frn_archive._unique_opus_path) -- dort hat genau dieses Muster
-        # eine Aufnahme durch ueberschreiben+loeschen zerstoert. Hier
-        # praeventiv dieselbe Kollisionssicherung.
+        # eine Aufnahme durch ueberschreiben+loeschen zerstoert. Reservierung
+        # ATOMAR (os.O_CREAT|O_EXCL) statt nur per exists()-Check, sonst
+        # bleibt dasselbe TOCTOU-Fenster wie dort urspruenglich (2026-08-19
+        # Review-Fund: _save() lief hier selbst wieder in genau diese Race,
+        # weil _save() aus einem eigenen threading.Thread pro Chunk gestartet
+        # wird -- zwei Chunks (z.B. MAX_DURATION-Schnitt und ein neuer, kurz
+        # danach beendeter Aufruf) koennten den exists()-Check gleichzeitig
+        # sehen, bevor einer von beiden geschrieben hat).
         n = 1
-        while (self.wav_dir / f"{name}.wav").exists():
-            n += 1
-            name = f"{base}-{n}"
-        wav_path  = self.wav_dir / f"{name}.wav"
+        name = base
+        while True:
+            wav_path = self.wav_dir / f"{name}.wav"
+            try:
+                fd = os.open(str(wav_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                break
+            except FileExistsError:
+                n += 1
+                name = f"{base}-{n}"
         meta_path = self.wav_dir / f"{name}.meta"
 
         pcm_data = self._clean_audio(pcm_data)

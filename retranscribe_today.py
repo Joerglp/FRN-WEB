@@ -151,7 +151,17 @@ for i, wav_path in enumerate(wavs, 1):
         continue
 
     log.info("  → %s", text[:100])
-    add_entry_sync(str(wav_path), room, callsign, ts, text)
+    try:
+        add_entry_sync(str(wav_path), room, callsign, ts, text)
+    except Exception as e:
+        # add_entry_sync() macht Datei-I/O (Dateinamens-Reservierung,
+        # Opus-Konvertierung) -- ohne dieses try/except wuerde ein einzelner
+        # I/O-Fehler (volle Platte, Berechtigung) den kompletten Batch-Lauf
+        # abbrechen und alle noch ausstehenden Aufnahmen verlieren, statt
+        # nur diese eine zu ueberspringen (2026-08-19 Review-Fund).
+        log.warning("  Archivierung fehlgeschlagen: %r", e)
+        err += 1
+        continue
     ok += 1
 
 total = time.time() - t0

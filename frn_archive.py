@@ -128,7 +128,18 @@ def _unique_opus_path(dt: datetime, safe_room: str) -> tuple[str, str]:
     Fund, dieselbe Bug-Klasse nur enger). Die anschliessende WAV->Opus-
     Konvertierung (ffmpeg -y) ueberschreibt die hier angelegte leere
     Platzhalterdatei normal."""
-    base = dt.strftime(f"frn-%Y%m%d-%H%M%S-{safe_room}")
+    # AUDIO_DIR sicherstellen -- init_db() tut das normalerweise beim
+    # Server-Start, aber retranscribe_today.py (Batch-Skript) ruft init_db()
+    # nie auf; ohne das wuerde os.open() unten mit FileNotFoundError statt
+    # der erwarteten FileExistsError-Kollisionsbehandlung scheitern
+    # (2026-08-19 Review-Fund). Billig/idempotent, kein Problem im Normalfall.
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    # safe_room wird ANGEHAENGT statt in den strftime()-Format-String
+    # eingesetzt -- ein Raumname mit einem woertlichen '%' gefolgt von
+    # einem Direktiven-Buchstaben (z.B. "%d") wuerde sonst von strftime
+    # als Formatanweisung interpretiert statt als Text uebernommen, was
+    # den Dateinamen still verfaelscht (2026-08-19 Review-Fund).
+    base = dt.strftime("frn-%Y%m%d-%H%M%S") + f"-{safe_room}"
     n = 1
     filename = f"{base}.opus"
     while True:
@@ -157,9 +168,17 @@ async def add_entry(
     """
     dt        = datetime.fromtimestamp(timestamp)
     safe_room = room.replace("/", "_").replace(" ", "_")
-    filename, opus_path = _unique_opus_path(dt, safe_room)
-
     loop = asyncio.get_running_loop()
+    # _unique_opus_path() macht blockierende os.open()/os.close()-Syscalls
+    # (potenziell mehrfach bei Kollision) -- das gehoert wie wav_to_opus in
+    # den Executor, sonst haengt bei einer langsamen/vollen Platte der
+    # EINZIGE Event-Loop, der auch das Live-Audio-Streaming/WebSockets
+    # bedient (2026-08-19 Review-Fund).
+    try:
+        filename, opus_path = await loop.run_in_executor(None, _unique_opus_path, dt, safe_room)
+    except OSError as e:
+        log.warning("Dateinamens-Reservierung fehlgeschlagen (%s): %s", wav_path, e)
+        return None
     try:
         duration = await loop.run_in_executor(
             None, wav_to_opus, wav_path, opus_path
@@ -198,10 +217,16 @@ def add_entry_sync(
     timestamp: float,
     text: str,
 ) -> int | None:
-    """Synchrone Version für Batch-Verarbeitung."""
+    """Synchrone Version für Batch-Verarbeitung. None bei Fehler (auch bei
+    Datei-I/O-Problemen bei der Dateinamens-Reservierung, nicht nur bei der
+    Opus-Konvertierung) -- konsistent mit der dokumentierten Rueckgabe."""
     dt        = datetime.fromtimestamp(timestamp)
     safe_room = room.replace("/", "_").replace(" ", "_")
-    filename, opus_path = _unique_opus_path(dt, safe_room)
+    try:
+        filename, opus_path = _unique_opus_path(dt, safe_room)
+    except OSError as e:
+        log.warning("Dateinamens-Reservierung fehlgeschlagen (%s): %s", wav_path, e)
+        return None
 
     try:
         duration = wav_to_opus(wav_path, opus_path)
