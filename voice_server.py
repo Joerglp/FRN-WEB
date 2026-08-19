@@ -23,6 +23,8 @@ import asyncio
 import io
 import logging
 import os
+import re
+import threading
 import time
 import wave
 from pathlib import Path
@@ -56,7 +58,8 @@ _xtts = None
 _latents: dict = {}
 
 SPEAKER_DIR = Path(os.environ.get("VOICE_REF_DIR", str(Path(REF_WAV).parent)))
-SPEAKER_RE  = __import__("re").compile(r"^[a-z0-9_\-]{1,40}$")
+SPEAKER_RE  = re.compile(r"^[a-z0-9_\-]{1,40}$")
+_load_model_lock = threading.Lock()   # siehe _load_model()
 
 
 def _speaker_wav(name: str) -> Path:
@@ -68,15 +71,26 @@ def _speaker_wav(name: str) -> Path:
 
 def _load_model():
     """Lädt XTTS einmalig. Sprecher-Latents werden pro Sprecher lazily
-    berechnet und gecacht (spart pro Synthese mehrere Sekunden)."""
+    berechnet und gecacht (spart pro Synthese mehrere Sekunden).
+
+    _synth_lock (asyncio.Lock) serialisiert nur Anfragen auf dem Event-Loop
+    -- diese Funktion laeuft aber in einem Executor-Thread, und der
+    Hintergrund-Warmup (_warmup) ruft sie aus einem EIGENEN Executor-Thread
+    auf, ohne je _synth_lock zu halten. Ohne einen echten Thread-Lock
+    koennten Warmup und die erste echte /tts-Anfrage beide gleichzeitig
+    `_xtts is None` sehen und das Modell doppelt laden (2026-08-19
+    Review-Fund)."""
     global _tts, _xtts
     if _xtts is not None:
         return
-    log.info("Lade XTTS-v2 (Modus '%s', Ablage '%s') …", DEVICE, _STORE_DEVICE)
-    from TTS.api import TTS
-    _tts  = TTS(MODEL_ID).to(_STORE_DEVICE)
-    _xtts = _tts.synthesizer.tts_model
-    log.info("Modell geladen.")
+    with _load_model_lock:
+        if _xtts is not None:
+            return
+        log.info("Lade XTTS-v2 (Modus '%s', Ablage '%s') …", DEVICE, _STORE_DEVICE)
+        from TTS.api import TTS
+        _tts  = TTS(MODEL_ID).to(_STORE_DEVICE)
+        _xtts = _tts.synthesizer.tts_model
+        log.info("Modell geladen.")
 
 
 def _builtin_latents(speaker: str):
@@ -215,8 +229,11 @@ async def handle_tts(request: web.Request) -> web.Response:
         data = await request.json()
         text     = (data.get("text") or "").strip()
         language = (data.get("language") or DEF_LANG).strip()
-        speed    = float(data.get("speed") or 1.0)
         speaker  = (data.get("speaker") or "default").strip()
+        try:
+            speed = float(data.get("speed") or 1.0)
+        except (TypeError, ValueError):
+            speed = 1.0
     else:
         data = await request.post()
         text     = (data.get("text") or "").strip()
@@ -268,12 +285,22 @@ async def handle_speaker_upload(request: web.Request) -> web.Response:
     name = request.match_info["name"].strip().lower()
     if not SPEAKER_RE.match(name):
         return web.json_response({"error": "ungültiger Sprecher-Name"}, status=400)
+    # "default" ist reserviert -- _speaker_wav() gibt fuer diesen Namen immer
+    # REF_WAV zurueck, ein hierueber hochgeladenes Sample wuerde also nie
+    # gelesen, die eigene Stimme des Users still ignoriert (2026-08-19
+    # Review-Fund; SPEAKER_RE selbst laesst "default" als Namen durch).
+    if name == "default":
+        return web.json_response({"error": "'default' ist reserviert"}, status=400)
     body = await request.read()
     if len(body) < 40000:   # < ~1 s bei 24 kHz s16 — sicher zu kurz
         return web.json_response({"error": "Sample zu kurz"}, status=400)
     dest = SPEAKER_DIR / f"{name}.wav"
     tmp  = SPEAKER_DIR / f"_{name}.tmp"
-    tmp.write_bytes(body)
+    loop = asyncio.get_running_loop()
+    # Blockierendes Disk-I/O (bis zu 32MB) nicht direkt auf dem Event-Loop --
+    # sonst stehen waehrend eines grossen Uploads alle anderen Requests
+    # (inkl. /health) still (2026-08-19 Review-Fund).
+    await loop.run_in_executor(None, tmp.write_bytes, body)
     try:
         with wave.open(str(tmp), "rb") as wf:
             dur = wf.getnframes() / wf.getframerate()
@@ -307,13 +334,18 @@ async def handle_speakers_list(request: web.Request) -> web.Response:
 
 async def handle_health(request: web.Request) -> web.Response:
     ref_ok = Path(REF_WAV).exists()
+    # "loaded": False ist waehrend des normalen Warmup-Fensters kurz nach dem
+    # Start erwartet, kein Fehlerzustand -- deshalb NICHT Teil des HTTP-
+    # Status. Fehlendes REF_WAV dagegen ist eine echte Fehlkonfiguration,
+    # die Docker's HEALTHCHECK (curl -sf, prueft nur den Statuscode) bisher
+    # nie sah, weil hier immer 200 zurueckkam (2026-08-19 Review-Fund).
     return web.json_response({
         "status": "ok" if ref_ok else "no_ref",
         "engine": "xtts_v2",
         "device": DEVICE,
         "ref":    REF_WAV,
         "loaded": _xtts is not None,
-    })
+    }, status=200 if ref_ok else 503)
 
 
 async def _warmup(app):
