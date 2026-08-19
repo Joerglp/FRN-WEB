@@ -3401,13 +3401,18 @@ class TXServer:
 
     async def handle_admin_archive_split(self, request):
         """POST /api/admin/archive/{id}/split — {cut_s} zerlegt einen
-        Archiv-Eintrag mit mehreren Sprechern an einer EXPLIZIT angegebenen
-        Zeit (Sekunden ab Aufnahmebeginn) in zwei neue Eintraege. cut_s
-        stammt entweder aus einem Vorschlag (.../split-suggest) oder wird
-        vom Admin selbst per Player/Gehoer bestimmt -- volle Automatik ohne
-        Bestaetigung war unzuverlaessig genug (siehe Kommentar bei
-        _find_silence_gaps), um sie NICHT blind auszufuehren. Der
-        Original-Eintrag wird nur geloescht, wenn beide neuen Teile
+        Archiv-Eintrag mit mehreren Sprechern an EXPLIZIT angegebenen
+        Zeiten (Sekunden ab Aufnahmebeginn) in mehrere neue Eintraege.
+        cut_s kann eine einzelne Zahl (ein Schnitt -> zwei Teile) oder eine
+        Liste von Zahlen sein (N Schnitte -> N+1 Teile, fuer den "Automatik"-
+        Button im Frontend, der alle Vorschlaege aus .../split-suggest auf
+        einmal anwendet). Die Zeiten stammen entweder aus einem Vorschlag
+        oder werden vom Admin selbst per Player/Gehoer bestimmt -- volle
+        Automatik OHNE Bestaetigung der Zeiten war unzuverlaessig genug
+        (siehe Kommentar bei _find_silence_gaps), um sie blind auszufuehren;
+        "Automatik" heisst hier also "alle VORGESCHLAGENEN Stellen auf
+        einmal uebernehmen", nicht "irgendeine Stelle selbst erraten". Der
+        Original-Eintrag wird nur geloescht, wenn alle neuen Teile
         erfolgreich angelegt wurden."""
         _, err = await self._require_admin(request)
         if err:
@@ -3422,9 +3427,12 @@ class TXServer:
             body = await request.json()
         except Exception:
             body = {}
+        raw_cuts = body.get("cut_s")
         try:
-            cut_s = float(body.get("cut_s"))
+            cuts = [float(c) for c in raw_cuts] if isinstance(raw_cuts, list) else [float(raw_cuts)]
         except (TypeError, ValueError):
+            return web.json_response({"error": "cut_s (Sekunden) fehlt/ungueltig"}, status=400)
+        if not cuts:
             return web.json_response({"error": "cut_s (Sekunden) fehlt/ungueltig"}, status=400)
 
         # Schutz gegen Doppel-Klick/zwei Admin-Tabs: ohne das wuerden zwei
@@ -3435,11 +3443,11 @@ class TXServer:
             return web.json_response({"error": "Zerlegen fuer diesen Eintrag laeuft bereits"}, status=409)
         self._splitting_entries.add(entry_id)
         try:
-            return await self._do_archive_split(entry_id, cut_s)
+            return await self._do_archive_split(entry_id, cuts)
         finally:
             self._splitting_entries.discard(entry_id)
 
-    async def _do_archive_split(self, entry_id: int, cut_s: float):
+    async def _do_archive_split(self, entry_id: int, cuts: list[float]):
         loop = asyncio.get_running_loop()
         entry, full_wav, err = await self._archive_entry_wav(entry_id)
         if err:
@@ -3451,12 +3459,32 @@ class TXServer:
                 frames = w.readframes(w.getnframes())
             data = np.frombuffer(frames, dtype=np.int16)
             duration_s = len(data) / sr
-            if not (0.3 < cut_s < duration_s - 0.3):
-                return web.json_response(
-                    {"error": f"cut_s muss zwischen 0.3 und {duration_s - 0.3:.1f}s liegen"},
-                    status=400)
-            cut_i = int(cut_s * sr)
-            parts = [("a", data[:cut_i], 0.0), ("b", data[cut_i:], cut_s)]
+
+            cuts = sorted(set(round(c, 2) for c in cuts))
+            for c in cuts:
+                if not (0.3 < c < duration_s - 0.3):
+                    return web.json_response(
+                        {"error": f"Schnittzeit {c}s muss zwischen 0.3 und {duration_s - 0.3:.1f}s liegen"},
+                        status=400)
+            # Zu nah beieinander liegende Schnitte (< 0.5s Abstand) wuerden ein
+            # praktisch leeres Mini-Segment erzeugen -- z.B. wenn "Automatik"
+            # alle Vorschlaege auf einmal anwendet und zwei davon zufaellig
+            # eng beieinander liegen. Einfach zusammenfassen (den zweiten
+            # verwerfen) statt einen Fehler zu zeigen.
+            merged = []
+            for c in cuts:
+                if merged and c - merged[-1] < 0.5:
+                    continue
+                merged.append(c)
+            cuts = merged
+
+            boundaries = [0.0] + cuts + [duration_s]
+            parts = []
+            for i in range(len(boundaries) - 1):
+                t0, t1 = boundaries[i], boundaries[i + 1]
+                i0, i1 = int(t0 * sr), int(t1 * sr)
+                parts.append((str(i), data[i0:i1], t0))
+            n_parts = len(parts)
 
             transcfg = self._transcription_cfg or {}
             model_size = transcfg.get("whisper_model", "medium")
@@ -3524,7 +3552,7 @@ class TXServer:
                     else:
                         log.warning("Zerlegen: Teil '%s' ohne Audio angelegt (#%d) -- zaehlt als Fehler", label, new_id)
 
-            if len(new_ids) != 2:
+            if len(new_ids) != n_parts:
                 # Teilweise fehlgeschlagen -- Original NICHT loeschen, damit nichts verloren geht.
                 # Bereits erfolgreich angelegte Teile aber wieder entfernen,
                 # sonst haeufen sich bei jedem erneuten Versuch weitere
@@ -3538,7 +3566,7 @@ class TXServer:
 
             await loop.run_in_executor(None, _archive.delete_entry, entry_id)
             return web.json_response({
-                "ok": True, "new_ids": new_ids, "cut_s": round(cut_s, 2),
+                "ok": True, "new_ids": new_ids, "cuts": cuts,
             })
         finally:
             for p in (full_wav, *part_paths):

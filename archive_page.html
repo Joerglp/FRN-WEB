@@ -1163,6 +1163,24 @@ async function suggestSplit(entryId, btn) {
       panel.appendChild(b);
     });
 
+    // "Automatik": alle gefundenen Stille-Luecken auf einmal uebernehmen,
+    // statt jede einzeln anklicken zu muessen -- nur bei >=2 echten
+    // (method='silence') Vorschlaegen sinnvoll/angeboten. Wendet KEINE
+    // eigene Erkennung an, nur die bereits gezeigten Vorschlaege in einem
+    // Rutsch (die Vorsicht bei voller Blind-Automatik -- siehe Backend-
+    // Kommentar bei _find_silence_gaps -- gilt weiterhin, hier bestaetigt
+    // der Admin ja implizit durch den Klick, dass die Vorschlagsliste
+    // passt).
+    if (d.method === 'silence' && d.gaps && d.gaps.length >= 2) {
+      const autoBtn = document.createElement('button');
+      autoBtn.textContent = `⚡ Automatik: alle ${d.gaps.length} Stellen (${d.gaps.length + 1} Teile)`;
+      autoBtn.style.cssText = "background:transparent;border:1px solid var(--text-dim);color:var(--text);" +
+        "font-family:'Share Tech Mono',monospace;font-size:10px;padding:3px 8px;cursor:pointer;" +
+        "border-radius:2px;font-weight:bold";
+      autoBtn.onclick = () => doSplit(entryId, d.gaps.map(g => g.t), wrap);
+      panel.appendChild(autoBtn);
+    }
+
     const manual = document.createElement('span');
     manual.style.cssText = "display:flex;gap:4px;align-items:center";
     manual.innerHTML =
@@ -1186,7 +1204,11 @@ async function suggestSplit(entryId, btn) {
 }
 
 async function doSplit(entryId, cutS, wrap) {
-  if (!confirm(`Bei ${fmtSplitTime(cutS)} zerlegen? Der Original-Eintrag wird durch zwei neue ersetzt.`)) return;
+  const cuts = Array.isArray(cutS) ? cutS : [cutS];
+  const confirmMsg = cuts.length > 1
+    ? `An ${cuts.length} Stellen (${cuts.map(fmtSplitTime).join(', ')}) zerlegen -- ${cuts.length + 1} neue Teile? Der Original-Eintrag wird ersetzt.`
+    : `Bei ${fmtSplitTime(cuts[0])} zerlegen? Der Original-Eintrag wird durch zwei neue ersetzt.`;
+  if (!confirm(confirmMsg)) return;
   const out = wrap.querySelector('.split-result');
   const panelBtns = wrap.querySelectorAll('.split-panel button');
   panelBtns.forEach(b => b.disabled = true);   // Doppel-Klick-Schutz waehrend des Requests
@@ -1200,7 +1222,7 @@ async function doSplit(entryId, cutS, wrap) {
     const d = await r.json();
     if (d.error) { out.textContent = 'Fehler: ' + d.error; }
     else {
-      out.textContent = `✓ geteilt bei ${fmtSplitTime(d.cut_s)}`;
+      out.textContent = `✓ in ${d.new_ids.length} Teile zerlegt (${d.cuts.map(fmtSplitTime).join(', ')})`;
       wrap.querySelector('.split-panel').style.display = 'none';
       loadEntries(false);
     }
