@@ -633,7 +633,7 @@ class RoomRecorder:
         return float(np.sqrt(np.mean(audio ** 2)))
 
     @classmethod
-    def _clean_audio(cls, pcm_data: bytes) -> bytes:
+    def _clean_audio(cls, pcm_data: bytes, room_name: str = "", callsign: str = "") -> bytes:
         """Bandpass (Sprachband) + sanfte Normalisierung vor dem Schreiben.
 
         Bandpass 300-3400 Hz (klassisches Telefonie-/Sprachband) draengt
@@ -659,6 +659,21 @@ class RoomRecorder:
             if peak > 0:
                 target = 0.70 * 32767
                 gain = min(target / peak, 8.0)
+                # Diagnose-Log: Rohpegel VOR der Normalisierung -- danach
+                # liegt praktisch JEDE Aufnahme bei ~70% Vollaussteuerung
+                # (Zielwert), das archivierte Ergebnis verraet also nichts
+                # mehr ueber die tatsaechliche Eingangslautstaerke. Ein
+                # Rohpegel schon nahe am Ziel (Gain nahe 1.0x) heisst: das
+                # Signal kam von sich aus schon "heiss" rein -- Verdacht auf
+                # Uebersteuerung am Sender. User-Frage 2026-08-20 (Gotfried
+                # 07:31:04, Whisper-Ergebnis unbefriedigend) -- bisher gab es
+                # dafuer keine Messgrundlage, weil nur der (immer gleich
+                # normalisierte) Endpegel im Archiv sichtbar ist.
+                log.info("[%s] Rohpegel %s vor Normalisierung: peak=%.0f "
+                         "(%.0f%% Vollaussteuerung), Gain=%.2fx%s",
+                         room_name or cls.__name__, callsign or "?", peak,
+                         100 * peak / 32767, gain,
+                         " [Gain-Deckel erreicht -- Signal war leise]" if gain >= 7.99 else "")
                 filtered = filtered * gain
             return np.clip(filtered, -32768, 32767).astype(np.int16).tobytes()
         except Exception as e:
@@ -700,7 +715,7 @@ class RoomRecorder:
                 name = f"{base}-{n}"
         meta_path = self.wav_dir / f"{name}.meta"
 
-        pcm_data = self._clean_audio(pcm_data)
+        pcm_data = self._clean_audio(pcm_data, self.room_name, callsign)
 
         # WAV schreiben
         try:
