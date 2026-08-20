@@ -1382,7 +1382,7 @@ class TXServer:
         try:
             async with room._tx_lock:
                 await room.ensure_connected()
-                ok = await room.request_tx(timeout=10.0)
+                ok = await room.request_tx(timeout=15.0)
                 if not ok:
                     log.info("[%s] Auto-Senden: TX nicht genehmigt (Kanal belegt)",
                              room.name)
