@@ -718,7 +718,7 @@ function dateDivider(isoTime) {
 }
 
 // ── Render one message ─────────────────────────────────────────────────────
-function renderMsg(e) {
+function renderMsg(e, mergeWithId) {
   const color = csColor(e.callsign || '?');
   const rc    = roomColor(e.room || '');
   const label = dateDivider(e.time);
@@ -768,6 +768,15 @@ function renderMsg(e) {
           <span class="split-result" style="color:var(--text-dim)"></span>
         </div>
         <div class="split-panel" style="display:none;flex-wrap:wrap;gap:6px;align-items:center"></div>
+      </div>
+      ${mergeWithId ? `
+      <div class="speaker-merge" style="display:flex;gap:6px;align-items:center;font-size:11px">
+        <button onclick="mergeWithNext(${e.id}, ${mergeWithId}, this)" style="
+          background:transparent;border:1px solid var(--border);color:var(--text-dim);
+          font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:.06em;
+          padding:3px 9px;cursor:pointer;border-radius:2px;text-transform:uppercase"
+          title="Falscher Schnitt? Diesen Eintrag mit dem direkt darunter (zeitlich davor) wieder zusammenkleben">&#128279; Mit dem darunter zusammenkleben</button>
+        <span class="merge-result" style="color:var(--text-dim)"></span>
       </div>` : ''}
     </div>` : '';
 
@@ -933,7 +942,14 @@ async function loadEntries(append = false) {
           </div>`;
       } else {
         let html = '';
-        data.entries.forEach(e => { html += renderMsg(e); });
+        data.entries.forEach((e, i) => {
+          // Chronologisch naechster (zeitlich davor liegender) Eintrag in
+          // der DESC-sortierten Liste -- fuers "Zusammenkleben" (nur
+          // innerhalb der aktuell geladenen Seite verfuegbar; letzter
+          // Eintrag einer Seite bekommt keinen Merge-Partner angeboten).
+          const nextEntry = data.entries[i + 1];
+          html += renderMsg(e, nextEntry ? nextEntry.id : null);
+        });
         container.insertAdjacentHTML('beforeend', html);
         shownCount += data.entries.length;
         offset     += data.entries.length;
@@ -1230,6 +1246,31 @@ async function doSplit(entryId, cutS, wrap) {
     out.textContent = 'Fehler: ' + e;
   } finally {
     panelBtns.forEach(b => b.disabled = false);
+  }
+}
+
+async function mergeWithNext(entryId, withId, btn) {
+  if (!confirm('Diesen Eintrag mit dem direkt darunter (zeitlich davor liegenden) zusammenkleben? Beide Original-Eintraege werden durch einen neuen ersetzt.')) return;
+  const out = btn.nextElementSibling;
+  btn.disabled = true;
+  out.textContent = '⏳ klebe zusammen …';
+  try {
+    const r = await adminFetch(`/api/admin/archive/${entryId}/merge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ with_id: withId }),
+    });
+    const d = await r.json();
+    if (d.error) {
+      out.textContent = 'Fehler: ' + d.error;
+      btn.disabled = false;
+    } else {
+      out.textContent = '✓ zusammengeklebt';
+      loadEntries(false);
+    }
+  } catch(e) {
+    out.textContent = 'Fehler: ' + e;
+    btn.disabled = false;
   }
 }
 

@@ -486,6 +486,19 @@ def get_entry(entry_id: int) -> dict | None:
             "audio_file": row["audio_file"], "duration_s": row["duration_s"]}
 
 
+def count_entries_between(room: str, ts_start: float, ts_end: float) -> int:
+    """Anzahl Eintraege in einem Raum mit Zeitstempel STRIKT zwischen
+    ts_start und ts_end -- fuer's Zusammenkleben zweier Eintraege (nur
+    erlaubt, wenn nichts dazwischen liegt, sonst wuerde das Zwischenstueck
+    stillschweigend uebersprungen)."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM transmissions WHERE room = ? AND timestamp > ? AND timestamp < ?",
+            (room, ts_start, ts_end)
+        ).fetchone()
+    return row[0]
+
+
 def update_callsign(entry_id: int, callsign: str) -> bool:
     with _get_conn() as conn:
         cur = conn.execute(

@@ -778,7 +778,7 @@ class TXServer:
         self._speaker_enrollments: dict[str, list[list[float]]] = {}
         self._load_speaker_enrollments()
         self._transcription_cfg: dict = {}   # von main() befuellt (config.ini [transcription])
-        self._splitting_entries: set[int] = set()   # Doppel-Klick-Schutz fuer handle_admin_archive_split
+        self._archive_busy_entries: set[int] = set()   # Doppel-Klick-Schutz fuer Zerlegen UND Zusammenfuehren
 
     # ── Debug-Ablaufverfolgung ──────────────────────────────────────────────
 
@@ -3492,13 +3492,13 @@ class TXServer:
         # gleichzeitige Requests fuer denselben Eintrag beide durchlaufen
         # und den Original-Eintrag doppelt in je zwei neue Teile zerlegen
         # (4 Eintraege statt 2, zweites delete_entry laeuft ins Leere).
-        if entry_id in self._splitting_entries:
+        if entry_id in self._archive_busy_entries:
             return web.json_response({"error": "Zerlegen fuer diesen Eintrag laeuft bereits"}, status=409)
-        self._splitting_entries.add(entry_id)
+        self._archive_busy_entries.add(entry_id)
         try:
             return await self._do_archive_split(entry_id, cuts)
         finally:
-            self._splitting_entries.discard(entry_id)
+            self._archive_busy_entries.discard(entry_id)
 
     async def _do_archive_split(self, entry_id: int, cuts: list[float]):
         loop = asyncio.get_running_loop()
@@ -3638,6 +3638,146 @@ class TXServer:
                     os.unlink(p)
                 except OSError:
                     pass
+
+    async def handle_admin_archive_merge(self, request):
+        """POST /api/admin/archive/{id}/merge — {with_id} klebt zwei
+        benachbarte Archiv-Eintraege (Gegenstueck zum Zerlegen -- fuer den
+        Fall "beim Schneiden einen Fehler gemacht", User-Wunsch 2026-08-21)
+        wieder zu einem einzigen Eintrag zusammen. Nur erlaubt, wenn beide
+        im selben Raum liegen und nichts Drittes zeitlich dazwischen liegt
+        (sonst wuerde das Zwischenstueck stillschweigend uebersprungen).
+        Die Luecke zwischen beiden Aufnahmen wird als Stille eingefuegt
+        (gedeckelt auf 2s, falls die beiden zeitlich weiter auseinander
+        liegen als das noch plausibel waere), danach wird der komplette
+        neue Clip frisch transkribiert und -- falls Sprecher-ID aktiv ist
+        -- neu identifiziert (nur sinnvoll, wenn beide Teile tatsaechlich
+        vom selben Sprecher stammen; sonst lieber das Rufzeichen danach von
+        Hand korrigieren)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if not _ARCHIVE_AVAILABLE:
+            return web.json_response({"error": "archive not available"}, status=503)
+        try:
+            entry_id = int(request.match_info.get("id", ""))
+        except ValueError:
+            return web.json_response({"error": "ungueltige id"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            other_id = int(body.get("with_id"))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "with_id fehlt/ungueltig"}, status=400)
+        if other_id == entry_id:
+            return web.json_response({"error": "with_id muss ein anderer Eintrag sein"}, status=400)
+
+        ids = (entry_id, other_id)
+        if any(i in self._archive_busy_entries for i in ids):
+            return web.json_response({"error": "Einer der Eintraege wird gerade schon bearbeitet"}, status=409)
+        self._archive_busy_entries.update(ids)
+        try:
+            return await self._do_archive_merge(entry_id, other_id)
+        finally:
+            self._archive_busy_entries.difference_update(ids)
+
+    async def _do_archive_merge(self, id_a: int, id_b: int):
+        loop = asyncio.get_running_loop()
+        entry_a = await loop.run_in_executor(None, _archive.get_entry, id_a)
+        entry_b = await loop.run_in_executor(None, _archive.get_entry, id_b)
+        if not entry_a or not entry_b:
+            return web.json_response({"error": "Eintrag/Eintraege nicht gefunden"}, status=404)
+        if entry_a["room"] != entry_b["room"]:
+            return web.json_response({"error": "Eintraege sind aus unterschiedlichen Raeumen"}, status=400)
+
+        first, second = ((entry_a, entry_b) if entry_a["timestamp"] <= entry_b["timestamp"]
+                         else (entry_b, entry_a))
+        between = await loop.run_in_executor(
+            None, _archive.count_entries_between, first["room"], first["timestamp"], second["timestamp"])
+        if between > 0:
+            return web.json_response(
+                {"error": "Dazwischen liegt noch ein anderer Eintrag — der muesste erst mit dazu"},
+                status=400)
+
+        entry_a_full, wav_a, err = await self._archive_entry_wav(first["id"])
+        if err:
+            return err
+        entry_b_full, wav_b, err = await self._archive_entry_wav(second["id"])
+        if err:
+            try:
+                os.unlink(wav_a)
+            except OSError:
+                pass
+            return err
+
+        merged_path = None
+        try:
+            with wave.open(wav_a, "rb") as w:
+                sr = w.getframerate()
+                data_a = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+            with wave.open(wav_b, "rb") as w:
+                data_b = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+
+            # Luecke zwischen den beiden Original-Aufnahmen als Stille
+            # einfuegen, damit der zeitliche Abstand nicht einfach
+            # verschwindet -- gedeckelt auf 2s (kein Sinn, 30s echte Stille
+            # einzufuegen, falls die beiden weiter auseinander liegen als
+            # fuer einen versehentlichen Fehlschnitt plausibel waere).
+            gap_s = max(0.0, second["timestamp"] - (first["timestamp"] + len(data_a) / sr))
+            gap_s = min(gap_s, 2.0)
+            gap = np.zeros(int(gap_s * sr), dtype=np.int16)
+            combined = np.concatenate([data_a, gap, data_b])
+
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix="_merged.wav", delete=False) as tf:
+                merged_path = tf.name
+            with wave.open(merged_path, "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+                w.writeframes(combined.tobytes())
+
+            transcfg = self._transcription_cfg or {}
+            model_size = transcfg.get("whisper_model", "medium")
+            language   = transcfg.get("whisper_language", "de")
+
+            text = ""
+            if _TRANSCRIPTION_AVAILABLE:
+                try:
+                    text = await transcribe_wav(merged_path, model_size, language)
+                except Exception as e:
+                    log.warning("Zusammenkleben: Transkription fehlgeschlagen: %s", e)
+
+            callsign = first["callsign"] or second["callsign"] or ""
+            if self._speaker_id_cfg().get("enabled"):
+                try:
+                    identified, sim, threshold = await self._speaker_identify(merged_path)
+                    if identified:
+                        callsign = identified
+                except Exception as e:
+                    log.debug("Zusammenkleben: Speaker-ID fehlgeschlagen: %s", e)
+
+            new_id = await _archive.add_entry(
+                merged_path, first["room"], callsign, first["timestamp"], text)
+            new_entry = await loop.run_in_executor(None, _archive.get_entry, new_id) if new_id else None
+            if not new_entry or not new_entry.get("audio_file"):
+                # Wie beim Zerlegen: lieber beide Originale behalten als mit
+                # einem kaputten/audiolosen Ergebnis dazustehen.
+                if new_id:
+                    await loop.run_in_executor(None, _archive.delete_entry, new_id)
+                return web.json_response(
+                    {"error": "Zusammenkleben fehlgeschlagen — beide Originale bleiben erhalten"},
+                    status=500)
+
+            await loop.run_in_executor(None, _archive.delete_entry, first["id"])
+            await loop.run_in_executor(None, _archive.delete_entry, second["id"])
+            return web.json_response({"ok": True, "new_id": new_id})
+        finally:
+            for p in (wav_a, wav_b, merged_path):
+                if p:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
 
     async def handle_admin_gemini_models(self, request):
         """Verfügbare Gemini-Modell-IDs (Text-Chat) für das Dropdown.
@@ -5627,6 +5767,7 @@ class TXServer:
         app.router.add_post("/api/admin/archive/{id}/callsign", self.handle_admin_archive_callsign)
         app.router.add_get ("/api/admin/archive/{id}/split-suggest", self.handle_admin_archive_split_suggest)
         app.router.add_post("/api/admin/archive/{id}/split", self.handle_admin_archive_split)
+        app.router.add_post("/api/admin/archive/{id}/merge", self.handle_admin_archive_merge)
         app.router.add_get("/api/admin/debug-audio/{name}", self.handle_admin_debug_audio)
         app.router.add_get("/api/admin/overview", self.handle_admin_overview)
 
