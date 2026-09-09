@@ -179,6 +179,31 @@ def _remove_repetitions(text: str) -> str:
     return text.strip()
 
 
+def _collapse_phrase_repeats(text: str, min_words: int = 2, max_words: int = 6) -> str:
+    """Wie _remove_repetitions, aber fuer MEHRWORTIGE Phrasen statt nur
+    Einzelwoerter -- User-Meldung 2026-09-09 ("da muss noch ein Fehlerteufel
+    sein"): "Ja, mein Lugger, privata Liga, du weisst ja, privata Liga, du
+    weisst ja, privata Liga, du weisst ja." blieb komplett unangetastet, weil
+    _remove_repetitions() nur Wiederholungen EINES Wortes erkennt (die
+    Backreference fasst nur \\w+) und _dedupe_cascade() erst auf Satzebene
+    (Split an . ! ?) greift -- hier war aber alles EIN Satz (nur Kommas
+    dazwischen), die Phrase also fuer beide bestehenden Filter unsichtbar.
+
+    Verifiziert gegen den gesamten Archiv-Bestand (14367 Eintraege): 268
+    Treffer, durchweg eindeutige Wiederholungsschleifen ("Was ist das denn
+    jetzt?" 3x, "da, da, da, ..." 23x, "Gaengige Ausdruecke" 3x -- Letzteres
+    ist sogar eine unserer eigenen bekannten Halluzinations-Phrasen, nur die
+    3x-wiederholte Form wurde bisher nicht erkannt). Schwelle bewusst gleich
+    konservativ wie bei _remove_repetitions (mind. 3x hintereinander, nicht
+    schon bei 2x) -- ein einmaliges Wiederholen ("Kanal frei, Kanal frei")
+    ist im CB-Funk-Jargon oft absichtliche Betonung, kein Halluzinations-
+    Zeichen, und soll nicht verschwinden."""
+    for n in range(max_words, min_words - 1, -1):
+        pattern = r'\b((?:\S+\s+){' + str(n - 1) + r'}\S+?)(?:[,.]?\s+\1){2,}\b'
+        text = _re.sub(pattern, r'\1', text, flags=_re.IGNORECASE)
+    return text
+
+
 # Wortlose "Deko-Schleife": ein kurzes Zeichen-Muster wird OHNE Leerzeichen/
 # Satzzeichen dutzende Male hintereinander wiederholt und bildet dabei ein
 # einziges, absurd langes "Wort" (live beobachtet 2026-08-18, 06:37:53, 4.3s
@@ -316,6 +341,7 @@ def _transcribe_remote(wav_path: str, url: str, language: str) -> str:
         result = json.loads(resp.read())
     text = _strip_char_repeat_garbage(result.get("text", "").strip())
     text = _remove_repetitions(text)
+    text = _collapse_phrase_repeats(text)
     deduped = _dedupe_cascade(text)
     if deduped != text:
         log.info("Remote-Transkript Kaskade bereinigt: %.80s -> %.80s", text, deduped)
@@ -401,7 +427,8 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
     parts = [s.text.strip() for s in segments
              if getattr(s, "no_speech_prob", 0.0) <= 0.8
              and not _is_hallucination(s.text.strip())]
-    text = _dedupe_cascade(_remove_repetitions(_strip_char_repeat_garbage(" ".join(parts).strip())))
+    text = _collapse_phrase_repeats(_remove_repetitions(_strip_char_repeat_garbage(" ".join(parts).strip())))
+    text = _dedupe_cascade(text)
     if language.startswith("de") and _is_english_hallucination(text):
         log.info("Lokales Transkript als Englisch-Halluzination verworfen (Sprache war %s): %.80s", language, text)
         return ""
