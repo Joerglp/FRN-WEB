@@ -9,3 +9,10 @@ env.*
 config.json
 config/config.json
 tx_users.json
+
+# Sicherungskopien, Laufzeitzustand und lokale Konfiguration
+*.bak-*
+*.bak
+bot_state.json
+config.ini
+speaker_enrollments.json
