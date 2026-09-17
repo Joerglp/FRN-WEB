@@ -435,6 +435,19 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
     return text
 
 
+def _mark_archived(wav_path: str) -> None:
+    """Benennt die zugehoerige .meta.done zu .meta.archived um -- Marker fuer
+    "fertig verarbeitet UND archiviert". Nur so kann _recover_lost_meta
+    einen echt abgebrochenen Lauf von einem spaeter im Archiv zerlegten/
+    zusammengeklebten/geloeschten Eintrag unterscheiden (siehe dort)."""
+    try:
+        done_path = Path(wav_path).with_suffix(".meta.done")
+        if done_path.exists():
+            done_path.rename(Path(wav_path).with_suffix(".meta.archived"))
+    except Exception as e:
+        log.debug("_mark_archived fehlgeschlagen (%s): %s", wav_path, e)
+
+
 def _mark_discarded(wav_path: str) -> None:
     """Benennt die zugehoerige .meta.done zu .meta.discarded um -- Marker fuer
     "vollstaendig verarbeitet, aber bewusst nicht archiviert" (reines Rauschen/
@@ -609,19 +622,32 @@ class TranscriptionPipeline:
             log.warning("_recover_lost_meta: DB-Fehler: %s", e)
             return
 
-        recovered = 0
+        # Fertig archivierte Aufnahmen tragen seit 2026-09-14 .meta.archived
+        # (siehe process_wav). Vorher blieb es bei .meta.done, und "verloren"
+        # hiess nur "WAV ist keine wav_source mehr" -- das trifft aber auch zu,
+        # wenn ein Eintrag im Archiv ZERLEGT, ZUSAMMENGEKLEBT oder GELOESCHT
+        # wurde (die neuen Teile haben eine /tmp-Quelle). Folge: der naechste
+        # Neustart las die Original-WAV (solange noch im 2-Tage-Fenster)
+        # erneut als Duplikat ein -- 2026-09-11 21:34 so 25 Stueck. Jetzt:
+        # .meta.done MIT Archiv-Eintrag = fertig (Altbestand) -> .meta.archived;
+        # nur .meta.done OHNE Eintrag = echt abgebrochener Lauf -> zuruecksetzen.
+        recovered = archived = 0
         for done_path in self.wav_dir.glob("*.meta.done"):
             try:
                 meta = json.loads(done_path.read_text(encoding="utf-8"))
                 wav = meta.get("wav", "")
-                if wav and wav not in sources and Path(wav).exists():
+                if wav and wav in sources:
+                    done_path.rename(done_path.with_suffix(".archived"))  # .meta.done → .meta.archived
+                    archived += 1
+                elif wav and Path(wav).exists():
                     meta_path = done_path.with_suffix("")  # .meta.done → .meta
                     done_path.rename(meta_path)
                     recovered += 1
             except Exception:
                 pass
-        if recovered:
-            log.info("_recover_lost_meta: %d Dateien zurückgesetzt", recovered)
+        if recovered or archived:
+            log.info("_recover_lost_meta: %d Dateien zurückgesetzt, %d als archiviert markiert",
+                     recovered, archived)
 
     async def _process_meta_files(self):
         """Verarbeitet .meta-Dateien die frn_stream.py abgelegt hat.
@@ -681,7 +707,17 @@ class TranscriptionPipeline:
         # eigene synthetisierte Stimme fehlerhaft zurueck-transkribiert.
         dbg = getattr(self, "debug_trace", None)
         rkt = getattr(self, "resolve_known_text", None)
-        text = (rkt(room, ts) if rkt else None) or ""
+        # Dauer mitgeben: der Bot-Text darf nur uebernommen werden, wenn die
+        # Aufnahme KOMPLETT in seiner eigenen Sendung liegt (siehe
+        # _bot_own_recording in frn_tx_server) -- sonst erbte eine fremde
+        # Durchsage, die kurz davor/danach beginnt, seinen Text.
+        dur_s = 0.0
+        try:
+            with wave.open(wav_path, "rb") as _w:
+                dur_s = _w.getnframes() / float(_w.getframerate() or 8000)
+        except Exception:
+            pass
+        text = (rkt(room, ts, dur_s) if rkt else None) or ""
         if text:
             log.info("[%s] Bekannter Bot-Text übernommen (kein Whisper nötig)", room)
             if dbg:
@@ -698,6 +734,20 @@ class TranscriptionPipeline:
             MAX_FAILS = 3
             remote_url = _get_whisper_remote_url()
             fails = 0
+            # Leeres Transkript bei klar langem Clip nochmal versuchen: der
+            # Remote-Whisper (large-v3, Temperature-Fallback) liefert fuer
+            # dieselbe Audio nicht deterministisch und gelegentlich "" --
+            # beim Reparaturlauf 2026-09-11 bei 3 von 29 Clips (11-25s, klar
+            # verstaendlich); 2. oder 3. Versuch lieferte dann Text. Unter
+            # 3s nicht wiederholen (dort ist "" meist korrekt: Rauschen,
+            # verworfene Halluzination).
+            EMPTY_RETRIES = 2
+            empty_tries = 0
+            try:
+                with wave.open(wav_path, "rb") as _w:
+                    _dur_s = _w.getnframes() / float(_w.getframerate() or 8000)
+            except Exception:
+                _dur_s = 0.0
             while True:
                 if remote_url:
                     loop = asyncio.get_event_loop()
@@ -712,6 +762,15 @@ class TranscriptionPipeline:
                         timeout=300.0
                     )
                     _wdt = time.time() - _t0
+                    if (not text.strip() and _dur_s >= 3.0 and remote_url
+                            and empty_tries < EMPTY_RETRIES):
+                        empty_tries += 1
+                        log.info("[%s] Whisper: %.1fs, leeres Transkript bei %.1fs Clip -- "
+                                 "Wiederholung %d/%d", room, _wdt, _dur_s, empty_tries, EMPTY_RETRIES)
+                        if dbg:
+                            dbg(room, ts, "Whisper", "retry", _wdt,
+                                f"leer bei {_dur_s:.1f}s, Wiederholung {empty_tries}/{EMPTY_RETRIES}")
+                        continue
                     log.info("[%s] Whisper: %.1fs", room, _wdt)
                     if dbg:
                         dbg(room, ts, "Whisper", "ok", _wdt, text[:200])
@@ -787,7 +846,8 @@ class TranscriptionPipeline:
 
         try:
             from frn_archive import add_entry
-            await add_entry(wav_path, room, callsign, ts, text)
+            if await add_entry(wav_path, room, callsign, ts, text):
+                _mark_archived(wav_path)
         except Exception as e:
             log.warning("[%s] Archiv-Fehler: %s", room, e)
 
@@ -821,7 +881,7 @@ class TranscriptionPipeline:
                     continue
                 p.unlink()
                 # .meta.done/.meta.discarded Sidecar ebenfalls entfernen
-                for suffix in (".meta.done", ".meta.discarded"):
+                for suffix in (".meta.done", ".meta.discarded", ".meta.archived"):
                     sidecar = p.with_suffix(suffix)
                     if sidecar.exists():
                         sidecar.unlink()

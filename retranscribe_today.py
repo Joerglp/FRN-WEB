@@ -110,8 +110,9 @@ for i, wav_path in enumerate(wavs, 1):
     room     = "?"
     callsign = "-"
     meta_done = wav_path.with_suffix(".meta.done")
+    meta_arch = wav_path.with_suffix(".meta.archived")
     meta_raw  = wav_path.with_suffix(".meta")
-    for mp in (meta_done, meta_raw):
+    for mp in (meta_done, meta_arch, meta_raw):
         if mp.exists():
             import json
             try:
