@@ -16,3 +16,5 @@ tx_users.json
 bot_state.json
 config.ini
 speaker_enrollments.json
+voices/
+prompttest/
