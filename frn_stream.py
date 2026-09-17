@@ -511,6 +511,48 @@ class RoomRecorder:
     # leise-aber-echte-Sprache-RMS ~1550 ("Ciao, schoenen Tag", 2026-08-04).
     NOISE_RMS_THRESHOLD = 300
 
+    # Auto-Zerlegen beim Speichern an SCHLIESSUNGEN DER RAUSCHSPERRE
+    # (2026-09-11). Mehrere Sprecher im schnellen Wechsel (Pausen kuerzer
+    # als SILENCE_TIMEOUT) landeten bisher in EINEM Chunk (v.a. die
+    # MAX_DURATION=90s-Zwangsschnitte) und wurden einem einzigen Callsign
+    # zugeschrieben. Messung an 982 Roh-WAVs (109 davon >= 20s):
+    #   - Exakte PCM_SILENCE-Bloecke kommen INNERHALB eines Chunks nie vor
+    #     (auch nicht 20ms) -- der GSM-Decoder liefert fuer digitale Stille
+    #     winzige Restwerte. Ein Bytevergleich greift daher nie.
+    #   - Rauschsperre ZU (Traeger weg = Sprecher hat PTT losgelassen):
+    #     roh RMS p50=2.5, p90=4, max=15, Dauer im Puffer 45-150ms (danach
+    #     faellt das Gateway-TX, Loch im Puffer bis zum naechsten Sprecher).
+    #   - Rauschsperre OFFEN, Sprechpause bei gehaltener PTT: Rauschteppich
+    #     roh p1=75, p50=295 -- Faktor 5-20 ueber der Zu-Phase.
+    #   Eine Pause desselben Sprechers laesst sich per Pegel also NICHT von
+    #   einem Wechsel unterscheiden (beides "leise"), die Zu-Phase dagegen
+    #   sehr wohl -- genau die haben wir schon beim Sendeende als Signatur
+    #   gesehen (User-Diagnose "Schliessen der Rauschsperre = Luecke").
+    # SILENCE_TIMEOUT/Session-Ende bleiben unangetastet (0.5s hatte frueher
+    # zu Fragmentierung gefuehrt); es kommen nur ZUSAETZLICHE Schnitte im
+    # fertigen Chunk hinzu. Jeder Teil durchlaeuft danach ganz normal die
+    # Pro-Clip Transkription+Speaker-ID (resolve_callsign in frn_tx_server).
+    # Simulation auf den 109 langen Aufnahmen: 355 Teile, median 3/Datei,
+    # Dauern ueberwiegend 2-20s -- ganze Durchgaenge, keine Satzfetzen.
+    # 2026-09-14 WIEDER AUSGESCHALTET: im Livebetrieb feuerte das Kriterium
+    # 167x an einem Vormittag -- auch INNERHALB einer Durchsage (z.B. "Chunk
+    # (2.2s) -> 3 Teile: 0.7s, 1.3s"). Kurze Null-Laeufe entstehen eben nicht
+    # nur beim Loslassen der PTT, sondern auch bei VOX-/Paket-Luecken mitten
+    # im Sprechen. Folgen: zerhackte Eintraege, Roberts eigene TTS-Sendungen
+    # bis zu 5x im Archiv (synthetische Sprechpausen sind echte digitale
+    # Stille), dadurch Whisper-Rueckstau bis 22 Minuten und ein Bot, der
+    # laengst Vergangenes beantwortete. Erst mit einem geschaerften Kriterium
+    # wieder einschalten (Messung noetig, u.a. Mindestlaenge des Chunks und
+    # laengere Zu-Phase).
+    SPLIT_ON_CLOSURE = False
+    CLOSE_RMS_RAW    = 20.0   # roh-RMS-Schwelle fuer "Rauschsperre zu"
+    CLOSE_WIN_S      = 0.03
+    CLOSE_HOP_S      = 0.015
+    CLOSE_MIN_RUN    = 3      # Fenster in Folge unter Schwelle (>= 45ms);
+                              # Einzelfenster (< 30ms) sind Nulldurchgaenge
+    SPLIT_EDGE_S     = 0.5    # keine Schnitte naeher als 0.5s an Anfang/Ende
+    SPLIT_MIN_PART_S = 0.5    # Schnitte enger als 0.5s zusammenfassen
+
     def __init__(self, room_name: str, wav_dir: str):
         self.room_name = room_name
         self.wav_dir   = Path(wav_dir)
@@ -633,6 +675,46 @@ class RoomRecorder:
         return float(np.sqrt(np.mean(audio ** 2)))
 
     @classmethod
+    def _find_squelch_closures(cls, pcm_data: bytes) -> list[float]:
+        """Schnittzeiten (Sekunden ab Chunk-Start) am ENDE jeder Zu-Phase
+        der Rauschsperre -- der naechste Teil beginnt dann mit dem
+        Oeffnen der Rauschsperre fuer den naechsten Sprecher. Leer, wenn
+        keine Schliessung im Inneren liegt (siehe Kommentar bei
+        CLOSE_RMS_RAW)."""
+        audio = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float64)
+        sr  = cls.SAMPLE_RATE
+        win = int(cls.CLOSE_WIN_S * sr)
+        hop = int(cls.CLOSE_HOP_S * sr)
+        n   = (len(audio) - win) // hop + 1
+        if n < cls.CLOSE_MIN_RUN + 2:
+            return []
+        dur = len(audio) / sr
+        rms = np.sqrt(np.mean(
+            np.lib.stride_tricks.as_strided(
+                audio, shape=(n, win), strides=(audio.strides[0] * hop, audio.strides[0])) ** 2,
+            axis=1))
+        low = rms < cls.CLOSE_RMS_RAW
+        cuts = []
+        i = 0
+        while i < n:
+            if low[i]:
+                j = i
+                while j < n and low[j]:
+                    j += 1
+                if j - i >= cls.CLOSE_MIN_RUN:
+                    cuts.append((j * hop + win) / sr)
+                i = j
+            else:
+                i += 1
+        cuts = [c for c in cuts if cls.SPLIT_EDGE_S < c < dur - cls.SPLIT_EDGE_S]
+        merged: list[float] = []
+        for c in cuts:
+            if merged and c - merged[-1] < cls.SPLIT_MIN_PART_S:
+                continue
+            merged.append(c)
+        return merged
+
+    @classmethod
     def _clean_audio(cls, pcm_data: bytes, room_name: str = "", callsign: str = "") -> bytes:
         """Bandpass (Sprachband) + sanfte Normalisierung vor dem Schreiben.
 
@@ -681,6 +763,35 @@ class RoomRecorder:
             return pcm_data
 
     def _save(self, pcm_data: bytes, callsign: str, ts: float):
+        """Zerlegt den Chunk an Schliessungen der Rauschsperre (siehe
+        _find_squelch_closures) und schreibt jeden Teil einzeln. Ohne Fund
+        genau ein Teil -- identisches Verhalten wie vor 2026-09-11."""
+        cuts = []
+        if self.SPLIT_ON_CLOSURE:
+            try:
+                cuts = self._find_squelch_closures(pcm_data)
+            except Exception as e:
+                log.warning("[%s] Rauschsperren-Analyse fehlgeschlagen, speichere ungeteilt: %s",
+                            self.room_name, e)
+                cuts = []
+        bytes_per_s = self.SAMPLE_RATE * self.SAMPLE_WIDTH
+        # Schnitt auf Sample-Grenze (2 Byte) runden
+        offsets = [0] + [int(c * self.SAMPLE_RATE) * self.SAMPLE_WIDTH for c in cuts] + [len(pcm_data)]
+        if cuts:
+            log.info("[%s] Chunk (%.1fs) an %d Rauschsperre-Schliessungen zerlegt -> %d Teile: %s",
+                     self.room_name, len(pcm_data) / bytes_per_s, len(cuts), len(cuts) + 1,
+                     ", ".join(f"{c:.1f}s" for c in cuts))
+        for k in range(len(offsets) - 1):
+            part = pcm_data[offsets[k]:offsets[k + 1]]
+            if len(offsets) > 2:
+                rms = self._rms(part)
+                if rms < self.NOISE_RMS_THRESHOLD:
+                    log.debug("[%s] Teil %d nur Rauschen (RMS=%.0f < %.0f) — verworfen",
+                              self.room_name, k + 1, rms, self.NOISE_RMS_THRESHOLD)
+                    continue
+            self._write_wav_meta(part, callsign, ts + offsets[k] / bytes_per_s)
+
+    def _write_wav_meta(self, pcm_data: bytes, callsign: str, ts: float):
         from datetime import datetime
         dt   = datetime.fromtimestamp(ts)
         # Raum in den Dateinamen aufnehmen: alle Raum-Dienste schreiben ins
