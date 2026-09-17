@@ -324,7 +324,8 @@ def _dedupe_cascade(text: str) -> str:
     return " ".join(p for p, d in zip(parts, flags) if not d).strip()
 
 
-def _transcribe_remote(wav_path: str, url: str, language: str) -> str:
+def _transcribe_remote(wav_path: str, url: str, language: str,
+                       messwerte: dict | None = None) -> str:
     """Schickt WAV per multipart/form-data an den Remote-Whisper-Server."""
     import urllib.request
     boundary = "----FRNWhisperBoundary"
@@ -369,6 +370,10 @@ def _transcribe_remote(wav_path: str, url: str, language: str) -> str:
     # bekommen statt garantiert zu scheitern.
     with urllib.request.urlopen(req, timeout=280) as resp:
         result = json.loads(resp.read())
+    if messwerte is not None:
+        for schluessel in ("avg_logprob", "no_speech_prob", "model"):
+            if result.get(schluessel) is not None:
+                messwerte[schluessel] = result[schluessel]
     text = _strip_char_repeat_garbage(result.get("text", "").strip())
     text = _remove_repetitions(text)
     text = _collapse_phrase_repeats(text)
@@ -484,6 +489,17 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
     return text
 
 
+# Grenzen fuer Whispers eigenes Sicherheitsmass avg_logprob, kalibriert an
+# large-v3 mit dem 8-kHz-Funkmaterial (Stichprobe 30 Aufnahmen, 2026-09-17):
+# klar verstaendliche Sprueche lagen bei -0.20 bis -0.45, erkennbarer Murks
+# ("In der Sued-Sued-Bus-Bus-Bus", "One, two, three, go") bei -0.64 bis -0.74.
+# Dazwischen ist das Mass allein nicht eindeutig -- nur dort lohnt der teure
+# Kontroll-Lauf mit veraendertem Tempo. Ausserhalb des Bandes wird er
+# gespart, das ist gut die Haelfte aller Aufnahmen.
+LOGPROB_SICHER   = -0.40    # darueber: verstanden, kein zweiter Lauf
+LOGPROB_GERATEN  = -0.90    # darunter: geraten, kein zweiter Lauf noetig
+
+
 async def _tempo_variante(wav_path: str, tempo: float = 1.03) -> str | None:
     """Rendert eine minimal schneller abgespielte Kopie fuer den Kontroll-Lauf.
 
@@ -562,21 +578,28 @@ def _is_remote_available(url: str) -> bool:
         return False
 
 
-def _transcribe_sync(wav_path: str, model_size: str, language: str) -> str:
+def _transcribe_sync(wav_path: str, model_size: str, language: str,
+                     messwerte: dict | None = None) -> str:
     """Remote-API wenn konfiguriert, sonst lokales Modell."""
     remote_url = _get_whisper_remote_url()
     if remote_url:
-        return _transcribe_remote(wav_path, remote_url, language)
+        return _transcribe_remote(wav_path, remote_url, language, messwerte)
     return _transcribe_local(wav_path, model_size, language)
 
 
 async def transcribe_wav(wav_path: str, model_size: str = "medium",
-                         language: str = "de") -> str:
-    """Transkribiert eine WAV-Datei via faster-whisper (CPU, non-blocking)."""
+                         language: str = "de",
+                         messwerte: dict | None = None) -> str:
+    """Transkribiert eine WAV-Datei via faster-whisper (CPU, non-blocking).
+
+    In messwerte legt der Remote-Weg avg_logprob und no_speech_prob ab, sofern
+    der Dienst sie mitliefert (aeltere Fassungen tun das nicht -- dann bleibt
+    das Dict leer und der Aufrufer faellt auf den Kontroll-Lauf zurueck).
+    """
     async with _whisper_lock:           # nie zwei Inferenzen gleichzeitig
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, _transcribe_sync, wav_path, model_size, language
+            None, _transcribe_sync, wav_path, model_size, language, messwerte
         )
 
 
@@ -848,8 +871,9 @@ class TranscriptionPipeline:
                         await asyncio.sleep(30)
                 try:
                     _t0 = time.time()
+                    messwerte = {}
                     text = await asyncio.wait_for(
-                        transcribe_wav(wav_path, model_size, language),
+                        transcribe_wav(wav_path, model_size, language, messwerte),
                         timeout=300.0
                     )
                     _wdt = time.time() - _t0
@@ -865,14 +889,41 @@ class TranscriptionPipeline:
                     log.info("[%s] Whisper: %.1fs", room, _wdt)
                     if dbg:
                         dbg(room, ts, "Whisper", "ok", _wdt, text[:200])
-                    # Kontroll-Lauf (2026-09-17): zweiter Durchlauf mit
-                    # 3 % schnellerem Audio (siehe _tempo_variante). Die
-                    # Uebereinstimmung beider Texte landet als confidence im
-                    # Archiv und haelt Robert davon ab, auf Rateergebnisse zu
-                    # antworten. Aussagekraft ist einseitig: ein niedriger
-                    # Wert heisst zuverlaessig "geraten", ein hoher Wert ist
-                    # keine Garantie fuer Richtigkeit.
-                    if text.strip() and remote_url and _dur_s >= 1.5:
+                    # Wie verlaesslich ist dieses Transkript? (2026-09-17)
+                    # Whisper liefert bei unverstaendlichem Funk keinen leeren
+                    # Text, sondern einen erfundenen -- der sieht wie Sprache
+                    # aus. Zwei Masse trennen "gehoert" von "geraten":
+                    #   1. avg_logprob vom Dienst selbst, kostenlos, entscheidet
+                    #      ausserhalb des Graubereichs allein;
+                    #   2. im Graubereich ein zweiter Durchlauf mit 3 %
+                    #      schnellerem Audio (_tempo_variante) -- geratene
+                    #      Ergebnisse kippen dabei, verstandene bleiben stehen.
+                    # Beides landet als confidence (0..1) im Archiv und haelt
+                    # Robert von Antworten auf Rateergebnisse ab. Die Aussage
+                    # ist einseitig: ein niedriger Wert heisst zuverlaessig
+                    # "geraten", ein hoher ist keine Garantie fuer Richtigkeit.
+                    logprob = messwerte.get("avg_logprob")
+                    if logprob is not None and text.strip():
+                        # Whispers eigenes Mass ist gratis und braucht keinen
+                        # zweiten GPU-Lauf -- es entscheidet ausserhalb des
+                        # Graubereichs allein.
+                        if logprob >= LOGPROB_SICHER:
+                            confidence = 1.0
+                        elif logprob <= LOGPROB_GERATEN:
+                            confidence = 0.0
+                        log.info("[%s] avg_logprob %.2f%s", room, logprob,
+                                 "" if confidence is None else
+                                 (" -- verstanden" if confidence else
+                                  " -- geraten, keine Bot-Antwort"))
+                        if dbg:
+                            dbg(room, ts, "Sicherheit",
+                                "warn" if confidence == 0.0 else "ok", 0.0,
+                                f"avg_logprob {logprob:.2f}" + (
+                                    "" if confidence is None
+                                    else (" -- verstanden" if confidence
+                                          else " -- geraten")))
+                    if (text.strip() and remote_url and _dur_s >= 1.5
+                            and confidence is None):
                         _var = None
                         try:
                             _t1 = time.time()
