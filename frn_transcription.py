@@ -9,7 +9,9 @@ import asyncio
 import difflib
 import json
 import logging
+import os
 import re as _re
+import tempfile
 import time
 import wave
 import numpy as np
@@ -172,6 +174,20 @@ def _get_whisper_initial_prompt() -> str:
         return ""
 
 
+def _get_whisper_hotwords() -> str:
+    """Namen/Begriffe, die Whisper bevorzugt erkennen soll (faster-whisper).
+
+    Die Rufnamen der Runde sind der haeufigste Erkennungsfehler; sie stehen
+    weder im Standardwortschatz noch im initial_prompt.
+    """
+    try:
+        cfg_path = Path(__file__).parent / "config.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        return cfg.get("whisper", {}).get("hotwords", "").strip()
+    except Exception:
+        return ""
+
+
 def _remove_repetitions(text: str) -> str:
     """Entfernt Whisper-typische Halluzinations-Wiederholungen wie 'ja, ja, ja'."""
     text = _re.sub(r'\b(\w+)(?:[,.]?\s+\1){2,}\b', r'\1', text, flags=_re.IGNORECASE)
@@ -314,16 +330,30 @@ def _transcribe_remote(wav_path: str, url: str, language: str) -> str:
     boundary = "----FRNWhisperBoundary"
     with open(wav_path, "rb") as f:
         wav_data = f.read()
+    # Neben Datei und Sprache gehen initial_prompt und hotwords mit, sobald
+    # sie konfiguriert sind. Der aktuelle Dienst auf der GPU-Box (Flask, nur
+    # /transcribe und /health) wertet sie noch nicht aus und ignoriert
+    # unbekannte Formularfelder stillschweigend -- schaden also nicht und
+    # wirken in dem Moment, in dem der Dienst sie annimmt (2026-09-17).
+    felder = [("language", language)]
+    _prompt = _get_whisper_initial_prompt()
+    if _prompt:
+        felder.append(("initial_prompt", _prompt))
+    _hot = _get_whisper_hotwords()
+    if _hot:
+        felder.append(("hotwords", _hot))
     body = (
         f"--{boundary}\r\n"
         f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
         f"Content-Type: audio/wav\r\n\r\n"
-    ).encode() + wav_data + (
-        f"\r\n--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="language"\r\n\r\n'
-        f"{language}\r\n"
-        f"--{boundary}--\r\n"
-    ).encode()
+    ).encode() + wav_data
+    for name, wert in felder:
+        body += (
+            f"\r\n--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            f"{wert}"
+        ).encode()
+    body += f"\r\n--{boundary}--\r\n".encode()
     req = urllib.request.Request(
         url, data=body,
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
@@ -406,13 +436,32 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
         "♪", "♫", "musik", "[musik]", "[applaus]", "[gelächter]",
         "[stille]", "(stille)", "[no audio]",
     }
-    segments, _ = _local_model.transcribe(
-        audio, language=language, beam_size=5,
-        condition_on_previous_text=False,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 200},
-        no_speech_threshold=0.8,
-    )
+    # Prompt und Rufnamen auch lokal mitgeben -- der Remote-Weg schickt sie
+    # ebenfalls mit (dort wertet der Dienst sie derzeit noch nicht aus).
+    _extra = {}
+    if _get_whisper_initial_prompt():
+        _extra["initial_prompt"] = _get_whisper_initial_prompt()
+    if _get_whisper_hotwords():
+        _extra["hotwords"] = _get_whisper_hotwords()
+    try:
+        segments, _ = _local_model.transcribe(
+            audio, language=language, beam_size=5,
+            condition_on_previous_text=False,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 200},
+            no_speech_threshold=0.8,
+            **_extra,
+        )
+    except TypeError:   # aeltere faster-whisper-Version ohne hotwords
+        _extra.pop("hotwords", None)
+        segments, _ = _local_model.transcribe(
+            audio, language=language, beam_size=5,
+            condition_on_previous_text=False,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 200},
+            no_speech_threshold=0.8,
+            **_extra,
+        )
     HALLUCINATION_SUBSTRINGS = (
         "untertitel", "untertitelung", "zdf 20", "ndr 20", "ard 20",
         "wdr 20", "mdr 20", "br 20",
@@ -433,6 +482,47 @@ def _transcribe_local(wav_path: str, model_size: str, language: str) -> str:
         log.info("Lokales Transkript als Englisch-Halluzination verworfen (Sprache war %s): %.80s", language, text)
         return ""
     return text
+
+
+async def _tempo_variante(wav_path: str, tempo: float = 1.03) -> str | None:
+    """Rendert eine minimal schneller abgespielte Kopie fuer den Kontroll-Lauf.
+
+    Ein zweiter Lauf mit *derselben* Datei ist wertlos: der Whisper-Dienst
+    antwortet auf 8-kHz-Material deterministisch -- dreimal dieselbe Datei
+    ergab dreimal exakt denselben (teils komplett geratenen) Text, also immer
+    100 % "Uebereinstimmung". Erst eine leichte Stoerung deckt auf, ob das
+    Modell wirklich etwas gehoert hat: 3 % Tempo aendert die Mel-Frames genug,
+    dass unsichere Dekodierungen kippen, verstaendliche Sprache aber stabil
+    bleibt (Stichprobe 30 Clips: Median 93 %, die drei Ausreisser unter 35 %
+    waren durchweg Halluzinationen). Eine Pegelaenderung reicht nicht --
+    Whisper normalisiert intern ohnehin.
+    """
+    out = os.path.join(tempfile.gettempdir(),
+                       f"frn-konf-{os.getpid()}-{int(time.time()*1000)}.wav")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-loglevel", "error", "-i", wav_path,
+            "-af", f"atempo={tempo}", "-ar", "8000", "-ac", "1", out,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, err = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+        if proc.returncode != 0 or not os.path.exists(out):
+            log.debug("Kontroll-Variante fehlgeschlagen: %s", err[:200] if err else "?")
+            _unlink(out)
+            return None
+        return out
+    except Exception as e:
+        log.debug("Kontroll-Variante fehlgeschlagen: %r", e)
+        _unlink(out)
+        return None
+
+
+def _unlink(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def _mark_archived(wav_path: str) -> None:
@@ -718,6 +808,7 @@ class TranscriptionPipeline:
         except Exception:
             pass
         text = (rkt(room, ts, dur_s) if rkt else None) or ""
+        confidence = None      # Uebereinstimmung zweier Whisper-Laeufe (0..1)
         if text:
             log.info("[%s] Bekannter Bot-Text übernommen (kein Whisper nötig)", room)
             if dbg:
@@ -774,6 +865,35 @@ class TranscriptionPipeline:
                     log.info("[%s] Whisper: %.1fs", room, _wdt)
                     if dbg:
                         dbg(room, ts, "Whisper", "ok", _wdt, text[:200])
+                    # Kontroll-Lauf (2026-09-17): zweiter Durchlauf mit
+                    # 3 % schnellerem Audio (siehe _tempo_variante). Die
+                    # Uebereinstimmung beider Texte landet als confidence im
+                    # Archiv und haelt Robert davon ab, auf Rateergebnisse zu
+                    # antworten. Aussagekraft ist einseitig: ein niedriger
+                    # Wert heisst zuverlaessig "geraten", ein hoher Wert ist
+                    # keine Garantie fuer Richtigkeit.
+                    if text.strip() and remote_url and _dur_s >= 1.5:
+                        _var = None
+                        try:
+                            _t1 = time.time()
+                            _var = await _tempo_variante(wav_path)
+                            if _var is None:
+                                raise RuntimeError("keine Kontroll-Variante")
+                            kontrolle = await asyncio.wait_for(
+                                transcribe_wav(_var, model_size, language), timeout=120.0)
+                            confidence = difflib.SequenceMatcher(
+                                None, text.lower(), kontrolle.lower(), autojunk=False).ratio()
+                            log.info("[%s] Kontroll-Lauf: %.1fs, Uebereinstimmung %.0f%%%s",
+                                     room, time.time() - _t1, 100 * confidence,
+                                     "" if confidence >= 0.8 else "  -- unsicher, Whisper raet")
+                            if dbg:
+                                dbg(room, ts, "Kontrolle",
+                                    "ok" if confidence >= 0.8 else "warn", time.time() - _t1,
+                                    f"Uebereinstimmung {100 * confidence:.0f}%: {kontrolle[:150]}")
+                        except Exception as e:
+                            log.debug("[%s] Kontroll-Lauf fehlgeschlagen: %s", room, e)
+                        finally:
+                            _unlink(_var)
                     break  # Erfolg
                 except asyncio.TimeoutError:
                     log.warning("[%s] Whisper-Timeout für %s", room, Path(wav_path).name)
@@ -840,13 +960,13 @@ class TranscriptionPipeline:
         cb = getattr(self, "on_transcript", None)
         if cb:
             try:
-                asyncio.create_task(cb(room, callsign, text, ts))
+                asyncio.create_task(cb(room, callsign, text, ts, confidence))
             except Exception as e:
                 log.debug("on_transcript-Hook: %s", e)
 
         try:
             from frn_archive import add_entry
-            if await add_entry(wav_path, room, callsign, ts, text):
+            if await add_entry(wav_path, room, callsign, ts, text, confidence):
                 _mark_archived(wav_path)
         except Exception as e:
             log.warning("[%s] Archiv-Fehler: %s", room, e)

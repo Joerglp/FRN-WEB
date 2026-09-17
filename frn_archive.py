@@ -44,7 +44,10 @@ def init_db():
                 text        TEXT    NOT NULL DEFAULT '',
                 audio_file  TEXT    NOT NULL DEFAULT '', -- Dateiname in AUDIO_DIR
                 duration_s  REAL    NOT NULL DEFAULT 0,
-                wav_source  TEXT    NOT NULL DEFAULT ''  -- Original-WAV-Pfad (Referenz)
+                wav_source  TEXT    NOT NULL DEFAULT '', -- Original-WAV-Pfad (Referenz)
+                confidence  REAL    DEFAULT NULL         -- Uebereinstimmung zweier
+                                                         -- Whisper-Laeufe (0..1),
+                                                         -- NULL = nicht geprueft
             )
         """)
         conn.execute("""
@@ -161,6 +164,7 @@ async def add_entry(
     callsign: str,
     timestamp: float,
     text: str,
+    confidence: float | None = None,
 ) -> int | None:
     """
     Konvertiert WAV → Opus und speichert Eintrag in DB.
@@ -198,9 +202,10 @@ async def add_entry(
         with _get_conn() as conn:
             cur = conn.execute(
                 """INSERT INTO transmissions
-                   (timestamp, room, callsign, text, audio_file, duration_s, wav_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (timestamp, room, callsign, text, filename, duration, wav_path)
+                   (timestamp, room, callsign, text, audio_file, duration_s, wav_source,
+                    confidence)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (timestamp, room, callsign, text, filename, duration, wav_path, confidence)
             )
             entry_id = cur.lastrowid
         log.debug("Archiv-Eintrag #%d: [%s] %s → %s", entry_id, room, callsign, filename)
@@ -216,6 +221,7 @@ def add_entry_sync(
     callsign: str,
     timestamp: float,
     text: str,
+    confidence: float | None = None,
 ) -> int | None:
     """Synchrone Version für Batch-Verarbeitung. None bei Fehler (auch bei
     Datei-I/O-Problemen bei der Dateinamens-Reservierung, nicht nur bei der
@@ -243,9 +249,10 @@ def add_entry_sync(
         with _get_conn() as conn:
             cur = conn.execute(
                 """INSERT INTO transmissions
-                   (timestamp, room, callsign, text, audio_file, duration_s, wav_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (timestamp, room, callsign, text, filename, duration, wav_path)
+                   (timestamp, room, callsign, text, audio_file, duration_s, wav_source,
+                    confidence)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (timestamp, room, callsign, text, filename, duration, wav_path, confidence)
             )
             return cur.lastrowid
     except Exception as e:

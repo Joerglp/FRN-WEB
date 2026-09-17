@@ -1494,6 +1494,10 @@ audio {
           <label>Anruf nach Funkstille (Sek.) <span style="color:var(--muted)">— 0 = aus</span></label>
           <input type="number" id="bot-silencecall" min="0" max="86400" placeholder="300" autocomplete="off">
         </div>
+        <div class="form-field" style="flex:0 0 190px">
+          <label>Mindest-Verständlichkeit (%) <span style="color:var(--muted)">— 0 = Prüfung aus</span></label>
+          <input type="number" id="bot-minconf" min="0" max="100" step="5" placeholder="65" autocomplete="off">
+        </div>
         <div class="form-field" style="flex:0 0 130px">
           <label>Verlaufslänge <span style="color:var(--muted)">— Durchgänge</span></label>
           <input type="number" id="bot-historylen" min="1" max="30" placeholder="10" autocomplete="off">
@@ -3525,8 +3529,16 @@ function rbZeile(x, farbe) {
   const ton  = x.audio_file
     ? `<a href="/api/archive/audio/${encodeURIComponent(x.audio_file)}" target="_blank"
           style="color:var(--muted);text-decoration:none" title="anhören">▶</a> ` : "";
+  // Kontroll-Lauf: zweiter Whisper-Durchgang mit leicht verändertem Tempo.
+  // Niedrige Werte heißen zuverlässig "geraten"; hohe sind keine Garantie.
+  let konf = "";
+  if (x.confidence != null) {
+    const pz = Math.round(x.confidence * 100);
+    const f  = pz >= 80 ? "var(--muted)" : (pz >= 65 ? "#c8a020" : "#c05050");
+    konf = ` <span style="color:${f};font-size:.62rem" title="Übereinstimmung zweier Whisper-Läufe — unter 65 % rät das Modell">${pz}%</span>`;
+  }
   return `<div style="padding:2px 0;color:${farbe}">
-    <span style="color:var(--muted)">${zeit}</span> ${ton}<b>${wer}</b>: ${esc(x.text || "—")}
+    <span style="color:var(--muted)">${zeit}</span> ${ton}<b>${wer}</b>: ${esc(x.text || "—")}${konf}
     <button class="btn-save" style="padding:1px 6px;font-size:.62rem;margin-left:6px"
             onclick="compareTranscript(${x.id}, this, false)" title="dreimal über die GPU-Box — deckt Rateversuche auf">PRÜFEN</button>
     <button class="btn-save" style="padding:1px 6px;font-size:.62rem;margin-left:3px"
@@ -4105,6 +4117,7 @@ async function loadBotAdmin() {
     document.getElementById("bot-maxage").value       = d.max_transcript_age_s ?? 120;
     document.getElementById("bot-repeatblock").value  = d.repeat_block_s ?? 3600;
     document.getElementById("bot-silencecall").value  = d.silence_call_threshold_s ?? 300;
+    document.getElementById("bot-minconf").value      = Math.round((d.min_confidence ?? 0.65) * 100);
     document.getElementById("bot-historylen").value   = d.history_len ?? 10;
     document.getElementById("bot-rooms").value     = (d.rooms || []).join(", ");
     document.getElementById("bot-provider").value  = d.provider || "ollama";
@@ -4290,6 +4303,7 @@ async function saveBotAdmin() {
     max_transcript_age_s:  parseFloat(document.getElementById("bot-maxage").value) || 120,
     repeat_block_s:        parseFloat(document.getElementById("bot-repeatblock").value) || 3600,
     silence_call_threshold_s: parseFloat(document.getElementById("bot-silencecall").value) || 0,
+    min_confidence:        (parseFloat(document.getElementById("bot-minconf").value) || 0) / 100,
     history_len:           parseFloat(document.getElementById("bot-historylen").value) || 10,
     rooms:                 document.getElementById("bot-rooms").value,
     provider:              document.getElementById("bot-provider").value,

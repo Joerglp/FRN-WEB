@@ -1338,7 +1338,7 @@ class TXServer:
     # ── Auto-Antwort bei Namensnennung ─────────────────────────────────────
 
     async def on_transcript(self, room_name: str, callsign: str,
-                            text: str, ts: float):
+                            text: str, ts: float, confidence: float | None = None):
         """Von der Transkriptions-Pipeline nach jedem Transkript gerufen.
 
         Prüft die Automatik jedes Benutzers (eigene Trigger-Wörter, eigene
@@ -1361,6 +1361,17 @@ class TXServer:
 
             # KI-Funker beobachtet jeden Durchgang (unabhängig von der
             # Namens-Automatik) und antwortet ggf. selbstständig.
+            # Geratene Transkripte nicht beantworten (2026-09-17): der
+            # Kontroll-Lauf in frn_transcription vergleicht zwei Whisper-
+            # Durchgaenge; weichen sie stark ab, hat das Modell geraten und
+            # der Text ist bedeutungslos -- der Kauderwelsch-Filter faengt das
+            # nicht, weil solche Saetze durchaus deutsche Woerter enthalten.
+            _minconf = float(self._bot_cfg().get("min_confidence", 0.65))
+            if confidence is not None and _minconf > 0 and confidence < _minconf:
+                self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                      detail=f"Transkript unsicher ({100 * confidence:.0f}% "
+                                             "Uebereinstimmung) -- keine Antwort", final=True)
+                return
             try:
                 self._bot_observe(room, room_name, callsign, text, ts, low)
             except Exception as e:
@@ -1587,6 +1598,11 @@ class TXServer:
         "repeat_block_s": 3600,
         # Ab so viel Funkstille zaehlt fast jeder Spruch als allgemeiner Anruf.
         "silence_call_threshold_s": 300,
+        # Mindest-Uebereinstimmung der beiden Whisper-Laeufe (0..1), ab der
+        # ein Transkript als "gehoert" statt "geraten" gilt. Stichprobe vom
+        # 2026-09-17 ueber 30 Aufnahmen: Median 93 %, alles unter 65 % war
+        # Halluzination ("Beheufe, Beheufe", "this is the police department").
+        "min_confidence": 0.65,
         # Ollama-Kontextfenster (num_ctx) -- muss zu dem passen, mit dem
         # andere Clients (z.B. Open WebUI) dasselbe Modell laden, sonst
         # erzwingt jede Abweichung einen kompletten Neu-Load (~10-15s),
@@ -3817,7 +3833,8 @@ class TXServer:
                             ("repeat_block_s", 86400),        # Wiederholungssperre
                             ("silence_call_threshold_s", 86400),
                             ("ollama_num_ctx", 262144),   # Modell-Max laut /api/tags
-                            ("ollama_num_predict", 4096)):
+                            ("ollama_num_predict", 4096),
+                            ("min_confidence", 1.0)):   # 0 = Pruefung aus
                 if key in body:
                     try:
                         bot[key] = max(0, min(hi, float(body[key])))
@@ -4747,7 +4764,7 @@ class TXServer:
             for r in rows:
                 def _umfeld(a, b, grenze):
                     res = conn.execute(
-                        "SELECT id,timestamp,callsign,text,audio_file,duration_s "
+                        "SELECT id,timestamp,callsign,text,audio_file,duration_s,confidence "
                         "FROM transmissions WHERE room=? AND timestamp>=? AND timestamp<? "
                         "AND id<>? ORDER BY timestamp", (r["room"], a, b, r["id"])).fetchall()
                     return [dict(x) for x in res][-grenze:] if grenze else [dict(x) for x in res]
