@@ -488,6 +488,24 @@ audio {
 .admin-tab-content { display: none; padding: 20px; }
 .admin-tab-content.active { display: block; }
 
+/* Unter-Tabs im KI-Funker (2026-09-16): der Tab war mit sieben Themen
+   untereinander der laengste im Panel. IDs der Felder bleiben unveraendert,
+   damit Laden/Speichern weiter funktionieren. */
+.bot-subtabs {
+  display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+.bot-subtab {
+  padding: 6px 10px; background: none; border: none;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.64em; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent;
+}
+.bot-subtab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.bot-subtab:hover:not(.active) { color: var(--text); }
+.bot-subtab-content { display: none; }
+.bot-subtab-content.active { display: block; }
+
 /* Admin tables */
 .admin-table {
   width: 100%; border-collapse: collapse; margin-bottom: 20px;
@@ -1126,6 +1144,7 @@ audio {
       <button class="admin-tab" data-tab="server"    onclick="showAdminTab('server')">SERVER</button>
       <button class="admin-tab" data-tab="autoreply" onclick="showAdminTab('autoreply')">AUTOMATIK</button>
       <button class="admin-tab" data-tab="bot"       onclick="showAdminTab('bot')">KI-FUNKER</button>
+      <button class="admin-tab" data-tab="robert"    onclick="showAdminTab('robert')">ROBERT-ANALYSE</button>
       <button class="admin-tab" data-tab="crosslink" onclick="showAdminTab('crosslink')">CROSSLINK</button>
       <button class="admin-tab" data-tab="debug"     onclick="showAdminTab('debug')">DEBUG</button>
     </div>
@@ -1414,6 +1433,7 @@ audio {
     </div>
 
     <!-- ── KI-Funker tab ── -->
+    <!-- ── KI-Funker tab ── -->
     <div id="admin-tab-bot" class="admin-tab-content">
       <div class="admin-section-title">KI-Funker</div>
       <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:12px;line-height:1.5">
@@ -1423,33 +1443,74 @@ audio {
         er mitten in einem Gespräch steckt. Ob er wirklich gemeint ist, entscheidet
         das KI-Modell — auf Nachfrage gibt er ehrlich zu, ein Roboter zu sein.
       </div>
-
+      <div class="bot-subtabs">
+        <button class="bot-subtab active" data-bsub="verhalten" onclick="showBotSubTab('verhalten')">VERHALTEN</button>
+        <button class="bot-subtab" data-bsub="sprache" onclick="showBotSubTab('sprache')">SPRACHE</button>
+        <button class="bot-subtab" data-bsub="stimme" onclick="showBotSubTab('stimme')">SPRACHAUSGABE</button>
+        <button class="bot-subtab" data-bsub="modell" onclick="showBotSubTab('modell')">MODELL</button>
+        <button class="bot-subtab" data-bsub="memory" onclick="showBotSubTab('memory')">GEDÄCHTNIS</button>
+        <button class="bot-subtab" data-bsub="test" onclick="showBotSubTab('test')">TROCKENTEST</button>
+      </div>
+      <div id="bot-sub-verhalten" class="bot-subtab-content active">
+        <div class="form-grid">
       <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer">
-        <input type="checkbox" id="bot-enabled" style="accent-color:#f0b429">
+        <input type="checkbox" id="bot-enabled" style="accent-color:#f0b429" autocomplete="off">
         ⚠ KI-Funker aktiv — antwortet <b>ohne Freigabe</b> über Funk
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer">
+        <input type="checkbox" id="bot-only-addressed" style="accent-color:#f0b429" autocomplete="off">
+        Nur auf Ansprache — meldet sich <b>ausschließlich</b>, wenn sein Name fällt
       </label>
       <div style="font-size:.72rem;color:var(--text-muted);margin:0 0 14px 24px;line-height:1.4">
         Cooldown und Selbst-Erkennung (eigenes Echo) laufen automatisch mit.
       </div>
-
       <div class="form-grid">
         <div class="form-field" style="flex:1">
           <label>Name</label>
-          <input type="text" id="bot-name" placeholder="Robert">
+          <input type="text" id="bot-name" placeholder="Robert" autocomplete="off">
         </div>
         <div class="form-field" style="flex:2">
           <label>Zusätzliche Trigger-Wörter (Komma-getrennt)</label>
-          <input type="text" id="bot-trigger" placeholder="roboter, funk-roboter">
+          <input type="text" id="bot-trigger" placeholder="roboter, funk-roboter" autocomplete="off">
         </div>
       </div>
-
+        <div class="form-field" style="flex:0 0 110px">
+          <label>Cooldown (Sek.)</label>
+          <input type="number" id="bot-cooldown" min="0" max="3600" placeholder="20" autocomplete="off">
+        </div>
+        <div class="form-field" style="flex:0 0 160px">
+          <label>Gesprächsfenster (Sek.)</label>
+          <input type="number" id="bot-convwin" min="0" max="3600" placeholder="180" autocomplete="off">
+        </div>
+        <div class="form-field" style="flex:0 0 150px">
+          <label>Rückstau-Bremse (Sek.) <span style="color:var(--muted)">— ältere Durchsagen nicht beantworten</span></label>
+          <input type="number" id="bot-maxage" min="0" max="3600" placeholder="120" autocomplete="off">
+        </div>
+        <div class="form-field" style="flex:0 0 150px">
+          <label>Wiederholungssperre (Sek.) <span style="color:var(--muted)">— gleiche Antwort erst danach wieder</span></label>
+          <input type="number" id="bot-repeatblock" min="0" max="86400" placeholder="3600" autocomplete="off">
+        </div>
+        <div class="form-field" style="flex:0 0 170px">
+          <label>Anruf nach Funkstille (Sek.) <span style="color:var(--muted)">— 0 = aus</span></label>
+          <input type="number" id="bot-silencecall" min="0" max="86400" placeholder="300" autocomplete="off">
+        </div>
+        <div class="form-field" style="flex:0 0 130px">
+          <label>Verlaufslänge <span style="color:var(--muted)">— Durchgänge</span></label>
+          <input type="number" id="bot-historylen" min="1" max="30" placeholder="10" autocomplete="off">
+        </div>
+        <div class="form-field" style="flex:2">
+          <label>Nur diese Räume (Komma-getrennt, leer = alle)</label>
+          <input type="text" id="bot-rooms" placeholder="quasel" autocomplete="off">
+        </div>
+        </div>
+      </div>
+      <div id="bot-sub-sprache" class="bot-subtab-content">
       <div class="form-field" style="margin-top:8px">
         <label>Persona (wer ist der Bot?)</label>
         <textarea id="bot-persona" rows="3" style="width:100%;resize:vertical;
           background:var(--panel);color:var(--text);border:1px solid var(--border);
-          border-radius:6px;padding:8px 10px;font-family:inherit;font-size:.85em"></textarea>
+          border-radius:6px;padding:8px 10px;font-family:inherit;font-size:.85em" autocomplete="off"></textarea>
       </div>
-
       <details style="margin-top:8px">
         <summary style="cursor:pointer;font-size:.82rem;color:var(--accent);padding:4px 0">
           ⚙ System-Anweisung (für Fortgeschrittene) — steuert Roberts komplettes Verhalten
@@ -1458,68 +1519,89 @@ audio {
           <label>Anweisung fürs Modell — Platzhalter <code>{name}</code> und <code>{persona}</code> werden eingesetzt. Leer = Standard.</label>
           <textarea id="bot-system-prompt" rows="12" style="width:100%;resize:vertical;
             background:var(--panel);color:var(--text);border:1px solid var(--border);
-            border-radius:6px;padding:8px 10px;font-family:'Share Tech Mono',monospace;font-size:.8em;line-height:1.5"></textarea>
+            border-radius:6px;padding:8px 10px;font-family:'Share Tech Mono',monospace;font-size:.8em;line-height:1.5" autocomplete="off"></textarea>
           <div style="font-size:.72rem;color:var(--muted);margin-top:4px;line-height:1.4">
             ⚠ Die Zeile mit dem Wort <b>SKIP</b> nicht entfernen — sonst funkt Robert in jeden Durchgang, statt nur wenn er gemeint ist.
           </div>
         </div>
       </details>
+      </div>
+      <div id="bot-sub-stimme" class="bot-subtab-content">
+        <div class="form-grid">
+          <div class="form-field" style="flex:0 0 240px">
+            <label>Engine <span style="color:var(--muted)">— gilt für alle Stimm-Funktionen</span></label>
+            <select id="tts-engine" onchange="saveTts()" autocomplete="off">
+              <option value="piper">Piper (GPU-Box, schnell)</option>
+              <option value="xtts">XTTS (GPU-Box, geklont)</option>
+              <option value="google">Google (kostenlos, am schnellsten, Standardstimme)</option>
+            </select>
+            <div style="font-size:.68rem;color:var(--accent);margin-top:6px">Änderungen gelten sofort</div>
+          </div>
 
-      <div class="form-grid" style="margin-top:8px">
-        <div class="form-field" style="flex:0 0 220px">
-          <label>Sprachausgabe (TTS) <span style="color:var(--muted)">— gilt für alle Stimm-Funktionen</span></label>
-          <select id="tts-engine" onchange="saveTts()">
-            <option value="piper">Piper (lokal, schnell)</option>
-            <option value="xtts">XTTS (GPU-Box, geklont)</option>
-            <option value="google">Google (kostenlos, am schnellsten, Standardstimme)</option>
-          </select>
-        </div>
-        <div class="form-field" style="flex:2">
-          <label>Stimme / Emotion <span style="color:var(--muted)">(XTTS: Sprecher-ID wie aaron_dreschner · Piper: Emotion wie amused)</span></label>
-          <input type="text" id="bot-speaker" placeholder="damien_black">
-        </div>
-        <div class="form-field" style="flex:0 0 110px">
-          <label>Cooldown (Sek.)</label>
-          <input type="number" id="bot-cooldown" min="0" max="3600" placeholder="20">
-        </div>
-        <div class="form-field" style="flex:0 0 160px">
-          <label>Gesprächsfenster (Sek.)</label>
-          <input type="number" id="bot-convwin" min="0" max="3600" placeholder="180">
+          <div class="form-field" style="flex:1 1 300px">
+            <label>GPU-Box <span style="color:var(--muted)">— Normalbetrieb</span></label>
+            <label style="font-size:.7rem;color:var(--muted);margin-top:2px">Piper
+              <input type="text" id="tts-piper-url" placeholder="http://192.0.0.17:9003/tts"
+                     style="width:100%" onchange="saveTts()" autocomplete="off"></label>
+            <label style="font-size:.7rem;color:var(--muted);margin-top:4px">XTTS (geklonte Stimmen)
+              <input type="text" id="tts-xtts-url" placeholder="http://192.0.0.17:9010/tts"
+                     style="width:100%" onchange="saveTts()" autocomplete="off"></label>
+            <div style="font-size:.68rem;color:var(--accent);margin-top:6px">Änderungen gelten sofort</div>
+          </div>
+
+          <div class="form-field" style="flex:1 1 300px">
+            <label>Rückfallebene <span style="color:var(--muted)">— wenn die GPU-Box nicht antwortet</span></label>
+            <label style="display:flex;align-items:center;gap:8px;margin:2px 0 4px;cursor:pointer;font-size:.78rem">
+              <input type="checkbox" id="tts-fallback-local" onchange="saveTts()" style="accent-color:#f0b429" autocomplete="off">
+              Lokal ausweichen statt schweigen
+            </label>
+            <span style="display:flex;gap:5px">
+              <input type="text"   id="tts-local-host"  placeholder="127.0.0.1" style="flex:2" onchange="saveTts()" title="Host des lokalen Piper (Wyoming)" autocomplete="off">
+              <input type="number" id="tts-local-port"  placeholder="10200" min="1" max="65535" style="flex:1" onchange="saveTts()" title="Port des lokalen Piper (Wyoming)" autocomplete="off">
+            </span>
+            <label style="font-size:.7rem;color:var(--muted);margin-top:4px">Piper-Stimme (nur im Notfall)
+              <select id="tts-local-voice" style="width:100%" onchange="saveTts()" autocomplete="off"></select></label>
+            <div style="font-size:.68rem;color:var(--accent);margin-top:6px">Änderungen gelten sofort</div>
+          </div>
+
+          <div class="form-field" style="flex:1 1 260px">
+            <label>Roberts Stimme <span style="color:var(--muted)">— im Normalbetrieb</span></label>
+            <input type="text" id="bot-speaker" placeholder="damien_black" autocomplete="off">
+            <div style="font-size:.7rem;color:var(--muted);margin-top:4px;line-height:1.35">
+              Bei XTTS die Sprecher-ID (z.&nbsp;B. <code>aaron_dreschner</code>),
+              bei Piper die Stimme bzw. Emotion (z.&nbsp;B. <code>de_de-thorsten-high</code>).
+            </div>
+            <div style="font-size:.68rem;color:var(--amber, #f0b429);margin-top:6px">Erst mit SPEICHERN übernommen</div>
+          </div>
         </div>
       </div>
 
-      <div class="form-grid" style="margin-top:8px">
-        <div class="form-field" style="flex:2">
-          <label>Nur diese Räume (Komma-getrennt, leer = alle)</label>
-          <input type="text" id="bot-rooms" placeholder="quasel">
-        </div>
+      <div id="bot-sub-modell" class="bot-subtab-content">
         <div class="form-field" style="flex:2">
           <label>KI-Anbieter</label>
-          <select id="bot-provider" onchange="updateBotProvider()">
+          <select id="bot-provider" onchange="updateBotProvider()" autocomplete="off">
             <option value="ollama">Lokal / eigener Server (Ollama)</option>
             <option value="gemini">Google Gemini (Cloud, schnell)</option>
           </select>
         </div>
-      </div>
-
       <!-- Ollama-Felder -->
       <div class="prov-ollama">
         <div class="form-grid" style="margin-top:8px">
           <div class="form-field" style="flex:2">
             <label>Ollama-Modell</label>
-            <input type="text" id="bot-model" list="ar-model-list" placeholder="qwen3:14b">
+            <input type="text" id="bot-model" list="ar-model-list" placeholder="qwen3:14b" autocomplete="off">
           </div>
           <div class="form-field" style="flex:2">
             <label>Ollama-Server (URL)</label>
-            <input type="text" id="bot-ollama-url" placeholder="https://webserver.example.de/ollama">
+            <input type="text" id="bot-ollama-url" placeholder="https://webserver.example.de/ollama" autocomplete="off">
           </div>
           <div class="form-field" style="flex:0 0 140px">
             <label>Kontextfenster <span style="color:var(--muted)">(num_ctx)</span></label>
-            <input type="number" id="bot-ollama-numctx" min="0" max="262144" placeholder="30780">
+            <input type="number" id="bot-ollama-numctx" min="0" max="262144" placeholder="30780" autocomplete="off">
           </div>
           <div class="form-field" style="flex:0 0 140px">
             <label>Max. Antwort <span style="color:var(--muted)">(num_predict)</span></label>
-            <input type="number" id="bot-ollama-numpredict" min="0" max="4096" placeholder="150">
+            <input type="number" id="bot-ollama-numpredict" min="0" max="4096" placeholder="150" autocomplete="off">
           </div>
         </div>
         <div class="form-field" style="margin-top:2px;font-size:.72rem;color:var(--muted);line-height:1.4">
@@ -1532,13 +1614,12 @@ audio {
                  placeholder="leer = ohne Token">
         </div>
       </div>
-
       <!-- Gemini-Felder -->
       <div class="prov-gemini">
         <div class="form-grid" style="margin-top:8px">
           <div class="form-field" style="flex:2">
             <label>Gemini-Modell <span style="color:var(--muted)">(technische ID, nicht der Anzeigename!)</span></label>
-            <input type="text" id="bot-gemini-model" list="gemini-model-list" placeholder="gemini-flash-lite-latest">
+            <input type="text" id="bot-gemini-model" list="gemini-model-list" placeholder="gemini-flash-lite-latest" autocomplete="off">
             <datalist id="gemini-model-list"></datalist>
           </div>
           <div class="form-field" style="flex:2">
@@ -1548,7 +1629,8 @@ audio {
           </div>
         </div>
       </div>
-
+      </div>
+      <div id="bot-sub-memory" class="bot-subtab-content">
       <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
       <div class="admin-section-title">Personen-Gedächtnis</div>
       <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.5">
@@ -1568,16 +1650,12 @@ audio {
         du nur löschen, nicht hinzufügen.
       </div>
       <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer">
-        <input type="checkbox" id="bot-notebook-enabled" style="accent-color:#f0b429">
+        <input type="checkbox" id="bot-notebook-enabled" style="accent-color:#f0b429" autocomplete="off">
         Notizbuch aktiv (Robert darf sich selbst Notizen machen)
       </label>
       <div id="bot-notebook-list" style="font-size:.82rem;color:var(--text);margin-bottom:6px"></div>
-
-      <div style="margin-top:16px">
-        <button class="btn-save" onclick="saveBotAdmin()">SPEICHERN</button>
       </div>
-      <div class="admin-msg" id="msg-bot"></div>
-
+      <div id="bot-sub-test" class="bot-subtab-content">
       <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
       <div class="admin-section-title">Trockentest</div>
       <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">
@@ -1587,7 +1665,7 @@ audio {
       <div class="form-grid">
         <div class="form-field" style="flex:3">
           <label>Gehörter Satz</label>
-          <input type="text" id="bot-test-text" placeholder="Ist hier jemand QRV?">
+          <input type="text" id="bot-test-text" placeholder="Ist hier jemand QRV?" autocomplete="off">
         </div>
         <div class="form-field" style="flex:0 0 110px;justify-content:flex-end;display:flex;flex-direction:column">
           <label>&nbsp;</label>
@@ -1596,6 +1674,37 @@ audio {
       </div>
       <div id="bot-test-result" style="margin-top:10px;font-size:.85rem;display:none;
            padding:8px 10px;border:1px solid var(--border);border-radius:6px"></div>
+      </div>
+      <div style="margin-top:16px">
+        <button class="btn-save" onclick="saveBotAdmin()">SPEICHERN</button>
+      </div>
+      <div class="admin-msg" id="msg-bot"></div>
+    </div>
+
+    <!-- ── Robert-Analyse tab ── -->
+    <div id="admin-tab-robert" class="admin-tab-content">
+      <div class="admin-section-title">Robert-Gespräche analysieren</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:14px;line-height:1.5">
+        Alle Durchsagen von Robert aus dem Archiv, mit dem Gesprächsverlauf davor
+        (was ihn ausgelöst hat) und danach (wie die Runde reagiert hat). Zu jedem
+        Gespräch kannst du das Sprachmodell den Stand von damals erneut beantworten
+        lassen, und jedes Transkript über andere Whisper-Quellen gegenprüfen.
+      </div>
+      <div class="form-grid" style="margin-bottom:12px">
+        <div class="form-field" style="flex:0 0 170px">
+          <label>Datum <span style="color:var(--muted)">— leer = neueste</span></label>
+          <input type="date" id="rb-date" autocomplete="off">
+        </div>
+        <div class="form-field" style="flex:0 0 120px">
+          <label>Anzahl</label>
+          <input type="number" id="rb-limit" min="1" max="200" value="25" autocomplete="off">
+        </div>
+        <div class="form-field" style="flex:0 0 auto;justify-content:flex-end">
+          <button class="btn-save" onclick="loadRobertChats()">LADEN</button>
+        </div>
+      </div>
+      <div class="admin-msg" id="msg-robert"></div>
+      <div id="rb-list" style="font-size:.85rem"></div>
     </div>
 
     <!-- ── Crosslink tab ── -->
@@ -1695,6 +1804,22 @@ audio {
         <div class="form-field" style="max-width:200px;margin-bottom:12px">
           <label>Schwelle (Ähnlichkeit, 0.5–0.99)</label>
           <input type="number" id="sid-threshold" min="0.5" max="0.99" step="0.01" value="0.80">
+        </div>
+        <div style="font-size:.78rem;color:var(--muted);margin-bottom:8px;line-height:1.5">
+          Bei kurzen Aufnahmen ist die Stimmerkennung unsicherer (weniger Audio,
+          Fehlerkennungsrate bei &lt;2s ~19-24% statt ~6% bei &gt;=6s, gemessen
+          12.09.) — deshalb hier zwei zusätzliche, strengere Mindest-Schwellen
+          nur für kurze Clips. Nie milder als die Schwelle oben.
+        </div>
+        <div style="display:flex;gap:12px;margin-bottom:12px">
+          <div class="form-field" style="max-width:200px">
+            <label>Schwelle für Clips &lt; 2s</label>
+            <input type="number" id="sid-threshold-2s" min="0.5" max="0.99" step="0.01" value="0.90">
+          </div>
+          <div class="form-field" style="max-width:200px">
+            <label>Schwelle für Clips 2–4s</label>
+            <input type="number" id="sid-threshold-4s" min="0.5" max="0.99" step="0.01" value="0.87">
+          </div>
         </div>
         <button class="btn-save" onclick="saveSpeakerIdSettings()" style="margin-bottom:14px">SPEICHERN</button>
         <div class="admin-section-title" style="font-size:.85em">Eingelernte Sprecher</div>
@@ -1863,7 +1988,7 @@ function _initBgAudio() {
     _bgRecoverTimer = setTimeout(() => {
       if (!_bgAudioMount) return;
       _bgAudioEl.src    = `/stream/${encodeURIComponent(_bgAudioMount)}.mp3`;
-      _bgAudioEl.volume = (document.visibilityState === "hidden") ? 1 : 0;
+      _bgHoerbar(document.visibilityState === "hidden");
       _bgAudioEl.play().catch(() => {});
     }, 1500);
   };
@@ -1888,7 +2013,7 @@ function _bgSetMount(mount) {
   _bgAudioMount     = mount;
   _bgAudioEl.loop   = false;
   _bgAudioEl.src    = `/stream/${tail}`;
-  _bgAudioEl.volume = (document.visibilityState === "hidden") ? 1 : 0;
+  _bgHoerbar(document.visibilityState === "hidden");
   _bgAudioEl.play().catch(e => console.warn("BgAudio:", e));
   if ("mediaSession" in navigator) {
     const roomName = document.getElementById("room-select")?.selectedOptions[0]?.text || mount;
@@ -1898,9 +2023,21 @@ function _bgSetMount(mount) {
   console.log("BgAudio: Icecast (stumm) gesetzt →", mount);
 }
 
+// Icecast hörbar/stumm schalten. iOS ignoriert audio.volume (dort nur lesbar,
+// immer 1) -- volume=0 allein liess den Stream im Vordergrund HOERBAR neben dem
+// Low-Latency-WS laufen: eigener Spruch kam nach dem Loslassen verzoegert
+// nochmal, Robert doppelt (iPhone, 2026-09-17). muted wirkt auch auf iOS.
+// Nur fuer den Stream -- der stille Keep-Alive-Loop bleibt unmuted, damit iOS
+// die Audio-Session im Hintergrund nicht als "spielt nichts" einschlaefert.
+function _bgHoerbar(an) {
+  if (!_bgAudioEl) return;
+  _bgAudioEl.volume = an ? 1 : 0;
+  _bgAudioEl.muted  = !an;
+}
+
 // Vordergrund: Icecast stumm (WS liefert hörbares Low-Latency-Audio).
 function _bgMute() {
-  if (_bgAudioEl) _bgAudioEl.volume = 0;
+  _bgHoerbar(false);
 }
 
 // Hintergrund: Icecast hörbar (läuft schon — nur Lautstärke hoch, kein src/play-Wechsel).
@@ -1911,7 +2048,7 @@ function _bgUnmute() {
     _bgAudioEl.loop = false;
     _bgAudioEl.src  = `/stream/${encodeURIComponent(_bgAudioMount)}.mp3`;
   }
-  _bgAudioEl.volume = 1;
+  _bgHoerbar(true);
   _bgAudioEl.play().catch(() => {});   // falls iOS angehalten hat
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
 }
@@ -1944,7 +2081,7 @@ function _bgRetryStream(cacheBust) {
   _bgAudioEl.loop   = false;
   _bgAudioEl.src    = `/stream/${encodeURIComponent(_bgAudioMount)}.mp3`
                     + (cacheBust ? `?r=${Date.now()}` : "");
-  _bgAudioEl.volume = 1;
+  _bgHoerbar(true);
   _bgAudioEl.play().catch(() => {});
 }
 
@@ -1968,6 +2105,7 @@ function _bgWatchTick() {
     _bgAudioEl.loop   = true;
     _bgAudioEl.src    = _SILENT_WAV;
     _bgAudioEl.volume = 0;
+    _bgAudioEl.muted  = false;   // Keep-Alive muss "spielen"
     _bgAudioEl.play().catch(() => {});
     _bgWatchStall = 0;
   } else if (!onStream && _bgWatchStall >= 3) {
@@ -1985,6 +2123,7 @@ function _bgDisable() {
   _bgAudioEl.loop   = true;
   _bgAudioEl.src    = _SILENT_WAV;
   _bgAudioEl.volume = 0;
+  _bgAudioEl.muted  = false;     // Keep-Alive muss "spielen"
   _bgAudioEl.play().catch(() => {});
 }
 
@@ -3358,6 +3497,120 @@ function closeAdmin() {
   stopDebugAutoRefresh();
 }
 
+// ── Robert-Analyse ──────────────────────────────────────────────────────────
+async function loadRobertChats() {
+  const box = document.getElementById("rb-list");
+  const datum = document.getElementById("rb-date").value;
+  const limit = document.getElementById("rb-limit").value || 25;
+  box.innerHTML = "<div style='color:var(--muted)'>lädt …</div>";
+  try {
+    const r = await adminFetch(`/api/admin/bot-chats?limit=${limit}` + (datum ? `&date=${datum}` : ""));
+    const d = await r.json();
+    if (!r.ok || d.error) {
+      showMsg("msg-robert", "Nicht geladen: " +
+              (d.error === "unauthorized" ? "Sitzung abgelaufen — bitte neu anmelden" : (d.error || r.status)), "error");
+      box.innerHTML = ""; return;
+    }
+    if (!(d.chats || []).length) { box.innerHTML = "<div style='color:var(--muted)'>keine Gespräche gefunden</div>"; return; }
+    box.innerHTML = d.chats.map(c => renderRobertChat(c, d.name)).join("");
+    await loadReplayModelLists();
+  } catch(e) {
+    showMsg("msg-robert", "Nicht geladen: " + e, "error"); box.innerHTML = "";
+  }
+}
+
+function rbZeile(x, farbe) {
+  const zeit = new Date(x.timestamp * 1000).toLocaleTimeString("de-DE");
+  const wer  = esc(x.callsign || "?");
+  const ton  = x.audio_file
+    ? `<a href="/api/archive/audio/${encodeURIComponent(x.audio_file)}" target="_blank"
+          style="color:var(--muted);text-decoration:none" title="anhören">▶</a> ` : "";
+  return `<div style="padding:2px 0;color:${farbe}">
+    <span style="color:var(--muted)">${zeit}</span> ${ton}<b>${wer}</b>: ${esc(x.text || "—")}
+    <button class="btn-save" style="padding:1px 6px;font-size:.62rem;margin-left:6px"
+            onclick="compareTranscript(${x.id}, this, false)" title="dreimal über die GPU-Box — deckt Rateversuche auf">PRÜFEN</button>
+    <button class="btn-save" style="padding:1px 6px;font-size:.62rem;margin-left:3px"
+            onclick="compareTranscript(${x.id}, this, true)" title="zusätzlich lokale Modelle (langsam, ca. 1 Min.)">+LOKAL</button>
+    <button class="btn-save" style="padding:1px 6px;font-size:.62rem;margin-left:3px"
+            onclick="compareTranscript(${x.id}, this, 'gemini')" title="zwei GPU-Läufe plus Gemini als unabhängige zweite Meinung">+GEMINI</button>
+    <div class="rb-cmp" style="display:none;margin:4px 0 4px 18px"></div></div>`;
+}
+
+function renderRobertChat(c, name) {
+  const zeit = new Date(c.timestamp * 1000).toLocaleString("de-DE");
+  return `<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px">
+    <div style="color:var(--muted);font-size:.72rem;margin-bottom:6px">${zeit} · ${esc(c.room || "")} · #${c.id}</div>
+    ${(c.vorher || []).map(x => rbZeile(x, "var(--text-muted)")).join("")}
+    ${rbZeile(c, "var(--accent)")}
+    ${(c.nachher || []).map(x => rbZeile(x, "var(--text-muted)")).join("")}
+    <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select class="rb-model" style="font-size:.7rem"></select>
+      <button class="btn-save" style="padding:2px 8px;font-size:.66rem"
+              onclick="replayArchive(${c.id}, this)">MODELL ERNEUT FRAGEN</button>
+      <span class="rb-replay" style="font-size:.78rem"></span>
+    </div></div>`;
+}
+
+async function replayArchive(id, btn) {
+  const karte = btn.closest("div").parentElement;
+  const out   = karte.querySelector(".rb-replay");
+  const wahl = replayAuswahl(karte.querySelector(".rb-model").value);
+  out.textContent = "läuft …"; btn.disabled = true;
+  try {
+    const r = await adminFetch("/api/admin/bot-replay-archive", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ entry_id: id, model: wahl.model, provider: wahl.provider }),
+    });
+    const d = await r.json();
+    out.innerHTML = (!r.ok || d.error) ? `<span style="color:var(--red)">${esc(d.error || r.status)}</span>`
+      : `<b>${esc(d.provider || "")} ${esc(d.model || "")}</b> (${d.seconds}s): ${esc(d.jetzt)}`;
+  } catch(e) { out.textContent = "Fehler: " + e; }
+  btn.disabled = false;
+}
+
+// Prüft ein Transkript, indem dieselbe Aufnahme mehrfach transkribiert wird.
+// Whisper ist bei unverständlichem Funk nicht deterministisch — weichen die
+// Läufe voneinander ab, hat das Modell geraten (2026-09-17 belegt: derselbe
+// Clip lieferte dreimal völlig verschiedenen Text).
+async function compareTranscript(id, btn, mitLokal) {
+  const out = btn.parentElement.querySelector(".rb-cmp");
+  out.style.display = "block";
+  // modus: false = 3× GPU-Box, true = + lokale Modelle, "gemini" = + Gemini
+  const modus = mitLokal;
+  const hinweis = modus === "gemini" ? "prüft über GPU-Box und Gemini …"
+                : modus ? "prüft über GPU-Box und lokale Modelle, dauert etwa eine Minute …"
+                : "prüft mit drei Läufen über die GPU-Box …";
+  out.innerHTML = `<span style='color:var(--muted)'>${hinweis}</span>`;
+  btn.disabled = true;
+  const quellen = modus === "gemini" ? ["remote", "remote", "gemini"]
+                : modus ? ["remote", "remote", "base", "medium"] : ["remote", "remote", "remote"];
+  try {
+    const r = await adminFetch("/api/admin/transcribe-compare", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ entry_id: id, sources: quellen }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) { out.innerHTML = `<span style="color:var(--red)">${esc(d.error || r.status)}</span>`; }
+    else {
+      const farbe = d.uebereinstimmung >= 80 ? "var(--green, #4caf50)"
+                  : d.uebereinstimmung >= 50 ? "var(--amber, #f0b429)" : "var(--red)";
+      out.innerHTML =
+        `<div style="color:${farbe};margin-bottom:3px">Übereinstimmung ${d.uebereinstimmung ?? "—"} % — ${esc(d.urteil)}</div>` +
+        d.ergebnisse.map(e =>
+          `<div><span style="color:var(--muted)">${esc(e.quelle)}${e.lauf > 1 ? " " + e.lauf : ""}${e.modell ? " " + esc(e.modell) : ""} (${e.sekunden}s):</span> ` +
+          (e.fehler ? `<span style="color:var(--red)">${esc(e.fehler)}</span>` : esc(e.text || "—")) + "</div>").join("");
+    }
+  } catch(e) { out.textContent = "Fehler: " + e; }
+  btn.disabled = false;
+}
+
+function showBotSubTab(name) {
+  document.querySelectorAll(".bot-subtab").forEach(b =>
+    b.classList.toggle("active", b.dataset.bsub === name));
+  document.querySelectorAll(".bot-subtab-content").forEach(d =>
+    d.classList.toggle("active", d.id === "bot-sub-" + name));
+}
+
 function showAdminTab(name) {
   document.querySelectorAll(".admin-tab").forEach(b =>
     b.classList.toggle("active", b.dataset.tab === name));
@@ -3373,6 +3626,7 @@ function showAdminTab(name) {
     if (name === "server")    loadServerTab();
     if (name === "autoreply") loadAutoReplyAdmin();
     if (name === "bot")       loadBotAdmin();
+    if (name === "robert")    loadRobertChats();
     if (name === "crosslink") loadCrosslink();
     if (name === "debug")     { loadDebugTraces(); loadDebugModelList(); loadSpeakerIdSettings(); }
   }
@@ -3647,6 +3901,14 @@ async function loadServerTab() {
   try {
     const r = await adminFetch("/api/admin/server");
     const d = await r.json();
+    // Bei abgelaufener Anmeldung NICHTS ueberschreiben (2026-09-16):
+    // sonst werden die Felder geleert und ein Speichern schreibt das fest.
+    if (!r.ok || d.error) {
+      document.getElementById("srv-msg").textContent =
+        d.error === "unauthorized" ? "Sitzung abgelaufen — bitte neu anmelden"
+                                   : ("Nicht geladen: " + (d.error || r.status));
+      return;
+    }
     document.getElementById("srv-host").value = d.frn_server || "";
     document.getElementById("srv-port").value = d.frn_port  || 10024;
     document.getElementById("srv-msg").textContent = "";
@@ -3728,6 +3990,14 @@ async function loadAutoReplyAdmin() {
   try {
     const r = await adminFetch("/api/admin/auto-reply");
     const d = await r.json();
+    // Bei abgelaufener Anmeldung NICHTS ueberschreiben (2026-09-16):
+    // sonst werden die Felder geleert und ein Speichern schreibt das fest.
+    if (!r.ok || d.error) {
+      showMsg("msg-autoreply", "Einstellungen nicht geladen: " +
+              (d.error === "unauthorized" ? "Sitzung abgelaufen — bitte neu anmelden"
+                                          : (d.error || r.status)), "error");
+      return;
+    }
     document.getElementById("ar-enabled").checked    = !!d.enabled;
     document.getElementById("ar-autosend").checked   = !!d.auto_send;
     document.getElementById("ar-names").value        = (d.names || []).join(", ");
@@ -3814,7 +4084,17 @@ async function loadBotAdmin() {
   try {
     const r = await adminFetch("/api/admin/bot");
     const d = await r.json();
+    // Bei abgelaufener Anmeldung NICHTS ueberschreiben: sonst stuenden
+    // Name, Persona und System-Prompt leer da und ein Klick auf SPEICHERN
+    // wuerde sie so in die Konfiguration schreiben (2026-09-16).
+    if (!r.ok || d.error) {
+      showMsg("msg-bot", "Einstellungen nicht geladen: " +
+              (d.error === "unauthorized" ? "Sitzung abgelaufen — bitte neu anmelden"
+                                          : (d.error || r.status)), "error");
+      return;
+    }
     document.getElementById("bot-enabled").checked = !!d.enabled;
+    document.getElementById("bot-only-addressed").checked = !!d.only_when_addressed;
     document.getElementById("bot-name").value      = d.name || "";
     document.getElementById("bot-trigger").value   = (d.trigger || []).join(", ");
     document.getElementById("bot-persona").value   = d.persona || "";
@@ -3822,6 +4102,10 @@ async function loadBotAdmin() {
     document.getElementById("bot-speaker").value   = d.speaker || "";
     document.getElementById("bot-cooldown").value  = d.cooldown_s ?? 20;
     document.getElementById("bot-convwin").value   = d.conversation_window_s ?? 180;
+    document.getElementById("bot-maxage").value       = d.max_transcript_age_s ?? 120;
+    document.getElementById("bot-repeatblock").value  = d.repeat_block_s ?? 3600;
+    document.getElementById("bot-silencecall").value  = d.silence_call_threshold_s ?? 300;
+    document.getElementById("bot-historylen").value   = d.history_len ?? 10;
     document.getElementById("bot-rooms").value     = (d.rooms || []).join(", ");
     document.getElementById("bot-provider").value  = d.provider || "ollama";
     document.getElementById("bot-model").value     = d.ollama_model || "";
@@ -3916,12 +4200,56 @@ async function loadGeminiModels() {
   } catch(e) { /* still */ }
 }
 
+// Stimmen des lokalen Piper holen und als Auswahl anbieten. Faellt die
+// Abfrage aus (Piper nicht erreichbar), bleibt wenigstens der aktuell
+// eingestellte Wert waehlbar, damit Speichern ihn nicht loescht.
+async function fillLocalVoices(current) {
+  const sel = document.getElementById("tts-local-voice");
+  sel.innerHTML = "";
+  let voices = [];
+  try {
+    const r = await adminFetch("/api/admin/tts/voices");
+    voices = (await r.json()).voices || [];
+  } catch(e) { /* offline: unten Ersatz */ }
+  if (!voices.length && current) voices = [{name: current, lang: "", info: "(Piper nicht erreichbar)"}];
+  voices.forEach(v => {
+    const o = document.createElement("option");
+    o.value = v.name;
+    o.textContent = v.lang && v.lang.toLowerCase().startsWith("de")
+      ? `${v.name} — ${v.info || "deutsch"}` : `${v.name} (${v.lang || "?"})`;
+    if (v.name === current) o.selected = true;
+    sel.appendChild(o);
+  });
+  if (current && !voices.some(v => v.name === current)) {
+    const o = document.createElement("option");
+    o.value = current; o.textContent = current + " (nicht installiert)"; o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
 async function loadTts() {
   try {
     const r = await adminFetch("/api/admin/tts");
     const d = await r.json();
+    // Bei abgelaufener Anmeldung (401) NICHTS ueberschreiben -- sonst werden
+    // die Felder stillschweigend geleert und ein anschliessendes Speichern
+    // schreibt die leeren Werte zurueck (2026-09-16 als Ursache gefunden).
+    if (!r.ok || d.error) {
+      showMsg("msg-bot", "Einstellungen nicht geladen: " +
+              (d.error === "unauthorized" ? "Sitzung abgelaufen — bitte neu anmelden"
+                                          : (d.error || r.status)), "error");
+      return;
+    }
     document.getElementById("tts-engine").value = d.engine || "piper";
-  } catch(e) { /* still */ }
+    document.getElementById("tts-fallback-local").checked = d.fallback_local !== false;
+    document.getElementById("tts-piper-url").value   = d.piper_url  || "";
+    document.getElementById("tts-xtts-url").value    = d.xtts_url   || "";
+    document.getElementById("tts-local-host").value  = d.local_host || "";
+    document.getElementById("tts-local-port").value  = d.local_port || "";
+    await fillLocalVoices(d.local_voice || "");
+  } catch(e) {
+    showMsg("msg-bot", "Einstellungen nicht geladen: " + e, "error");
+  }
 }
 
 async function saveTts() {
@@ -3930,11 +4258,17 @@ async function saveTts() {
     const r = await adminFetch("/api/admin/tts", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ engine }),
+      body: JSON.stringify({ engine,
+        fallback_local: document.getElementById("tts-fallback-local").checked,
+        piper_url:      document.getElementById("tts-piper-url").value.trim(),
+        xtts_url:       document.getElementById("tts-xtts-url").value.trim(),
+        local_host:     document.getElementById("tts-local-host").value.trim(),
+        local_port:     parseInt(document.getElementById("tts-local-port").value, 10) || 10200,
+        local_voice:    document.getElementById("tts-local-voice").value.trim() }),
     });
     const d = await r.json();
     if (d.error) { showMsg("msg-bot", "Fehler: " + d.error, "error"); return; }
-    const ttsLabel = engine === "piper" ? "Piper (lokal)"
+    const ttsLabel = engine === "piper" ? "Piper (GPU-Box)"
                     : engine === "google" ? "Google (kostenlos)" : "XTTS (GPU-Box)";
     showMsg("msg-bot", "Sprachausgabe: " + ttsLabel, "ok");
   } catch(e) {
@@ -3945,6 +4279,7 @@ async function saveTts() {
 async function saveBotAdmin() {
   const body = {
     enabled:               document.getElementById("bot-enabled").checked,
+    only_when_addressed:   document.getElementById("bot-only-addressed").checked,
     name:                  document.getElementById("bot-name").value,
     trigger:               document.getElementById("bot-trigger").value,
     persona:               document.getElementById("bot-persona").value,
@@ -3952,6 +4287,10 @@ async function saveBotAdmin() {
     speaker:               document.getElementById("bot-speaker").value,
     cooldown_s:            parseFloat(document.getElementById("bot-cooldown").value) || 20,
     conversation_window_s: parseFloat(document.getElementById("bot-convwin").value) || 180,
+    max_transcript_age_s:  parseFloat(document.getElementById("bot-maxage").value) || 120,
+    repeat_block_s:        parseFloat(document.getElementById("bot-repeatblock").value) || 3600,
+    silence_call_threshold_s: parseFloat(document.getElementById("bot-silencecall").value) || 0,
+    history_len:           parseFloat(document.getElementById("bot-historylen").value) || 10,
     rooms:                 document.getElementById("bot-rooms").value,
     provider:              document.getElementById("bot-provider").value,
     ollama_model:          document.getElementById("bot-model").value,
@@ -4020,6 +4359,14 @@ async function loadCrosslink() {
   try {
     const r = await adminFetch("/api/admin/crosslink");
     const d = await r.json();
+    // Bei abgelaufener Anmeldung NICHTS ueberschreiben (2026-09-16):
+    // sonst werden die Felder geleert und ein Speichern schreibt das fest.
+    if (!r.ok || d.error) {
+      showMsg("msg-crosslink", "Einstellungen nicht geladen: " +
+              (d.error === "unauthorized" ? "Sitzung abgelaufen — bitte neu anmelden"
+                                          : (d.error || r.status)), "error");
+      return;
+    }
     document.getElementById("cl-enabled").checked = !!d.enabled;
     document.getElementById("cl-room-a").value     = d.room_a || "";
     document.getElementById("cl-room-b").value     = d.room_b || "";
@@ -4145,12 +4492,40 @@ async function loadDebugModelList() {
     document.querySelectorAll(".dbg-replay-model").forEach(fillDebugModelSelect);
   } catch(e) { /* still */ }
 }
+let gemModels = [];
+// Auch die Gemini-Modelle anbieten (2026-09-17): der Replay konnte vorher nur
+// Ollama-Modelle tauschen, obwohl Gemini konfiguriert ist und antwortet.
+// Gemini-Einträge tragen im Wert das Präfix "gemini:".
+async function loadReplayModelLists() {
+  if (!dbgModels.length) { try { await loadDebugModelList(); } catch(e) {} }
+  if (!gemModels.length) {
+    try {
+      const r = await adminFetch("/api/admin/gemini-models");
+      const d = await r.json();
+      if (r.ok && !d.error) gemModels = d.models || [];
+    } catch(e) { /* Gemini optional */ }
+  }
+  document.querySelectorAll(".dbg-replay-model, .rb-model").forEach(fillDebugModelSelect);
+}
 function dbgModelOptions() {
-  return '<option value="">config-Standard</option>' +
-    dbgModels.map(m => `<option value="${esc(m.name)}">${esc(m.name)} (${m.size_gb} GB)</option>`).join("");
+  let html = '<option value="">config-Standard</option>';
+  if (dbgModels.length)
+    html += '<optgroup label="Ollama (eigener Server)">' +
+      dbgModels.map(m => `<option value="${esc(m.name)}">${esc(m.name)} (${m.size_gb} GB)</option>`).join("") +
+      "</optgroup>";
+  if (gemModels.length)
+    html += '<optgroup label="Gemini (Google)">' +
+      gemModels.map(m => `<option value="gemini:${esc(m)}">${esc(m)}</option>`).join("") + "</optgroup>";
+  return html;
 }
 function fillDebugModelSelect(sel) {
-  if (dbgModels.length) sel.innerHTML = dbgModelOptions();
+  if (dbgModels.length || gemModels.length) sel.innerHTML = dbgModelOptions();
+}
+// Auswahlwert -> {provider, model}
+function replayAuswahl(wert) {
+  const v = (wert || "").trim();
+  return v.startsWith("gemini:") ? { provider: "gemini", model: v.slice(7) }
+                                 : { provider: v ? "ollama" : "", model: v };
 }
 async function replayTrace(room, ts, btn) {
   const wrap  = btn.closest(".dbg-replay");
@@ -4217,8 +4592,18 @@ async function loadSpeakerIdSettings() {
   try {
     const r = await adminFetch("/api/admin/speaker-id");
     const d = await r.json();
+    // Bei abgelaufener Anmeldung NICHTS ueberschreiben (2026-09-16):
+    // sonst werden die Felder geleert und ein Speichern schreibt das fest.
+    if (!r.ok || d.error) {
+      showMsg("msg-debug", "Einstellungen nicht geladen: " +
+              (d.error === "unauthorized" ? "Sitzung abgelaufen — bitte neu anmelden"
+                                          : (d.error || r.status)), "error");
+      return;
+    }
     document.getElementById("sid-enabled").checked = !!d.enabled;
     document.getElementById("sid-threshold").value = d.threshold;
+    document.getElementById("sid-threshold-2s").value = d.short_threshold_2s;
+    document.getElementById("sid-threshold-4s").value = d.short_threshold_4s;
     const list = document.getElementById("sid-enrollments");
     if (!d.enrollments || !d.enrollments.length) {
       list.innerHTML = '<div style="color:var(--muted);font-size:.8rem">Noch keine Sprecher eingelernt.</div>';
@@ -4236,11 +4621,13 @@ async function loadSpeakerIdSettings() {
 async function saveSpeakerIdSettings() {
   const enabled = document.getElementById("sid-enabled").checked;
   const threshold = parseFloat(document.getElementById("sid-threshold").value) || 0.80;
+  const short_threshold_2s = parseFloat(document.getElementById("sid-threshold-2s").value) || 0.90;
+  const short_threshold_4s = parseFloat(document.getElementById("sid-threshold-4s").value) || 0.87;
   try {
     await adminFetch("/api/admin/speaker-id", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ enabled, threshold }),
+      body: JSON.stringify({ enabled, threshold, short_threshold_2s, short_threshold_4s }),
     });
     showMsg("msg-debug", "Sprecher-ID-Einstellungen gespeichert.", "ok");
   } catch(e) {
