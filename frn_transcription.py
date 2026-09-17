@@ -371,7 +371,8 @@ def _transcribe_remote(wav_path: str, url: str, language: str,
     with urllib.request.urlopen(req, timeout=280) as resp:
         result = json.loads(resp.read())
     if messwerte is not None:
-        for schluessel in ("avg_logprob", "no_speech_prob", "model"):
+        for schluessel in ("avg_logprob", "no_speech_prob", "model",
+                           "verworfen_text", "verworfen_grund"):
             if result.get(schluessel) is not None:
                 messwerte[schluessel] = result[schluessel]
     text = _strip_char_repeat_garbage(result.get("text", "").strip())
@@ -382,16 +383,25 @@ def _transcribe_remote(wav_path: str, url: str, language: str,
         log.info("Remote-Transkript Kaskade bereinigt: %.80s -> %.80s", text, deduped)
         text = deduped
     log.debug("Remote-Transkript (%.1fs): %s", result.get("duration_s", 0), text[:80])
+    # Was die Filter hier aussortieren, wird gemeldet statt verschwiegen --
+    # der Aufrufer archiviert die Durchsage dann als unbrauchbar markiert,
+    # statt sie ganz zu verlieren (2026-09-17, User-Wunsch).
+    def _verwerfen(grund: str) -> str:
+        if messwerte is not None and text:
+            messwerte["verworfen_text"] = text[:500]
+            messwerte["verworfen_grund"] = grund
+        return ""
+
     if _is_generic_hallucination(text):
         log.info("Remote-Transkript als generische Halluzination verworfen: %.80s", text)
-        return ""
+        return _verwerfen("halluzination")
     prompt = _get_whisper_initial_prompt()
     if prompt and _is_prompt_echo(text, prompt):
         log.info("Remote-Transkript als Prompt-Echo verworfen (Rauschsperre?): %.80s", text)
-        return ""
+        return _verwerfen("prompt_echo")
     if language.startswith("de") and _is_english_hallucination(text):
         log.info("Remote-Transkript als Englisch-Halluzination verworfen (Sprache war %s): %.80s", language, text)
-        return ""
+        return _verwerfen("englisch")
     return text
 
 
@@ -831,7 +841,8 @@ class TranscriptionPipeline:
         except Exception:
             pass
         text = (rkt(room, ts, dur_s) if rkt else None) or ""
-        confidence = None      # Uebereinstimmung zweier Whisper-Laeufe (0..1)
+        confidence = None      # Verlaesslichkeit des Transkripts (0..1)
+        messwerte = {}         # avg_logprob/Verworfenes vom Whisper-Dienst
         if text:
             log.info("[%s] Bekannter Bot-Text übernommen (kein Whisper nötig)", room)
             if dbg:
@@ -871,7 +882,7 @@ class TranscriptionPipeline:
                         await asyncio.sleep(30)
                 try:
                     _t0 = time.time()
-                    messwerte = {}
+                    messwerte.clear()
                     text = await asyncio.wait_for(
                         transcribe_wav(wav_path, model_size, language, messwerte),
                         timeout=300.0
@@ -989,11 +1000,38 @@ class TranscriptionPipeline:
                     await asyncio.sleep(30)
 
         if not text:
-            if dbg:
-                dbg(room, ts, "Whisper", "skip", None,
-                   "kein Text erkannt (Stille/VAD)", final=True)
-            _mark_discarded(wav_path)
-            return
+            # Haben die Filter etwas aussortiert, war da sehr wohl etwas zu
+            # hoeren -- nur unbrauchbar. Solche Durchsagen kommen mit
+            # confidence 0 ins Archiv und werden in der Oberflaeche markiert,
+            # statt spurlos zu verschwinden (User-Wunsch 2026-09-17: "lieber
+            # nur markieren, das schlecht ist und Robert nicht anbieten").
+            # Nur echte Stille entfaellt weiterhin.
+            aussortiert = (messwerte.get("verworfen_text") or "").strip()
+            grund = messwerte.get("verworfen_grund", "unbrauchbar")
+            if aussortiert:
+                # Zwei Sorten von Ausschuss, unterschiedlich behandelt:
+                # Prompt-Echo und die bekannten Standard-Halluzinationen
+                # ("bin auf der Basis, bis spaeter, 77, tschuess", "Kein
+                # Rufzeichen.", "Untertitel...") sind nachweislich Textbausteine
+                # aus Vorgabe bzw. Trainingsdaten -- die hat niemand gesagt,
+                # sie werden nicht als Transkript hinterlegt. Der Eintrag
+                # bleibt dann textlos, die Aufnahme ist trotzdem im Archiv und
+                # laesst sich anhoeren. Wiederholungsmurks ("Beheufe, Beheufe,
+                # Beheufe") und Englisch-Ausrutscher bleiben dagegen stehen:
+                # das ist Whispers echter Versuch am vorhandenen Ton.
+                text = "" if grund in ("prompt_echo", "halluzination") else aussortiert
+                confidence = 0.0
+                log.info("[%s] Unbrauchbares Transkript archiviert (%s): %.80s",
+                         room, grund, text)
+                if dbg:
+                    dbg(room, ts, "Whisper", "warn", None,
+                        f"unbrauchbar ({grund}), markiert archiviert: {text[:150]}")
+            else:
+                if dbg:
+                    dbg(room, ts, "Whisper", "skip", None,
+                       "kein Text erkannt (Stille/VAD)", final=True)
+                _mark_discarded(wav_path)
+                return
 
         # Rufzeichen-Auflösung: frn_tx_server setzt pipeline.resolve_callsign,
         # damit z.B. eigene KI-Funker-Sendungen im Archiv unter dem Bot-Namen
@@ -1034,6 +1072,10 @@ class TranscriptionPipeline:
             "text":     text,
             "room":     room,
             "time":     datetime.fromtimestamp(ts).isoformat(),
+            # Damit Empfaenger unbrauchbare Transkripte aussieben koennen,
+            # statt sie als gesprochenen Satz anzuzeigen.
+            "confidence":  confidence,
+            "unbrauchbar": confidence == 0.0,
         }, ensure_ascii=False)
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, mqtt_publish, broker, port_m,

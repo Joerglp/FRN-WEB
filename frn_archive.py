@@ -305,7 +305,8 @@ def query_entries(
 
     with _get_conn() as conn:
         rows = conn.execute(
-            f"""SELECT id, timestamp, room, callsign, text, audio_file, duration_s
+            f"""SELECT id, timestamp, room, callsign, text, audio_file,
+                       duration_s, confidence
                 FROM transmissions
                 {where}
                 ORDER BY timestamp DESC
@@ -331,6 +332,9 @@ def query_entries(
             "audio_file": r["audio_file"],
             "duration_s": round(r["duration_s"], 1),
             "has_audio":  bool(r["audio_file"]),
+            # 0 = Whisper hat geraten statt verstanden; die Oberflaeche
+            # markiert solche Eintraege, statt sie zu verschweigen.
+            "confidence": r["confidence"],
         })
     return result, total
 

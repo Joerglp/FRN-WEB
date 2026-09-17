@@ -194,20 +194,32 @@ def transcribe():
         # Fehlerbild, ohne das Risiko.
         parts = []
         behalten = []   # die Segmente hinter parts -- fuer avg_logprob unten
+        # Aussortiertes nicht mehr spurlos wegwerfen (2026-09-17, User-Wunsch):
+        # frueher blieb bei durchweg verworfenen Segmenten nur ein leeres
+        # Transkript uebrig, und der Pi hat die komplette Aufnahme daraufhin
+        # aus dem Archiv geworfen -- die Durchsage war damit weg, obwohl das
+        # Audio in Ordnung war. Jetzt geht der verworfene Text mit zurueck,
+        # der Pi archiviert ihn als unbrauchbar markiert. "stille" zaehlt
+        # nicht dazu: da war wirklich nichts, das darf weiter entfallen.
+        verworfen = []
         for seg in segments:
+            t = seg.text.strip()
             if getattr(seg, "no_speech_prob", 0.0) > 0.8:
+                verworfen.append(("stille", t))
                 continue
             if getattr(seg, "compression_ratio", 0.0) > 2.4:
                 log.info("Segment wegen compression_ratio=%.2f verworfen: %.60s",
-                         seg.compression_ratio, seg.text.strip()[:60])
+                         seg.compression_ratio, t[:60])
+                verworfen.append(("wiederholung", t))
                 continue
-            t = seg.text.strip()
             if t.lower() in HALLUCINATIONS or HALLUCINATION_PATTERNS.search(t):
+                verworfen.append(("halluzination", t))
                 continue
             t_norm = _normalize(t)
             if (len(t_norm) >= _ECHO_MIN_LEN and t_norm in prompt_norm) or \
                _prompt_echo_overlap(t_norm, prompt_norm):
                 log.info("Prompt-Echo verworfen: %.80s", t)
+                verworfen.append(("prompt_echo", t))
                 continue
             parts.append(t)
             behalten.append(seg)
@@ -231,9 +243,18 @@ def transcribe():
             nosp = round(max(x.no_speech_prob for x in behalten), 3)
         else:
             logp = nosp = None
-        return jsonify({"text": text, "language": info.language,
-                        "duration_s": elapsed, "model": MODELL,
-                        "avg_logprob": logp, "no_speech_prob": nosp})
+        antwort = {"text": text, "language": info.language,
+                   "duration_s": elapsed, "model": MODELL,
+                   "avg_logprob": logp, "no_speech_prob": nosp}
+        if not text:
+            # Nur echte Aussortierer melden -- reine Stille bleibt Stille.
+            rest = [(g, t) for g, t in verworfen if g != "stille" and t]
+            if rest:
+                antwort["verworfen_text"] = " ".join(t for _, t in rest)[:500]
+                antwort["verworfen_grund"] = rest[0][0]
+                log.info("Nur verworfene Segmente (%s): %.80s",
+                         rest[0][0], antwort["verworfen_text"])
+        return jsonify(antwort)
     finally:
         os.unlink(tmp_path)
 

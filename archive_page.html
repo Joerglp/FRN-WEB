@@ -787,14 +787,23 @@ function renderMsg(e, mergeWithId) {
       ` : ''}
     </div>` : '';
 
+  // Whisper hat hier geraten statt verstanden -- der Text steht trotzdem da
+  // (die Aufnahme ist echt), ist aber als unbrauchbar gekennzeichnet und
+  // wird Robert nicht vorgelegt.
+  const unbrauchbar = (e.confidence != null && e.confidence <= 0.001)
+    ? `<span class="msg-room" style="color:#c05050;border-color:#c0505040"
+             title="Whisper konnte das nicht verstehen -- Text unbrauchbar, Robert antwortet darauf nicht">unverständlich</span>`
+    : "";
   html += `
   <div class="msg">
     <div class="msg-header">
       <span class="msg-callsign" data-entry="${e.id}" style="color:${color}">${esc(e.callsign || '—')}</span>
       <span class="msg-room" style="color:${rc};border-color:${rc}40">${esc(e.room || '?')}</span>
       <span class="msg-time">${esc(timeOnly)}</span>
+      ${unbrauchbar}
     </div>
-    <div class="msg-text">${esc(e.text)}</div>
+    <div class="msg-text"${unbrauchbar ? ' style="opacity:.55;font-style:italic"' : ''}>${
+      esc(e.text) || (unbrauchbar ? "— nicht verstanden, nur Aufnahme —" : "")}</div>
     ${(audioTag || dur) ? `<div class="msg-footer">${audioTag}${dur}</div>` : ''}
     <div style="margin-top:6px">
       <button onclick="toggleComments(${e.id})" style="
