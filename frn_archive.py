@@ -274,14 +274,20 @@ def query_entries(
         params.extend([f"%{search}%", f"%{search}%"])
     if date_from:
         try:
-            ts = datetime.strptime(date_from, "%Y-%m-%d").timestamp()
+            has_time = "T" in date_from
+            fmt = "%Y-%m-%dT%H:%M" if has_time else "%Y-%m-%d"
+            ts = datetime.strptime(date_from, fmt).timestamp()
             clauses.append("timestamp >= ?")
             params.append(ts)
         except ValueError:
             pass
     if date_to:
         try:
-            ts = datetime.strptime(date_to, "%Y-%m-%d").timestamp() + 86400
+            has_time = "T" in date_to
+            fmt = "%Y-%m-%dT%H:%M" if has_time else "%Y-%m-%d"
+            ts = datetime.strptime(date_to, fmt).timestamp()
+            if not has_time:
+                ts += 86400  # ohne Uhrzeit: bis Ende des Tages
             clauses.append("timestamp < ?")
             params.append(ts)
         except ValueError:

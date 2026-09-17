@@ -173,6 +173,7 @@
 
   .filter-bar input[type="text"] { width: 180px; }
   .filter-bar input[type="date"] { width: 140px; color-scheme: dark; }
+  .filter-bar input[type="time"] { width: 100px; color-scheme: dark; }
   .filter-bar select             { min-width: 140px; }
 
   .btn {
@@ -385,6 +386,7 @@
   @media (max-width: 600px) {
     .filter-bar input[type="text"] { width: 140px; }
     .filter-bar input[type="date"] { width: 120px; }
+    .filter-bar input[type="time"] { width: 85px; }
     .hdr-clock { display: none; }
     main { padding: 12px 10px 60px; }
   }
@@ -480,8 +482,10 @@
 
   <span class="filter-label" id="f-date-label">Von:</span>
   <input type="date" id="f-from">
+  <input type="time" id="f-from-time" title="Uhrzeit (optional)">
   <span class="filter-label">Bis:</span>
   <input type="date" id="f-to">
+  <input type="time" id="f-to-time" title="Uhrzeit (optional)">
 
   <button class="btn" onclick="applyFilter()">&#9654; Anwenden</button>
   <button class="btn clear" onclick="clearFilter()">&#10005; Löschen</button>
@@ -544,7 +548,9 @@ function switchTab(tab) {
   const isAudio = tab === 'audio';
   document.getElementById('f-date-label').style.display = isAudio ? '' : 'none';
   document.getElementById('f-from').style.display       = isAudio ? '' : 'none';
+  document.getElementById('f-from-time').style.display  = isAudio ? '' : 'none';
   document.getElementById('f-to').style.display         = isAudio ? '' : 'none';
+  document.getElementById('f-to-time').style.display    = isAudio ? '' : 'none';
   // Filter-Bar bei Stats ausblenden
   document.querySelector('.filter-bar').style.display = tab === 'stats' ? 'none' : '';
   document.querySelector('.stats-bar').style.display  = tab === 'stats' ? 'none' : '';
@@ -830,14 +836,21 @@ function renderChatMsg(m) {
 }
 
 // ── Load entries ───────────────────────────────────────────────────────────
+function combineDateTime(dateId, timeId) {
+  const d = document.getElementById(dateId).value;
+  const t = document.getElementById(timeId).value;
+  if (!d) return '';
+  return t ? `${d}T${t}` : d;
+}
+
 async function loadEntries(append = false) {
   if (isLoading) return;
   isLoading = true;
 
   const search  = document.getElementById('f-search').value.trim();
   const room    = document.getElementById('f-room').value;
-  const dfrom   = document.getElementById('f-from').value;
-  const dto     = document.getElementById('f-to').value;
+  const dfrom   = combineDateTime('f-from', 'f-from-time');
+  const dto     = combineDateTime('f-to', 'f-to-time');
   const filterActive = !!(search || room || dfrom || dto);
 
   document.getElementById('stat-filter-info').style.display =
@@ -988,7 +1001,9 @@ function clearFilter() {
   document.getElementById('f-search').value = '';
   document.getElementById('f-room').value   = '';
   document.getElementById('f-from').value   = '';
+  document.getElementById('f-from-time').value = '';
   document.getElementById('f-to').value     = '';
+  document.getElementById('f-to-time').value   = '';
   loadEntries(false);
 }
 
@@ -1017,8 +1032,8 @@ function scheduleRefresh() {
   refreshTimer = setTimeout(() => {
     const search = document.getElementById('f-search').value.trim();
     const room   = document.getElementById('f-room').value;
-    const dfrom  = document.getElementById('f-from').value;
-    const dto    = document.getElementById('f-to').value;
+    const dfrom  = combineDateTime('f-from', 'f-from-time');
+    const dto    = combineDateTime('f-to', 'f-to-time');
     if (!search && !room && !dfrom && !dto) loadEntries(false);
   }, 30000);
 }
