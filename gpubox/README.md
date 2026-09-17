@@ -5,8 +5,9 @@
 Port 9001). Die Datei hier ist die Arbeitskopie im Repo — die Box ist die
 Produktion, das Repo nur die Sicherung.
 
-Stand 2026-09-17: Diese Fassung ist **noch nicht eingespielt**. Gegenueber der
-laufenden Version:
+Stand 2026-09-17: **eingespielt und aktiv**, die Box laeuft seitdem auf
+`large-v3`. Sicherung der Vorversion liegt dort als
+`whisper_server.py.bak-20260917-vor-hotwords`. Gegenueber der Vorversion:
 
 - `WHISPER_MODEL` wirkt endlich. Bisher stand in der systemd-Unit
   `Environment=WHISPER_MODEL=large-v3`, der Code lud aber fest
@@ -35,4 +36,10 @@ ssh administrator@192.0.0.17 'sudo systemctl restart whisper-api && sleep 40 && 
 ```
 
 Die Unit setzt `WHISPER_MODEL=large-v3` — nach dem Neustart laeuft also
-large-v3. Zurueck geht es ohne Code-Aenderung ueber die Variable.
+large-v3. Zurueck geht es ohne Code-Aenderung ueber die Variable. `sudo`
+verlangt auf der Box ein Passwort, `sudo -n` schlaegt also fehl.
+
+Beim Testen: Kill- und Start-Befehl NIE in denselben ssh-Aufruf legen —
+`pkill -f whisper_server_neu.py` trifft die eigene Remote-Shell mit, weil
+ihre Kommandozeile das Muster enthaelt (Exit 255). Muster als
+`"[w]hisper_server_neu"` schreiben und in getrennten Aufrufen absetzen.
