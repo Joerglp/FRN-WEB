@@ -766,6 +766,7 @@ class TXServer:
         self._room_hist: dict[str, list] = {}       # Raum → [(ts, wer, text), …]
         self._bot_last_reply: dict[str, float] = {} # Raum → Zeit letzter Bot-Sendung
         self._bot_own_tx: dict[str, list] = {}      # Raum → [(t0, t1, text), …]
+        self._bot_protokoll_pfad = Path(__file__).parent / "bot_replies.jsonl"
         # Gedaechtnis ueber Neustarts retten (2026-09-17): 19 von 90
         # Vorstellungen seit 13.08. kamen direkt nach einem Dienst-Neustart,
         # weil diese drei Speicher nur im Arbeitsspeicher lagen.
@@ -1590,7 +1591,7 @@ class TXServer:
                      "gern kurz über Funk, Technik und das Wetter."),
         "cooldown_s": 20,
         "conversation_window_s": 180,
-        "history_len": 10,
+        "history_len": 30,
         # Durchsagen, die aelter sind, werden nicht mehr beantwortet (gegen
         # Antworten auf laengst Vergangenes bei Whisper-Rueckstau).
         "max_transcript_age_s": 120,
@@ -1791,6 +1792,54 @@ class TXServer:
                 return True
         return False
 
+    # Dauerhaftes Antwort-Protokoll (2026-09-18). Die Analyse-Seite suchte
+    # Roberts Sendungen ueber das Rufzeichen im Archiv -- das bekommt nur, wessen
+    # Aufnahme KOMPLETT in seinem Sendefenster liegt (_bot_own_recording). Bei
+    # dichtem Funkverkehr steckt seine Antwort aber im selben Mitschnitt wie der
+    # Anruf davor (18.09. 07:27:43: "Gruess dich, Robert, hier ist Gottfried.
+    # Hallo Alex, mir geht's gut..."), dann fehlt er in der Liste, obwohl er
+    # gesendet hat. Das Protokoll haengt nicht am Mitschnitt.
+    _PROTOKOLL_MAX = 5000
+
+    def _bot_protokoll(self, room: str, t0: float, t1: float, antwort: str,
+                       gehoert: str, heard_ts: float) -> None:
+        """Haengt eine gesendete Antwort an bot_replies.jsonl (eine Zeile je
+        Antwort). Fehler hier duerfen den Funkbetrieb nicht stoeren."""
+        try:
+            zeile = json.dumps({"ts": round(t0, 3), "ende": round(t1, 3),
+                                "room": room, "text": antwort,
+                                "gehoert": gehoert, "gehoert_ts": round(heard_ts, 3)},
+                               ensure_ascii=False)
+            with open(self._bot_protokoll_pfad, "a", encoding="utf-8") as f:
+                f.write(zeile + "\n")
+        except Exception as e:
+            log.warning("KI-Funker: Antwort-Protokoll nicht geschrieben: %s", e)
+
+    def _bot_protokoll_lesen(self, datum: str = "", limit: int = 50) -> list:
+        """Antworten aus dem Protokoll, neueste zuerst. datum = YYYY-MM-DD
+        (leer: alle)."""
+        pfad = self._bot_protokoll_pfad
+        if not pfad.exists():
+            return []
+        out = []
+        try:
+            with open(pfad, encoding="utf-8") as f:
+                zeilen = f.readlines()[-self._PROTOKOLL_MAX:]
+        except OSError as e:
+            log.warning("KI-Funker: Antwort-Protokoll nicht lesbar: %s", e)
+            return []
+        for z in reversed(zeilen):
+            try:
+                e = json.loads(z)
+            except ValueError:
+                continue
+            if datum and datetime.fromtimestamp(e["ts"]).strftime("%Y-%m-%d") != datum:
+                continue
+            out.append(e)
+            if len(out) >= limit:
+                break
+        return out
+
     def _bot_own_recording(self, room: str, ts: float, duration_s: float):
         """Liefert (t0, t1, text) der eigenen Sendung, in der eine Aufnahme
         KOMPLETT liegt -- sonst None. Bewusst strenger als _bot_is_own (das
@@ -1947,14 +1996,31 @@ class TXServer:
             if self._wav_duration_s(wav_path) < max_dur_s:
                 threshold = max(threshold, float(sid_cfg.get(cfg_key, default)))
                 break
-        best_name, best_sim = None, 0.0
+        treffer = []
         for name, samples in self._speaker_enrollments.items():
             if not samples:
                 continue
             centroid = np.mean(np.array(samples), axis=0)
-            sim = self._cosine_sim(emb, centroid.tolist())
-            if sim > best_sim:
-                best_sim, best_name = sim, name
+            treffer.append((self._cosine_sim(emb, centroid.tolist()), name))
+        treffer.sort(reverse=True)
+        best_sim, best_name = treffer[0] if treffer else (0.0, None)
+        # Mindestabstand zum Zweitplatzierten (2026-09-18). In diesem Kanal
+        # (8 kHz, GSM-komprimiert) liegen ALLE Stimmen nah beieinander: an 30
+        # Archiv-Clips gemessen betrug der Abstand zwischen bestem und zweitem
+        # Kandidaten im Median nur 0.023, die Stimmprofile untereinander bis
+        # 0.969 (Gottfried/Siggi). Die Entscheidung faellt damit auf der
+        # zweiten Nachkommastelle -- ein falscher Name ist schlimmer als gar
+        # keiner (18.09.: Robert sprach Gottfried als "Alex" an). Nachrechnung
+        # ueber alle Stimmproben (leave-one-out): ohne Abstand 26 richtig/7
+        # falsch, mit 0.01 Abstand 20 richtig/2 falsch, mit bereinigten Proben
+        # 22 richtig/0 falsch.
+        marge = float(sid_cfg.get("min_margin", 0.01))
+        zweiter = treffer[1][0] if len(treffer) > 1 else 0.0
+        if best_name and best_sim >= threshold and best_sim - zweiter < marge:
+            log.info("Speaker-ID: verworfen -- %s (%.3f) und %s (%.3f) liegen "
+                     "zu dicht beieinander (Mindestabstand %.3f)",
+                     best_name, best_sim, treffer[1][1], zweiter, marge)
+            return None, best_sim, threshold
         if best_name and best_sim >= threshold:
             log.info("Speaker-ID: %s erkannt (Aehnlichkeit %.2f, Schwelle %.2f)",
                      best_name, best_sim, threshold)
@@ -2656,6 +2722,8 @@ class TXServer:
             if not sent:
                 return
             self._bot_last_reply[room_name] = t1
+            self._bot_protokoll(room_name, t0, t1, answer,
+                                gehoert or (hist[-1][2] if hist else ""), heard_ts)
             own = self._bot_own_tx.setdefault(room_name, [])
             own.append((t0, t1, answer))
             del own[:-6]
@@ -3825,7 +3893,7 @@ class TXServer:
                 bot["notebook"] = nb[-self._NOTEBOOK_MAX:]
             for key, hi in (("cooldown_s", 3600),
                             ("conversation_window_s", 3600),
-                            ("history_len", 30),
+                            ("history_len", 50),   # 2026-09-19: seit Schnitt je Durchgang braucht es mehr Eintraege
                             # 2026-09-16 in die Weboberflaeche geholt -- standen
                             # vorher nur in der config.json bzw. als Vorgabe im
                             # Code (User-Wunsch: alles ueber die Web-Config).
@@ -3981,6 +4049,11 @@ class TXServer:
                         cfg[key] = max(0.5, min(0.99, float(body[key])))
                     except (TypeError, ValueError):
                         pass
+            if "min_margin" in body:
+                try:
+                    cfg["min_margin"] = max(0.0, min(0.20, float(body["min_margin"])))
+                except (TypeError, ValueError):
+                    pass
             if "server_url" in body and isinstance(body["server_url"], str):
                 cfg["server_url"] = body["server_url"].strip()
             try:
@@ -4002,6 +4075,7 @@ class TXServer:
             "threshold": float(cfg.get("threshold", 0.80)),
             "short_threshold_2s": float(cfg.get("short_threshold_2s", 0.90)),
             "short_threshold_4s": float(cfg.get("short_threshold_4s", 0.87)),
+            "min_margin": float(cfg.get("min_margin", 0.01)),
             "server_url": cfg.get("server_url") or "http://192.0.0.17:9004/embed",
             "enrollments": enrollments,
         })
@@ -4760,18 +4834,47 @@ class TXServer:
                 rows = conn.execute(
                     "SELECT * FROM transmissions WHERE callsign=? "
                     "ORDER BY timestamp DESC LIMIT ?", (name, limit)).fetchall()
+            eintraege = [dict(r) for r in rows]
+            # Antworten aus dem Protokoll ergaenzen: sie fehlen im Archiv immer
+            # dann, wenn Roberts Sendung mit der eines anderen in EINEM
+            # Mitschnitt gelandet ist (dichter Funkverkehr) -- siehe
+            # _bot_protokoll. Die passende Aufnahme wird ueber die Ueberlappung
+            # mit dem Sendefenster gesucht, damit Anhoeren/Pruefen weiter geht.
+            for e in self._bot_protokoll_lesen(datum, limit):
+                if any(abs(x["timestamp"] - e["ts"]) < 5 and x["room"] == e["room"]
+                       for x in eintraege):
+                    continue        # steht schon als Archiv-Eintrag drin
+                treffer = conn.execute(
+                    "SELECT id,timestamp,audio_file,duration_s,text FROM transmissions "
+                    "WHERE room=? AND timestamp < ? AND timestamp + duration_s > ? "
+                    "ORDER BY timestamp", (e["room"], e["ende"], e["ts"])).fetchall()
+                auf = max(treffer, key=lambda x: (min(x["timestamp"] + (x["duration_s"] or 0), e["ende"])
+                                                  - max(x["timestamp"], e["ts"])), default=None)
+                eintraege.append({
+                    "id": auf["id"] if auf else None,
+                    "timestamp": e["ts"], "room": e["room"], "callsign": name,
+                    "text": e["text"], "duration_s": round(e["ende"] - e["ts"], 1),
+                    "audio_file": auf["audio_file"] if auf else None,
+                    "confidence": None,
+                    "aus_protokoll": True,
+                    "gemischt": bool(auf),   # Aufnahme enthaelt auch andere Sprecher
+                    "aufnahme_text": auf["text"] if auf else "",
+                    "gehoert": e.get("gehoert", ""),
+                })
+            eintraege.sort(key=lambda x: x["timestamp"], reverse=True)
+            eintraege = eintraege[:limit]
             out = []
-            for r in rows:
-                def _umfeld(a, b, grenze):
+            for r in eintraege:
+                def _umfeld(a, b, grenze, raum=r["room"], eigen=r["id"]):
                     res = conn.execute(
                         "SELECT id,timestamp,callsign,text,audio_file,duration_s,confidence "
                         "FROM transmissions WHERE room=? AND timestamp>=? AND timestamp<? "
-                        "AND id<>? ORDER BY timestamp", (r["room"], a, b, r["id"])).fetchall()
+                        "AND id IS NOT ? ORDER BY timestamp", (raum, a, b, eigen)).fetchall()
                     return [dict(x) for x in res][-grenze:] if grenze else [dict(x) for x in res]
                 vorher  = _umfeld(r["timestamp"] - self._CHAT_CONTEXT_BEFORE_S, r["timestamp"], 5)
                 nachher = _umfeld(r["timestamp"] + (r["duration_s"] or 0),
                                   r["timestamp"] + (r["duration_s"] or 0) + self._CHAT_CONTEXT_AFTER_S, 0)[:3]
-                out.append({**dict(r), "vorher": vorher, "nachher": nachher})
+                out.append({**r, "vorher": vorher, "nachher": nachher})
             conn.close()
             return out
 

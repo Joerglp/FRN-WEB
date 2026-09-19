@@ -1500,7 +1500,7 @@ audio {
         </div>
         <div class="form-field" style="flex:0 0 130px">
           <label>Verlaufslänge <span style="color:var(--muted)">— Durchgänge</span></label>
-          <input type="number" id="bot-historylen" min="1" max="30" placeholder="10" autocomplete="off">
+          <input type="number" id="bot-historylen" min="1" max="50" placeholder="30" autocomplete="off">
         </div>
         <div class="form-field" style="flex:2">
           <label>Nur diese Räume (Komma-getrennt, leer = alle)</label>
@@ -1824,6 +1824,18 @@ audio {
             <label>Schwelle für Clips 2–4s</label>
             <input type="number" id="sid-threshold-4s" min="0.5" max="0.99" step="0.01" value="0.87">
           </div>
+          <div class="form-field" style="max-width:230px">
+            <label>Mindestabstand zum 2. Kandidaten</label>
+            <input type="number" id="sid-margin" min="0" max="0.2" step="0.005" value="0.01">
+          </div>
+        </div>
+        <div style="color:var(--muted);font-size:.72rem;margin-bottom:12px">
+          Liegen bester und zweitbester Kandidat enger beieinander als dieser Wert,
+          wird gar kein Name vergeben — ein falscher Name ist schlimmer als keiner.
+          0 schaltet die Prüfung ab. Achtung: Die Schwellen hängen am Modell auf der
+          GPU-Box. Mit ECAPA (seit 18.09., Port 9005) liegt die eigene Stimme bei
+          0.74–0.82 und eine fremde bei höchstens 0.59 — daher Basis 0.65 und
+          Mindestabstand 0.05. Der alte Resemblyzer brauchte 0.85 bzw. 0.01.
         </div>
         <button class="btn-save" onclick="saveSpeakerIdSettings()" style="margin-bottom:14px">SPEICHERN</button>
         <div class="admin-section-title" style="font-size:.85em">Eingelernte Sprecher</div>
@@ -3537,8 +3549,18 @@ function rbZeile(x, farbe) {
     const f  = pz >= 80 ? "var(--muted)" : (pz >= 65 ? "#c8a020" : "#c05050");
     konf = ` <span style="color:${f};font-size:.62rem" title="Übereinstimmung zweier Whisper-Läufe — unter 65 % rät das Modell">${pz}%</span>`;
   }
+  // Aus dem Antwort-Protokoll: Roberts Sendung steckt im Mitschnitt eines
+  // anderen Sprechers (dichter Funkverkehr) — Prüfen/Anhören beziehen sich
+  // dann auf DIESE gemischte Aufnahme, deshalb der Hinweis.
+  const hinweis = x.gemischt
+    ? ` <span style="color:#c8a020;font-size:.62rem" title="Roberts Sendung liegt im selben Mitschnitt wie ein anderer Sprecher">⚠ gemischte Aufnahme</span>` : "";
+  const gek = x.gekuerzt
+    ? ` <span style="color:var(--muted)" title="Text aus dem Log, auf 80 Zeichen gekürzt">…</span>` : "";
+  if (!x.id) return `<div style="padding:2px 0;color:${farbe}">
+    <span style="color:var(--muted)">${zeit}</span> <b>${wer}</b>: ${esc(x.text || "—")}${gek}
+    <span style="color:var(--muted);font-size:.62rem" title="keine passende Aufnahme im Archiv">(keine Aufnahme)</span></div>`;
   return `<div style="padding:2px 0;color:${farbe}">
-    <span style="color:var(--muted)">${zeit}</span> ${ton}<b>${wer}</b>: ${esc(x.text || "—")}${konf}
+    <span style="color:var(--muted)">${zeit}</span> ${ton}<b>${wer}</b>: ${esc(x.text || "—")}${gek}${konf}${hinweis}
     <button class="btn-save" style="padding:1px 6px;font-size:.62rem;margin-left:6px"
             onclick="compareTranscript(${x.id}, this, false)" title="dreimal über die GPU-Box — deckt Rateversuche auf">PRÜFEN</button>
     <button class="btn-save" style="padding:1px 6px;font-size:.62rem;margin-left:3px"
@@ -3551,16 +3573,16 @@ function rbZeile(x, farbe) {
 function renderRobertChat(c, name) {
   const zeit = new Date(c.timestamp * 1000).toLocaleString("de-DE");
   return `<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px">
-    <div style="color:var(--muted);font-size:.72rem;margin-bottom:6px">${zeit} · ${esc(c.room || "")} · #${c.id}</div>
+    <div style="color:var(--muted);font-size:.72rem;margin-bottom:6px">${zeit} · ${esc(c.room || "")} · ${c.id ? "#" + c.id : "ohne Aufnahme"}${c.aus_protokoll ? " · aus Roberts Antwort-Protokoll" : ""}</div>
     ${(c.vorher || []).map(x => rbZeile(x, "var(--text-muted)")).join("")}
     ${rbZeile(c, "var(--accent)")}
     ${(c.nachher || []).map(x => rbZeile(x, "var(--text-muted)")).join("")}
-    <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    ${c.id ? `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <select class="rb-model" style="font-size:.7rem"></select>
       <button class="btn-save" style="padding:2px 8px;font-size:.66rem"
               onclick="replayArchive(${c.id}, this)">MODELL ERNEUT FRAGEN</button>
       <span class="rb-replay" style="font-size:.78rem"></span>
-    </div></div>`;
+    </div>` : ""}</div>`;
 }
 
 async function replayArchive(id, btn) {
@@ -4118,7 +4140,7 @@ async function loadBotAdmin() {
     document.getElementById("bot-repeatblock").value  = d.repeat_block_s ?? 3600;
     document.getElementById("bot-silencecall").value  = d.silence_call_threshold_s ?? 300;
     document.getElementById("bot-minconf").value      = Math.round((d.min_confidence ?? 0.65) * 100);
-    document.getElementById("bot-historylen").value   = d.history_len ?? 10;
+    document.getElementById("bot-historylen").value   = d.history_len ?? 30;
     document.getElementById("bot-rooms").value     = (d.rooms || []).join(", ");
     document.getElementById("bot-provider").value  = d.provider || "ollama";
     document.getElementById("bot-model").value     = d.ollama_model || "";
@@ -4618,6 +4640,7 @@ async function loadSpeakerIdSettings() {
     document.getElementById("sid-threshold").value = d.threshold;
     document.getElementById("sid-threshold-2s").value = d.short_threshold_2s;
     document.getElementById("sid-threshold-4s").value = d.short_threshold_4s;
+  document.getElementById("sid-margin").value = d.min_margin;
     const list = document.getElementById("sid-enrollments");
     if (!d.enrollments || !d.enrollments.length) {
       list.innerHTML = '<div style="color:var(--muted);font-size:.8rem">Noch keine Sprecher eingelernt.</div>';
@@ -4637,11 +4660,13 @@ async function saveSpeakerIdSettings() {
   const threshold = parseFloat(document.getElementById("sid-threshold").value) || 0.80;
   const short_threshold_2s = parseFloat(document.getElementById("sid-threshold-2s").value) || 0.90;
   const short_threshold_4s = parseFloat(document.getElementById("sid-threshold-4s").value) || 0.87;
+  const margin_roh = parseFloat(document.getElementById("sid-margin").value);
+  const min_margin = isNaN(margin_roh) ? 0.01 : margin_roh;   // 0 ist gueltig
   try {
     await adminFetch("/api/admin/speaker-id", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ enabled, threshold, short_threshold_2s, short_threshold_4s }),
+      body: JSON.stringify({ enabled, threshold, short_threshold_2s, short_threshold_4s, min_margin }),
     });
     showMsg("msg-debug", "Sprecher-ID-Einstellungen gespeichert.", "ok");
   } catch(e) {
