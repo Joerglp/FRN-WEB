@@ -226,8 +226,12 @@ class FRNClient:
         self.last_keepalive = time.time()
         self.rx_sent = False
 
-    def run(self, pcm_callback, debug=False):
-        """Receive loop.  pcm_callback(pcm_640_bytes, callsign) called per decoded WAV49 pair."""
+    def run(self, pcm_callback, debug=False, boundary_callback=None):
+        """Receive loop.  pcm_callback(pcm_640_bytes, callsign) called per decoded WAV49 pair.
+
+        boundary_callback() wird bei jedem Durchgangswechsel gerufen, den der
+        Server meldet -- siehe MARKER_CLIENTS unten.
+        """
         gsm = GSMDecoder()
         try:
             while self.connected:
@@ -293,7 +297,27 @@ class FRNClient:
 
                     elif marker == MARKER_CLIENTS:
                         self._consume(1)
+                        # Durchgangsgrenze vom Server (2026-09-19): der Server
+                        # schickt die Teilnehmerliste bei JEDEM Sende-Start und
+                        # -Stopp unveraendert neu. Das ist der einzige Hinweis
+                        # im Protokoll, dass ein Durchgang wechselt -- ein
+                        # "Ende"-Marker existiert nicht, der Ton hoert einfach
+                        # auf. Die Stopp-Liste kommt oft erst mit der naechsten
+                        # Start-Liste zusammen an (Pufferung beim Server, bis
+                        # ~0,5 s), aber TCP vertauscht nie die Reihenfolge: sie
+                        # liegt im Strom garantiert ZWISCHEN dem letzten Ton des
+                        # einen und dem ersten des naechsten Sprechers. Gemessen
+                        # 19.09. 05-11 Uhr: 574 Durchgaenge, 1148 Listen, jeder
+                        # einzelne eingerahmt.
+                        # Kommt oder geht jemand, aendert sich die Besetzung --
+                        # das ist kein Durchgangswechsel und darf nicht
+                        # schneiden, sonst zerfiele eine laufende Durchsage.
+                        besetzung_alt = frozenset(c.get("ON", "") for c in self.clients)
                         self._parse_client_list()
+                        besetzung_neu = frozenset(c.get("ON", "") for c in self.clients)
+                        if (boundary_callback and besetzung_alt
+                                and besetzung_alt == besetzung_neu):
+                            boundary_callback()
 
                     elif marker == MARKER_MESSAGE:
                         self._consume(1)
@@ -639,6 +663,30 @@ class RoomRecorder:
             self._timer.daemon = True
             self._timer.start()
 
+    def cut(self):
+        """Der Server hat einen Durchgangswechsel gemeldet -> Aufnahme abschliessen.
+
+        Bis 2026-09-19 endete eine Aufnahme ausschliesslich nach
+        SILENCE_TIMEOUT Sekunden ohne Ton. Wer schneller als das nach dem
+        Vorredner drueckte, landete mit ihm in derselben Datei: morgens
+        verschluckte die Regel 296 von 574 Durchgangsgrenzen (52 %), 118
+        Aufnahmen enthielten mehrere Sprecher. Die Stilleregel bleibt als
+        Rueckfall, falls die Server-Meldung einmal ausbleibt.
+
+        Wird aus der Empfangsschleife gerufen, also im selben Thread und in
+        derselben Reihenfolge wie feed() -- der Schnitt sitzt damit exakt
+        zwischen den Tonpaketen der beiden Sprecher.
+        """
+        with self._lock:
+            if not self._active:
+                return
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
+        log.debug("[%s] Durchgangswechsel vom Server -- Aufnahme abgeschlossen",
+                  self.room_name)
+        self._on_silence()
+
     def _on_silence(self):
         with self._lock:
             if not self._active:
@@ -945,7 +993,8 @@ def main():
 
     try:
         client.connect()
-        client.run(pcm_callback, debug=args.debug)
+        client.run(pcm_callback, debug=args.debug,
+                   boundary_callback=recorder.cut if recorder else None)
     except (ConnectionError, TimeoutError, OSError) as exc:
         log.error("Connection error: %s", exc)
         sys.exit(1)
