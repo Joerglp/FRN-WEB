@@ -1576,6 +1576,46 @@ class TXServer:
         "Anführungszeichen oder Emojis (er wird vorgelesen)."
     )
 
+    # Eingabegrenzen aller Zahlenfelder der Weboberflaeche -- an EINER Stelle
+    # (2026-09-19). Frueher stand jede Grenze dreimal da: in der Pruefung hier,
+    # als max-Attribut im Eingabefeld und teils als JS-Vorgabe; wer eine
+    # anhob und eine Stelle vergass, bekam ein Feld, das Werte ablehnte, die
+    # der Server genommen haette. Jetzt liefern die GET-Antworten die Tabelle
+    # als "_grenzen" mit, und tx_page.html setzt min/max der Felder daraus.
+    # Die Grenzen fangen Tippfehler ab (5000 statt 50), sie sind keine
+    # Empfehlung -- deshalb bewusst grosszuegig.
+    _GRENZEN = {
+        "bot": {
+            "cooldown_s":               (0, 3600),
+            "conversation_window_s":    (0, 3600),
+            "history_len":              (0, 200),    # effektiv mind. 4, s. _bot_observe
+            "max_transcript_age_s":     (0, 3600),   # Rueckstau-Bremse
+            "repeat_block_s":           (0, 86400),  # Wiederholungssperre
+            "silence_call_threshold_s": (0, 86400),
+            "ollama_num_ctx":           (0, 262144), # Modell-Max laut /api/tags
+            "ollama_num_predict":       (0, 4096),
+            "min_confidence":           (0.0, 1.0),  # 0 = Pruefung aus
+        },
+        "auto_reply": {
+            "cooldown_s":               (0, 3600),
+        },
+        "speaker_id": {
+            "threshold":                (0.5, 0.99),
+            "short_threshold_2s":       (0.5, 0.99),
+            "short_threshold_4s":       (0.5, 0.99),
+            "min_margin":               (0.0, 0.20),
+        },
+        "bot_chats": {
+            "limit":                    (1, 200),
+        },
+    }
+
+    @classmethod
+    def _begrenzt(cls, bereich: str, key: str, wert) -> float:
+        """Wert auf die Grenzen aus _GRENZEN stutzen (ValueError bei Unsinn)."""
+        lo, hi = cls._GRENZEN[bereich][key]
+        return max(lo, min(hi, float(wert)))
+
     _BOT_DEFAULTS = {
         "enabled":  False,
         # Zweiter Schalter neben "enabled": antwortet dann NUR, wenn sein
@@ -3740,7 +3780,7 @@ class TXServer:
                 ar["ignore_callsigns"] = _strlist(body["ignore_callsigns"])
             if "cooldown_s" in body:
                 try:
-                    ar["cooldown_s"] = max(0, min(3600, float(body["cooldown_s"])))
+                    ar["cooldown_s"] = self._begrenzt("auto_reply", "cooldown_s", body["cooldown_s"])
                 except (TypeError, ValueError):
                     pass
             for key in ("ollama_url", "ollama_model", "persona"):
@@ -3766,6 +3806,7 @@ class TXServer:
 
         out = dict(self._AUTO_REPLY_DEFAULTS)
         out.update({k: v for k, v in ar.items() if not k.startswith("_")})
+        out["_grenzen"] = self._GRENZEN
         return web.json_response(out)
 
     async def handle_admin_auto_reply_models(self, request):
@@ -3891,21 +3932,10 @@ class TXServer:
                         ts = time.time()
                     nb.append({"ts": ts, "text": tx[:300]})
                 bot["notebook"] = nb[-self._NOTEBOOK_MAX:]
-            for key, hi in (("cooldown_s", 3600),
-                            ("conversation_window_s", 3600),
-                            ("history_len", 50),   # 2026-09-19: seit Schnitt je Durchgang braucht es mehr Eintraege
-                            # 2026-09-16 in die Weboberflaeche geholt -- standen
-                            # vorher nur in der config.json bzw. als Vorgabe im
-                            # Code (User-Wunsch: alles ueber die Web-Config).
-                            ("max_transcript_age_s", 3600),   # Rueckstau-Bremse
-                            ("repeat_block_s", 86400),        # Wiederholungssperre
-                            ("silence_call_threshold_s", 86400),
-                            ("ollama_num_ctx", 262144),   # Modell-Max laut /api/tags
-                            ("ollama_num_predict", 4096),
-                            ("min_confidence", 1.0)):   # 0 = Pruefung aus
+            for key in self._GRENZEN["bot"]:
                 if key in body:
                     try:
-                        bot[key] = max(0, min(hi, float(body[key])))
+                        bot[key] = self._begrenzt("bot", key, body[key])
                     except (TypeError, ValueError):
                         pass
 
@@ -3937,6 +3967,7 @@ class TXServer:
         # Leere System-Anweisung → Standardvorlage anzeigen (zum Anpassen)
         if not (out.get("system_prompt") or "").strip():
             out["system_prompt"] = self._BOT_SYSTEM_DEFAULT
+        out["_grenzen"] = self._GRENZEN
         return web.json_response(out)
 
     async def handle_admin_bot_test(self, request):
@@ -4040,18 +4071,18 @@ class TXServer:
                 cfg["enabled"] = bool(body["enabled"])
             if "threshold" in body:
                 try:
-                    cfg["threshold"] = max(0.5, min(0.99, float(body["threshold"])))
+                    cfg["threshold"] = self._begrenzt("speaker_id", "threshold", body["threshold"])
                 except (TypeError, ValueError):
                     pass
             for key in ("short_threshold_2s", "short_threshold_4s"):
                 if key in body:
                     try:
-                        cfg[key] = max(0.5, min(0.99, float(body[key])))
+                        cfg[key] = self._begrenzt("speaker_id", key, body[key])
                     except (TypeError, ValueError):
                         pass
             if "min_margin" in body:
                 try:
-                    cfg["min_margin"] = max(0.0, min(0.20, float(body["min_margin"])))
+                    cfg["min_margin"] = self._begrenzt("speaker_id", "min_margin", body["min_margin"])
                 except (TypeError, ValueError):
                     pass
             if "server_url" in body and isinstance(body["server_url"], str):
@@ -4078,6 +4109,7 @@ class TXServer:
             "min_margin": float(cfg.get("min_margin", 0.01)),
             "server_url": cfg.get("server_url") or "http://192.0.0.17:9004/embed",
             "enrollments": enrollments,
+            "_grenzen": self._GRENZEN,
         })
 
     async def handle_admin_speaker_enroll(self, request):
@@ -4817,7 +4849,7 @@ class TXServer:
             return web.json_response({"error": "archive not available"}, status=503)
         q     = request.rel_url.query
         datum = (q.get("date") or "").strip()
-        limit = max(1, min(200, int(q.get("limit", 50) or 50)))
+        limit = int(self._begrenzt("bot_chats", "limit", q.get("limit", 50) or 50))
         name  = (self._bot_cfg().get("name") or "Robert")
         loop  = asyncio.get_running_loop()
 

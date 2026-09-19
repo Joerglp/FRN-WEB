@@ -1376,7 +1376,7 @@ audio {
         </div>
         <div class="form-field" style="flex:0 0 130px">
           <label>Cooldown (Sek.)</label>
-          <input type="number" id="ar-cooldown" min="0" max="3600" placeholder="90">
+          <input type="number" id="ar-cooldown" placeholder="90">
         </div>
       </div>
 
@@ -1476,31 +1476,31 @@ audio {
       </div>
         <div class="form-field" style="flex:0 0 110px">
           <label>Cooldown (Sek.)</label>
-          <input type="number" id="bot-cooldown" min="0" max="3600" placeholder="20" autocomplete="off">
+          <input type="number" id="bot-cooldown" placeholder="20" autocomplete="off">
         </div>
         <div class="form-field" style="flex:0 0 160px">
           <label>Gesprächsfenster (Sek.)</label>
-          <input type="number" id="bot-convwin" min="0" max="3600" placeholder="180" autocomplete="off">
+          <input type="number" id="bot-convwin" placeholder="180" autocomplete="off">
         </div>
         <div class="form-field" style="flex:0 0 150px">
           <label>Rückstau-Bremse (Sek.) <span style="color:var(--muted)">— ältere Durchsagen nicht beantworten</span></label>
-          <input type="number" id="bot-maxage" min="0" max="3600" placeholder="120" autocomplete="off">
+          <input type="number" id="bot-maxage" placeholder="120" autocomplete="off">
         </div>
         <div class="form-field" style="flex:0 0 150px">
           <label>Wiederholungssperre (Sek.) <span style="color:var(--muted)">— gleiche Antwort erst danach wieder</span></label>
-          <input type="number" id="bot-repeatblock" min="0" max="86400" placeholder="3600" autocomplete="off">
+          <input type="number" id="bot-repeatblock" placeholder="3600" autocomplete="off">
         </div>
         <div class="form-field" style="flex:0 0 170px">
           <label>Anruf nach Funkstille (Sek.) <span style="color:var(--muted)">— 0 = aus</span></label>
-          <input type="number" id="bot-silencecall" min="0" max="86400" placeholder="300" autocomplete="off">
+          <input type="number" id="bot-silencecall" placeholder="300" autocomplete="off">
         </div>
         <div class="form-field" style="flex:0 0 190px">
           <label>Mindest-Verständlichkeit (%) <span style="color:var(--muted)">— 0 = Prüfung aus</span></label>
-          <input type="number" id="bot-minconf" min="0" max="100" step="5" placeholder="65" autocomplete="off">
+          <input type="number" id="bot-minconf" step="5" placeholder="65" autocomplete="off">
         </div>
         <div class="form-field" style="flex:0 0 130px">
           <label>Verlaufslänge <span style="color:var(--muted)">— Durchgänge</span></label>
-          <input type="number" id="bot-historylen" min="1" max="50" placeholder="30" autocomplete="off">
+          <input type="number" id="bot-historylen" placeholder="30" autocomplete="off">
         </div>
         <div class="form-field" style="flex:2">
           <label>Nur diese Räume (Komma-getrennt, leer = alle)</label>
@@ -1601,11 +1601,11 @@ audio {
           </div>
           <div class="form-field" style="flex:0 0 140px">
             <label>Kontextfenster <span style="color:var(--muted)">(num_ctx)</span></label>
-            <input type="number" id="bot-ollama-numctx" min="0" max="262144" placeholder="30780" autocomplete="off">
+            <input type="number" id="bot-ollama-numctx" placeholder="30780" autocomplete="off">
           </div>
           <div class="form-field" style="flex:0 0 140px">
             <label>Max. Antwort <span style="color:var(--muted)">(num_predict)</span></label>
-            <input type="number" id="bot-ollama-numpredict" min="0" max="4096" placeholder="150" autocomplete="off">
+            <input type="number" id="bot-ollama-numpredict" placeholder="150" autocomplete="off">
           </div>
         </div>
         <div class="form-field" style="margin-top:2px;font-size:.72rem;color:var(--muted);line-height:1.4">
@@ -1701,7 +1701,7 @@ audio {
         </div>
         <div class="form-field" style="flex:0 0 120px">
           <label>Anzahl</label>
-          <input type="number" id="rb-limit" min="1" max="200" value="25" autocomplete="off">
+          <input type="number" id="rb-limit" value="25" autocomplete="off">
         </div>
         <div class="form-field" style="flex:0 0 auto;justify-content:flex-end">
           <button class="btn-save" onclick="loadRobertChats()">LADEN</button>
@@ -1807,7 +1807,7 @@ audio {
         </label>
         <div class="form-field" style="max-width:200px;margin-bottom:12px">
           <label>Schwelle (Ähnlichkeit, 0.5–0.99)</label>
-          <input type="number" id="sid-threshold" min="0.5" max="0.99" step="0.01" value="0.80">
+          <input type="number" id="sid-threshold" step="0.01" value="0.80">
         </div>
         <div style="font-size:.78rem;color:var(--muted);margin-bottom:8px;line-height:1.5">
           Bei kurzen Aufnahmen ist die Stimmerkennung unsicherer (weniger Audio,
@@ -1818,15 +1818,15 @@ audio {
         <div style="display:flex;gap:12px;margin-bottom:12px">
           <div class="form-field" style="max-width:200px">
             <label>Schwelle für Clips &lt; 2s</label>
-            <input type="number" id="sid-threshold-2s" min="0.5" max="0.99" step="0.01" value="0.90">
+            <input type="number" id="sid-threshold-2s" step="0.01" value="0.90">
           </div>
           <div class="form-field" style="max-width:200px">
             <label>Schwelle für Clips 2–4s</label>
-            <input type="number" id="sid-threshold-4s" min="0.5" max="0.99" step="0.01" value="0.87">
+            <input type="number" id="sid-threshold-4s" step="0.01" value="0.87">
           </div>
           <div class="form-field" style="max-width:230px">
             <label>Mindestabstand zum 2. Kandidaten</label>
-            <input type="number" id="sid-margin" min="0" max="0.2" step="0.005" value="0.01">
+            <input type="number" id="sid-margin" step="0.005" value="0.01">
           </div>
         </div>
         <div style="color:var(--muted);font-size:.72rem;margin-bottom:12px">
@@ -4020,6 +4020,38 @@ async function registerFRN() {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 // ── Automatik (Auto-Antwort) Admin ──────────────────────────────────────────
+// Eingabegrenzen der Zahlenfelder kommen vom Server ("_grenzen" in den
+// Einstellungs-Antworten) -- hier NICHT eintragen. Frueher standen sie
+// zusaetzlich als min/max im HTML und liefen beim Anheben auseinander
+// (2026-09-19). Dritter Wert = Anzeigefaktor (Verstaendlichkeit in %).
+const GRENZ_FELDER = {
+  "bot-cooldown": ["bot", "cooldown_s", 1],
+  "bot-convwin": ["bot", "conversation_window_s", 1],
+  "bot-maxage": ["bot", "max_transcript_age_s", 1],
+  "bot-repeatblock": ["bot", "repeat_block_s", 1],
+  "bot-silencecall": ["bot", "silence_call_threshold_s", 1],
+  "bot-minconf": ["bot", "min_confidence", 100],
+  "bot-historylen": ["bot", "history_len", 1],
+  "bot-ollama-numctx": ["bot", "ollama_num_ctx", 1],
+  "bot-ollama-numpredict": ["bot", "ollama_num_predict", 1],
+  "ar-cooldown": ["auto_reply", "cooldown_s", 1],
+  "sid-threshold": ["speaker_id", "threshold", 1],
+  "sid-threshold-2s": ["speaker_id", "short_threshold_2s", 1],
+  "sid-threshold-4s": ["speaker_id", "short_threshold_4s", 1],
+  "sid-margin": ["speaker_id", "min_margin", 1],
+  "rb-limit": ["bot_chats", "limit", 1]
+};
+function grenzenSetzen(g) {
+  if (!g) return;
+  for (const [id, [bereich, key, faktor]] of Object.entries(GRENZ_FELDER)) {
+    const el = document.getElementById(id);
+    const b  = g[bereich] && g[bereich][key];
+    if (!el || !b) continue;
+    el.min = b[0] * faktor;
+    el.max = b[1] * faktor;
+  }
+}
+
 async function loadAutoReplyAdmin() {
   try {
     const r = await adminFetch("/api/admin/auto-reply");
@@ -4032,6 +4064,7 @@ async function loadAutoReplyAdmin() {
                                           : (d.error || r.status)), "error");
       return;
     }
+    grenzenSetzen(d._grenzen);
     document.getElementById("ar-enabled").checked    = !!d.enabled;
     document.getElementById("ar-autosend").checked   = !!d.auto_send;
     document.getElementById("ar-names").value        = (d.names || []).join(", ");
@@ -4127,6 +4160,7 @@ async function loadBotAdmin() {
                                           : (d.error || r.status)), "error");
       return;
     }
+    grenzenSetzen(d._grenzen);
     document.getElementById("bot-enabled").checked = !!d.enabled;
     document.getElementById("bot-only-addressed").checked = !!d.only_when_addressed;
     document.getElementById("bot-name").value      = d.name || "";
@@ -4636,6 +4670,7 @@ async function loadSpeakerIdSettings() {
                                           : (d.error || r.status)), "error");
       return;
     }
+    grenzenSetzen(d._grenzen);
     document.getElementById("sid-enabled").checked = !!d.enabled;
     document.getElementById("sid-threshold").value = d.threshold;
     document.getElementById("sid-threshold-2s").value = d.short_threshold_2s;
