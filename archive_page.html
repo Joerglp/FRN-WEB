@@ -724,6 +724,19 @@ function dateDivider(isoTime) {
 }
 
 // ── Render one message ─────────────────────────────────────────────────────
+// Safari auf iPhone/iPad spielt kein Opus im Ogg-Container -- der Balken
+// rast beim Druck auf Play durch, ohne Ton. Solche Browser bekommen die
+// AAC-Fassung vom Server (?fmt=m4a, wird dort einmal umgewandelt und
+// zwischengespeichert). Entschieden wird ueber canPlayType statt ueber die
+// Browser-Kennung, damit das auch fuer kuenftige Browser stimmt.
+const OGG_SPIELBAR = (() => {
+  try { return !!new Audio().canPlayType("audio/ogg; codecs=opus"); }
+  catch (e) { return false; }
+})();
+function archivAudioUrl(datei) {
+  return "/api/archive/audio/" + encodeURIComponent(datei) + (OGG_SPIELBAR ? "" : "?fmt=m4a");
+}
+
 function renderMsg(e, mergeWithId) {
   const color = csColor(e.callsign || '?');
   const rc    = roomColor(e.room || '');
@@ -736,7 +749,7 @@ function renderMsg(e, mergeWithId) {
 
   const timeOnly = e.time.slice(11, 19);
   const audioTag = e.has_audio
-    ? `<audio controls preload="none" src="/api/archive/audio/${encodeURIComponent(e.audio_file)}"></audio>`
+    ? `<audio controls preload="none" src="${archivAudioUrl(e.audio_file)}"></audio>`
     : '';
   const dur = e.duration_s > 0 ? `<span class="msg-duration">⏱ ${e.duration_s}s</span>` : '';
 

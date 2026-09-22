@@ -3535,11 +3535,24 @@ async function loadRobertChats() {
   }
 }
 
+// Safari auf iPhone/iPad spielt kein Opus im Ogg-Container -- der Balken
+// rast beim Druck auf Play durch, ohne Ton. Solche Browser bekommen die
+// AAC-Fassung vom Server (?fmt=m4a, wird dort einmal umgewandelt und
+// zwischengespeichert). Entschieden wird ueber canPlayType statt ueber die
+// Browser-Kennung, damit das auch fuer kuenftige Browser stimmt.
+const OGG_SPIELBAR = (() => {
+  try { return !!new Audio().canPlayType("audio/ogg; codecs=opus"); }
+  catch (e) { return false; }
+})();
+function archivAudioUrl(datei) {
+  return "/api/archive/audio/" + encodeURIComponent(datei) + (OGG_SPIELBAR ? "" : "?fmt=m4a");
+}
+
 function rbZeile(x, farbe) {
   const zeit = new Date(x.timestamp * 1000).toLocaleTimeString("de-DE");
   const wer  = esc(x.callsign || "?");
   const ton  = x.audio_file
-    ? `<a href="/api/archive/audio/${encodeURIComponent(x.audio_file)}" target="_blank"
+    ? `<a href="${archivAudioUrl(x.audio_file)}" target="_blank"
           style="color:var(--muted);text-decoration:none" title="anhören">▶</a> ` : "";
   // Kontroll-Lauf: zweiter Whisper-Durchgang mit leicht verändertem Tempo.
   // Niedrige Werte heißen zuverlässig "geraten"; hohe sind keine Garantie.

@@ -6967,6 +6967,29 @@ class TXServer:
         rooms = await loop.run_in_executor(None, _archive.get_chat_rooms)
         return web.json_response({"messages": messages, "total": total, "rooms": rooms})
 
+    # Safari auf iPhone/iPad spielt kein Opus im Ogg-Container: der Balken
+    # rast beim Druck auf Play durch, ohne dass ein Ton kommt (2026-09-22 vom
+    # User gemeldet). Deshalb auf Anfrage (?fmt=m4a) eine AAC-Fassung
+    # ausliefern, die iOS beherrscht. Die Seite entscheidet selbst, ob sie sie
+    # braucht -- ueber canPlayType, nicht ueber die Browser-Kennung.
+    # Gemessen auf dem Pi: 0,18 s je Aufnahme, 16 kB statt 3,7 kB. Ergebnis
+    # landet im Zwischenspeicher, jede Aufnahme wird also hoechstens einmal
+    # umgewandelt.
+    _M4A_CACHE_MAX = 3000        # Dateien; darueber fliegen die aeltesten raus
+
+    def _m4a_pfad(self, opus_path: Path) -> Path:
+        d = _archive.AUDIO_DIR.parent / "audio-m4a"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / (opus_path.stem + ".m4a")
+
+    def _m4a_aufraeumen(self, ordner: Path) -> None:
+        dateien = sorted(ordner.glob("*.m4a"), key=lambda f: f.stat().st_mtime)
+        for f in dateien[:-self._M4A_CACHE_MAX]:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
     async def handle_archive_audio(self, request):
         if not _ARCHIVE_AVAILABLE:
             return web.Response(status=503)
@@ -6977,6 +7000,35 @@ class TXServer:
         audio_path = _archive.AUDIO_DIR / filename
         if not audio_path.exists():
             return web.Response(status=404)
+
+        if request.query.get("fmt") == "m4a":
+            ziel = self._m4a_pfad(audio_path)
+            if not ziel.exists() or ziel.stat().st_size == 0:
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-loglevel", "error", "-i", str(audio_path),
+                    "-c:a", "aac", "-b:a", "48k", "-movflags", "+faststart",
+                    str(ziel),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE)
+                try:
+                    _, err = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    err = b"Zeitueberschreitung"
+                if proc.returncode != 0 or not ziel.exists() or ziel.stat().st_size == 0:
+                    log.warning("AAC-Umwandlung fehlgeschlagen (%s): %.200s",
+                                filename, (err or b"").decode("utf-8", "replace"))
+                    try:
+                        ziel.unlink()
+                    except OSError:
+                        pass
+                    # Lieber das Original ausliefern als gar nichts
+                    return web.FileResponse(audio_path,
+                                            headers={"Content-Type": "audio/ogg"})
+                self._m4a_aufraeumen(ziel.parent)
+            # FileResponse beherrscht Bereichsanfragen -- die braucht Safari.
+            return web.FileResponse(ziel, headers={"Content-Type": "audio/mp4"})
+
         return web.FileResponse(audio_path, headers={"Content-Type": "audio/ogg"})
 
     # ── CORS middleware ────────────────────────────────────────────────────
