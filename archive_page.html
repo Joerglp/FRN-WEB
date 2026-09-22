@@ -718,7 +718,10 @@ function dateDivider(isoTime) {
   const d = isoTime.slice(0, 10);
   if (d === lastDateLabel) return null;
   lastDateLabel = d;
-  const dt = new Date(isoTime);
+  // Safari verlangt das T zwischen Datum und Uhrzeit; mit Leerzeichen
+  // (so liefert es der Server) kam auf iPhone/iPad "Invalid Date" statt
+  // des Wochentags heraus -- Chrome und Firefox sind da grosszuegiger.
+  const dt = new Date(isoTime.replace(' ', 'T'));
   const opts = {weekday:'long', year:'numeric', month:'long', day:'numeric'};
   return dt.toLocaleDateString('de-DE', opts);
 }
