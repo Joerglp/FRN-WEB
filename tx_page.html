@@ -1461,8 +1461,21 @@ audio {
         <input type="checkbox" id="bot-only-addressed" style="accent-color:#f0b429" autocomplete="off">
         Nur auf Ansprache — meldet sich <b>ausschließlich</b>, wenn sein Name fällt
       </label>
-      <div style="font-size:.72rem;color:var(--text-muted);margin:0 0 14px 24px;line-height:1.4">
+      <div style="font-size:.72rem;color:var(--text-muted);margin:0 0 6px 24px;line-height:1.4">
         Cooldown und Selbst-Erkennung (eigenes Echo) laufen automatisch mit.
+      </div>
+      <div style="margin:0 0 14px 24px">
+        <label style="font-size:.72rem;color:var(--text-muted);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          Anschlussfragen: nach eigener Sendung noch
+          <input type="number" id="bot-followup" min="0" max="3600" step="10" style="width:80px" autocomplete="off">
+          Sekunden ohne Namen ansprechbar
+        </label>
+        <div style="font-size:.72rem;color:var(--text-muted);margin-top:4px;line-height:1.4">
+          Damit kannst du im Gespräch einfach weiterreden („Geht deine Suche nicht?"), ohne ihn
+          jedes Mal neu zu rufen. Der Zeitraum beginnt mit jeder seiner Sendungen neu.
+          <b>0 = aus</b>, dann muss sein Name wirklich in jedem Spruch stehen.
+          Gilt nur zusammen mit dem Schalter darüber.
+        </div>
       </div>
       <div class="form-grid">
         <div class="form-field" style="flex:1">
@@ -1497,10 +1510,20 @@ audio {
         <div class="form-field" style="flex:0 0 190px">
           <label>Mindest-Verständlichkeit (%) <span style="color:var(--muted)">— 0 = Prüfung aus</span></label>
           <input type="number" id="bot-minconf" step="5" placeholder="65" autocomplete="off">
+          <label style="display:flex;align-items:center;gap:6px;margin-top:4px;font-size:.72rem;cursor:pointer"
+                 title="Sprüche zwischen dieser Schwelle und 80 % kommen mit dem Vermerk [schlecht verstanden] in Roberts Verlauf, damit er verhörte Wörter nicht wörtlich nimmt. Darunter kommen sie gar nicht in den Verlauf.">
+            <input type="checkbox" id="bot-unsicher" style="accent-color:#f0b429" autocomplete="off">
+            unsichere Zeilen kennzeichnen
+          </label>
         </div>
         <div class="form-field" style="flex:0 0 130px">
           <label>Verlaufslänge <span style="color:var(--muted)">— Durchgänge</span></label>
           <input type="number" id="bot-historylen" placeholder="30" autocomplete="off">
+        </div>
+        <div class="form-field">
+          <label title="Die Anzahl begrenzt die Verlaufslänge. Diese Grenze greift nur, wenn auf dem Kanal wenig los war: Sprüche, die älter sind, sieht Robert nicht mehr. War bis 25.09. fest 60 Minuten.">
+            Verlauf höchstens (Min.)</label>
+          <input type="number" id="bot-historymaxage" min="10" max="1440" placeholder="180" autocomplete="off">
         </div>
         <div class="form-field" style="flex:2">
           <label>Nur diese Räume (Komma-getrennt, leer = alle)</label>
@@ -1513,7 +1536,8 @@ audio {
         <label>Persona (wer ist der Bot?)</label>
         <textarea id="bot-persona" rows="3" style="width:100%;resize:vertical;
           background:var(--panel);color:var(--text);border:1px solid var(--border);
-          border-radius:6px;padding:8px 10px;font-family:inherit;font-size:.85em" autocomplete="off"></textarea>
+          border-radius:6px;padding:8px 10px;font-family:inherit;font-size:.85em" autocomplete="off"
+          oninput="promptGroessePlanen()"></textarea>
       </div>
       <details style="margin-top:8px">
         <summary style="cursor:pointer;font-size:.82rem;color:var(--accent);padding:4px 0">
@@ -1523,12 +1547,15 @@ audio {
           <label>Anweisung fürs Modell — Platzhalter <code>{name}</code> und <code>{persona}</code> werden eingesetzt. Leer = Standard.</label>
           <textarea id="bot-system-prompt" rows="12" style="width:100%;resize:vertical;
             background:var(--panel);color:var(--text);border:1px solid var(--border);
-            border-radius:6px;padding:8px 10px;font-family:'Share Tech Mono',monospace;font-size:.8em;line-height:1.5" autocomplete="off"></textarea>
+            border-radius:6px;padding:8px 10px;font-family:'Share Tech Mono',monospace;font-size:.8em;line-height:1.5" autocomplete="off"
+            oninput="promptGroessePlanen()"></textarea>
           <div style="font-size:.72rem;color:var(--muted);margin-top:4px;line-height:1.4">
             ⚠ Die Zeile mit dem Wort <b>SKIP</b> nicht entfernen — sonst funkt Robert in jeden Durchgang, statt nur wenn er gemeint ist.
           </div>
         </div>
       </details>
+      <div id="bot-prompt-groesse" style="font-size:.74rem;color:var(--muted);margin-top:8px;line-height:1.5"
+           title="Geschätzt aus der Zeichenzahl (geeicht an einer echten Anfrage: 3,47 Zeichen je Token). Bezug: vor dem Kürzen am 23.09. rund 4300 Tokens, direkt danach rund 3050."></div>
       </div>
       <div id="bot-sub-stimme" class="bot-subtab-content">
         <div class="form-grid">
@@ -1547,6 +1574,8 @@ audio {
             <label style="font-size:.7rem;color:var(--muted);margin-top:2px">Piper
               <input type="text" id="tts-piper-url" placeholder="http://192.0.0.17:9003/tts"
                      style="width:100%" onchange="saveTts()" autocomplete="off"></label>
+            <label style="font-size:.7rem;color:var(--muted);margin-top:4px">Piper-Stimme
+              <select id="tts-remote-voice" style="width:100%" onchange="saveTts()" autocomplete="off"></select></label>
             <label style="font-size:.7rem;color:var(--muted);margin-top:4px">XTTS (geklonte Stimmen)
               <input type="text" id="tts-xtts-url" placeholder="http://192.0.0.17:9010/tts"
                      style="width:100%" onchange="saveTts()" autocomplete="off"></label>
@@ -1570,10 +1599,28 @@ audio {
 
           <div class="form-field" style="flex:1 1 260px">
             <label>Roberts Stimme <span style="color:var(--muted)">— im Normalbetrieb</span></label>
-            <input type="text" id="bot-speaker" placeholder="damien_black" autocomplete="off">
+            <input type="text" id="bot-speaker" list="bot-speaker-list" placeholder="damien_black" autocomplete="off">
+            <datalist id="bot-speaker-list"></datalist>
             <div style="font-size:.7rem;color:var(--muted);margin-top:4px;line-height:1.35">
-              Bei XTTS die Sprecher-ID (z.&nbsp;B. <code>aaron_dreschner</code>),
-              bei Piper die Stimme bzw. Emotion (z.&nbsp;B. <code>de_de-thorsten-high</code>).
+              Bei XTTS die Sprecher-ID (z.&nbsp;B. <code>aaron_dreschner</code>).
+              Bei Piper die <b>Stimmung innerhalb der gewählten Stimme</b> — beim Modell
+              <code>thorsten_emotional</code> also z.&nbsp;B. <code>neutral</code>,
+              <code>amused</code> oder <code>whisper</code>. Die Liste erscheint beim
+              Hineinklicken, sobald oben eine Stimme mit Stimmungen gewählt ist.
+              Leer lassen heißt: Standard-Stimmung der Box.
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;margin:8px 0 2px;cursor:pointer;font-size:.78rem">
+              <input type="checkbox" id="bot-emotion-auto" style="accent-color:#f0b429" autocomplete="off">
+              Stimmung vom Modell wählen lassen
+            </label>
+            <label style="font-size:.7rem;color:var(--muted)">Erlaubte Stimmungen
+              <input type="text" id="bot-emotion-list" placeholder="neutral, amused, surprised, sleepy"
+                     style="width:100%" autocomplete="off"></label>
+            <div style="font-size:.7rem;color:var(--muted);margin-top:4px;line-height:1.35">
+              Robert stellt seiner Antwort dann selbst <code>[stimmung]</code> voran; der Server
+              schneidet das ab und spricht den Rest damit. Kein zweiter Modellaufruf, also nicht
+              langsamer. Braucht oben eine Stimme mit Stimmungen. Das Feld „Roberts Stimme" gilt
+              dann nur noch, wenn das Modell keine oder eine unerlaubte Stimmung nennt.
             </div>
             <div style="font-size:.68rem;color:var(--amber, #f0b429);margin-top:6px">Erst mit SPEICHERN übernommen</div>
           </div>
@@ -1601,16 +1648,23 @@ audio {
           </div>
           <div class="form-field" style="flex:0 0 140px">
             <label>Kontextfenster <span style="color:var(--muted)">(num_ctx)</span></label>
-            <input type="number" id="bot-ollama-numctx" placeholder="30780" autocomplete="off">
+            <input type="number" id="bot-ollama-numctx" min="0" placeholder="30780" autocomplete="off">
           </div>
           <div class="form-field" style="flex:0 0 140px">
             <label>Max. Antwort <span style="color:var(--muted)">(num_predict)</span></label>
             <input type="number" id="bot-ollama-numpredict" placeholder="150" autocomplete="off">
           </div>
+          <div class="form-field" style="flex:0 0 140px">
+            <label>Temperatur</label>
+            <input type="number" id="bot-temperatur" min="0" max="2" step="0.05" placeholder="0.4" autocomplete="off">
+          </div>
         </div>
         <div class="form-field" style="margin-top:2px;font-size:.72rem;color:var(--muted);line-height:1.4">
           Kontextfenster muss zu dem passen, mit dem andere Clients (z.B. Open WebUI) dasselbe Modell laden — sonst lädt Ollama bei jedem Wechsel neu (~10-15s).
+          <b>0 = gar nicht mitschicken</b>: dann behält Ollama den Kontext, mit dem das Modell gerade geladen ist — sinnvoll beim Testen anderer Modelle mit kleinerem Kontext, sonst lädt Roberts nächste Antwort das Testmodell mit seinem Wert neu.
           Max. Antwort ggf. hochsetzen bei Modellen mit langem internem "Denken" (thinking) vor der eigentlichen Antwort, sonst bricht die Antwort mitten im Denken ab und wird verworfen.
+          Temperatur steuert, wie frei Robert formuliert, und gilt für Ollama wie für Gemini: niedrig (0.2–0.4) heißt sachlich, aber er wiederholt sich;
+          höher (0.6–0.8) klingt lockerer und abwechslungsreicher, er erfindet dann aber eher etwas dazu. 0 = bei gleicher Lage immer dieselbe Antwort.
         </div>
         <div class="form-field" style="margin-top:8px">
           <label>Zugangs-Token (falls Server passwortgeschützt)</label>
@@ -1658,6 +1712,20 @@ audio {
         Notizbuch aktiv (Robert darf sich selbst Notizen machen)
       </label>
       <div id="bot-notebook-list" style="font-size:.82rem;color:var(--text);margin-bottom:6px"></div>
+
+      <div class="admin-section-title" style="font-size:.85em;margin-top:18px">Stiller Mitschreiber</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px;line-height:1.5">
+        Hört <b>alle</b> Funksprüche mit, auch Gespräche, die nicht an Robert gehen. Fällt ein
+        Stichwort (Geburtstag, Urlaub, krank, Krankenhaus, Operation, Arzt, gestorben, Umzug,
+        Hochzeit, neuer Mast/Antenne/Funkgerät), schlägt er eine Notiz vor. Robert benutzt sie
+        <b>erst, wenn du sie übernimmst</b> — vorher weiß er nichts davon. Den Text kannst du vor
+        dem Übernehmen korrigieren.
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer">
+        <input type="checkbox" id="bot-mitschreiber" style="accent-color:#f0b429" autocomplete="off">
+        Mitschreiber aktiv
+      </label>
+      <div id="notiz-vorschlaege" style="font-size:.82rem;margin-bottom:6px"></div>
       </div>
       <div id="bot-sub-test" class="bot-subtab-content">
       <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
@@ -3610,7 +3678,8 @@ async function replayArchive(id, btn) {
     });
     const d = await r.json();
     out.innerHTML = (!r.ok || d.error) ? `<span style="color:var(--red)">${esc(d.error || r.status)}</span>`
-      : `<b>${esc(d.provider || "")} ${esc(d.model || "")}</b> (${d.seconds}s): ${esc(d.jetzt)}`;
+      : `<b>${esc(d.provider || "")} ${esc(d.model || "")}</b> (${d.seconds}s): ${esc(d.jetzt)}` +
+        (d.stimmung ? ` <i style="color:var(--muted)">[${esc(d.stimmung)}]</i>` : "");
   } catch(e) { out.textContent = "Fehler: " + e; }
   btn.disabled = false;
 }
@@ -4046,7 +4115,9 @@ const GRENZ_FELDER = {
   "bot-minconf": ["bot", "min_confidence", 100],
   "bot-historylen": ["bot", "history_len", 1],
   "bot-ollama-numctx": ["bot", "ollama_num_ctx", 1],
+  "bot-followup": ["bot", "follow_up_window_s", 1],
   "bot-ollama-numpredict": ["bot", "ollama_num_predict", 1],
+  "bot-temperatur": ["bot", "temperature", 1],
   "ar-cooldown": ["auto_reply", "cooldown_s", 1],
   "sid-threshold": ["speaker_id", "threshold", 1],
   "sid-threshold-2s": ["speaker_id", "short_threshold_2s", 1],
@@ -4176,11 +4247,14 @@ async function loadBotAdmin() {
     grenzenSetzen(d._grenzen);
     document.getElementById("bot-enabled").checked = !!d.enabled;
     document.getElementById("bot-only-addressed").checked = !!d.only_when_addressed;
+    document.getElementById("bot-followup").value = d.follow_up_window_s ?? 120;
     document.getElementById("bot-name").value      = d.name || "";
     document.getElementById("bot-trigger").value   = (d.trigger || []).join(", ");
     document.getElementById("bot-persona").value   = d.persona || "";
     document.getElementById("bot-system-prompt").value = d.system_prompt || "";
     document.getElementById("bot-speaker").value   = d.speaker || "";
+    document.getElementById("bot-emotion-auto").checked = !!d.emotion_auto;
+    document.getElementById("bot-emotion-list").value = d.emotion_list || "";
     document.getElementById("bot-cooldown").value  = d.cooldown_s ?? 20;
     document.getElementById("bot-convwin").value   = d.conversation_window_s ?? 180;
     document.getElementById("bot-maxage").value       = d.max_transcript_age_s ?? 120;
@@ -4188,11 +4262,13 @@ async function loadBotAdmin() {
     document.getElementById("bot-silencecall").value  = d.silence_call_threshold_s ?? 300;
     document.getElementById("bot-minconf").value      = Math.round((d.min_confidence ?? 0.65) * 100);
     document.getElementById("bot-historylen").value   = d.history_len ?? 30;
+    document.getElementById("bot-historymaxage").value = Math.round((d.history_max_age_s ?? 10800) / 60);
     document.getElementById("bot-rooms").value     = (d.rooms || []).join(", ");
     document.getElementById("bot-provider").value  = d.provider || "ollama";
     document.getElementById("bot-model").value     = d.ollama_model || "";
     document.getElementById("bot-ollama-url").value = d.ollama_url || "";
     document.getElementById("bot-ollama-numctx").value = d.ollama_num_ctx ?? 30780;
+    document.getElementById("bot-temperatur").value = d.temperature ?? 0.4;
     document.getElementById("bot-ollama-numpredict").value = d.ollama_num_predict ?? 150;
     // Server liefert nur eine Maske (••••), nie das echte Geheimnis
     document.getElementById("bot-ollama-token").value = d.ollama_token || "";
@@ -4205,6 +4281,10 @@ async function loadBotAdmin() {
     renderBotMemory(d.memory || []);
     document.getElementById("bot-notebook-enabled").checked = !!d.notebook_enabled;
     renderBotNotebook(d.notebook || []);
+    document.getElementById("bot-mitschreiber").checked = d.mitschreiber_enabled !== false;
+    document.getElementById("bot-unsicher").checked = !!d.unsicher_markieren;
+    loadNotizVorschlaege();
+    promptGroesseLaden();
   } catch(e) {
     showMsg("msg-bot", "Fehler beim Laden: " + e, "error");
   }
@@ -4232,6 +4312,86 @@ function renderBotNotebook(list) {
                      color:var(--muted);border-radius:6px;padding:4px 10px;cursor:pointer">✕</button>`;
     box.appendChild(row);
   });
+}
+
+// Groesse von Roberts Anfrage -- rechnet mit dem, was GERADE in den Feldern
+// steht (auch ungespeichert), damit man beim Schreiben sieht, was ein Absatz
+// kostet. Nur Anzeige, keine Sperre: was Robert braucht, bekommt er.
+let _promptGroesseTimer = null;
+function promptGroessePlanen() {
+  clearTimeout(_promptGroesseTimer);
+  _promptGroesseTimer = setTimeout(promptGroesseLaden, 700);
+}
+async function promptGroesseLaden() {
+  const box = document.getElementById("bot-prompt-groesse");
+  if (!box) return;
+  try {
+    const r = await adminFetch("/api/admin/prompt-groesse", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        persona:       document.getElementById("bot-persona").value,
+        system_prompt: document.getElementById("bot-system-prompt").value }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) { box.textContent = "Anfragegröße nicht ermittelbar: " + (d.error || r.status); return; }
+    const farbe = d.tokens >= d.rot ? "#c05050" : (d.tokens >= d.gelb ? "#c8a020" : "var(--accent)");
+    const hinweis = d.tokens >= d.rot ? " — deutlich über dem Stand vor dem Kürzen"
+                  : (d.tokens >= d.gelb ? " — wächst, prüf ob jeder Absatz nötig ist" : "");
+    box.innerHTML =
+      `<b style="color:${farbe}">Roberts Anfrage ≈ ${d.tokens.toLocaleString("de-DE")} Tokens</b>${hinweis}<br>` +
+      d.teile.map(t => `${esc(t.name)} ${t.tokens.toLocaleString("de-DE")}`).join(" · ") +
+      ` <span style="opacity:.7">(vor dem Kürzen ≈ ${d.bezug.vor_kuerzen}, danach ≈ ${d.bezug.nach_kuerzen})</span>`;
+  } catch(e) { box.textContent = "Anfragegröße nicht ermittelbar: " + e; }
+}
+
+async function loadNotizVorschlaege(antwort) {
+  const box = document.getElementById("notiz-vorschlaege");
+  if (!box) return;
+  let d = antwort;
+  if (!d) {
+    try {
+      const r = await adminFetch("/api/admin/notiz-vorschlaege");
+      d = await r.json();
+    } catch(e) { box.textContent = "Vorschläge nicht geladen: " + e; return; }
+  }
+  const liste = (d.vorschlaege || []).slice().reverse();   // neueste zuerst
+  if (!liste.length) {
+    box.innerHTML = '<div style="color:var(--text-muted)">Keine offenen Vorschläge.</div>';
+    return;
+  }
+  box.innerHTML = liste.map(v => {
+    const dt = new Date(v.ts * 1000).toLocaleString("de-DE");
+    return `<div class="notiz-vorschlag" data-id="${esc(v.id)}"
+                 style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:8px">
+      <div style="color:var(--text-muted);font-size:.78em">${esc(dt)} · ${esc(v.room || "")}</div>
+      <input type="text" class="nv-text" value="${esc(v.text)}" style="width:100%;margin:4px 0" autocomplete="off">
+      <details style="font-size:.78em;color:var(--text-muted)"><summary>Gesprächsausschnitt</summary>
+        <pre style="white-space:pre-wrap;margin:4px 0">${esc(v.quelle || "")}</pre></details>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button class="btn-save" style="padding:3px 10px;font-size:.7rem"
+                onclick="notizVorschlag('${esc(v.id)}','uebernehmen',this)">ÜBERNEHMEN</button>
+        <button class="btn-save" style="padding:3px 10px;font-size:.7rem;background:none;border:1px solid var(--dim);color:var(--muted)"
+                onclick="notizVorschlag('${esc(v.id)}','verwerfen',this)">VERWERFEN</button>
+      </div></div>`;
+  }).join("");
+}
+
+async function notizVorschlag(id, aktion, btn) {
+  const karte = btn.closest(".notiz-vorschlag");
+  const text = karte.querySelector(".nv-text").value.trim();
+  try {
+    const r = await adminFetch("/api/admin/notiz-vorschlaege", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({id, aktion, text}),
+    });
+    const d = await r.json();
+    if (d.error) { showMsg("msg-bot", "Fehler: " + d.error, "error"); return; }
+    // Notizbuch neu zeichnen, sonst ueberschreibt ein spaeteres SPEICHERN
+    // die eben uebernommene Notiz mit der alten Liste.
+    if (d.notebook) renderBotNotebook(d.notebook);
+    loadNotizVorschlaege(d);
+    showMsg("msg-bot", aktion === "uebernehmen" ? "Notiz übernommen." : "Vorschlag verworfen.", "ok");
+  } catch(e) { showMsg("msg-bot", "Fehler: " + e, "error"); }
 }
 
 function collectBotNotebook() {
@@ -4285,13 +4445,49 @@ async function loadGeminiModels() {
 // Stimmen des lokalen Piper holen und als Auswahl anbieten. Faellt die
 // Abfrage aus (Piper nicht erreichbar), bleibt wenigstens der aktuell
 // eingestellte Wert waehlbar, damit Speichern ihn nicht loescht.
-async function fillLocalVoices(current) {
+// Stimmen der GPU-Box (Piper dort kann seit 23.09. mehrere Modelle).
+// Leerer Wert = der Dienst nimmt sein eigenes Standardmodell.
+function fillRemoteVoices(liste, standard, current) {
+  const sel = document.getElementById("tts-remote-voice");
+  if (!sel) return;
+  sel.innerHTML = "";
+  const leer = document.createElement("option");
+  leer.value = "";
+  leer.textContent = standard ? `Standard der Box (${standard})` : "Standard der Box";
+  sel.appendChild(leer);
+  const namen = (liste || []).map(v => v.name);
+  if (current && !namen.includes(current)) namen.push(current);   // nie verlieren
+  namen.forEach(n => {
+    const v = (liste || []).find(x => x.name === n);
+    const o = document.createElement("option");
+    o.value = n;
+    o.textContent = v && v.speakers && v.speakers.length
+      ? `${n} — ${v.speakers.length} Stimmungen` : n;
+    sel.appendChild(o);
+  });
+  sel.value = current || "";
+  fuelleStimmungen(liste, sel.value);
+  sel.addEventListener("change", () => fuelleStimmungen(liste, sel.value));
+}
+
+// Stimmungen/Sprecher der gewaehlten Stimme als Vorschlagsliste fuer das Feld
+// "Roberts Stimme" -- das wird als speaker mitgeschickt.
+function fuelleStimmungen(liste, stimme) {
+  const dl = document.getElementById("bot-speaker-list");
+  if (!dl) return;
+  const v = (liste || []).find(x => x.name === stimme);
+  dl.innerHTML = ((v && v.speakers) || []).map(sp => `<option value="${esc(sp)}">`).join("");
+}
+
+async function fillLocalVoices(current, remoteCurrent) {
   const sel = document.getElementById("tts-local-voice");
   sel.innerHTML = "";
   let voices = [];
   try {
     const r = await adminFetch("/api/admin/tts/voices");
-    voices = (await r.json()).voices || [];
+    const d = await r.json();
+    voices = d.voices || [];
+    fillRemoteVoices(d.remote, d.remote_default, remoteCurrent);
   } catch(e) { /* offline: unten Ersatz */ }
   if (!voices.length && current) voices = [{name: current, lang: "", info: "(Piper nicht erreichbar)"}];
   voices.forEach(v => {
@@ -4328,7 +4524,7 @@ async function loadTts() {
     document.getElementById("tts-xtts-url").value    = d.xtts_url   || "";
     document.getElementById("tts-local-host").value  = d.local_host || "";
     document.getElementById("tts-local-port").value  = d.local_port || "";
-    await fillLocalVoices(d.local_voice || "");
+    await fillLocalVoices(d.local_voice || "", d.remote_voice || "");
   } catch(e) {
     showMsg("msg-bot", "Einstellungen nicht geladen: " + e, "error");
   }
@@ -4346,7 +4542,8 @@ async function saveTts() {
         xtts_url:       document.getElementById("tts-xtts-url").value.trim(),
         local_host:     document.getElementById("tts-local-host").value.trim(),
         local_port:     parseInt(document.getElementById("tts-local-port").value, 10) || 10200,
-        local_voice:    document.getElementById("tts-local-voice").value.trim() }),
+        local_voice:    document.getElementById("tts-local-voice").value.trim(),
+        remote_voice:   document.getElementById("tts-remote-voice").value.trim() }),
     });
     const d = await r.json();
     if (d.error) { showMsg("msg-bot", "Fehler: " + d.error, "error"); return; }
@@ -4358,15 +4555,25 @@ async function saveTts() {
   }
 }
 
+// Zahl aus einem Feld, bei der 0 ein gueltiger Wert ist (|| wuerde 0 schlucken).
+function numOderStandard(id, standard) {
+  const v = parseFloat(document.getElementById(id).value);
+  return isNaN(v) ? standard : v;
+}
 async function saveBotAdmin() {
   const body = {
     enabled:               document.getElementById("bot-enabled").checked,
     only_when_addressed:   document.getElementById("bot-only-addressed").checked,
+    mitschreiber_enabled:  document.getElementById("bot-mitschreiber").checked,
+    unsicher_markieren:    document.getElementById("bot-unsicher").checked,
+    follow_up_window_s:    numOderStandard("bot-followup", 120),   // 0 gueltig = aus
     name:                  document.getElementById("bot-name").value,
     trigger:               document.getElementById("bot-trigger").value,
     persona:               document.getElementById("bot-persona").value,
     system_prompt:         document.getElementById("bot-system-prompt").value,
     speaker:               document.getElementById("bot-speaker").value,
+    emotion_auto:          document.getElementById("bot-emotion-auto").checked,
+    emotion_list:          document.getElementById("bot-emotion-list").value,
     cooldown_s:            parseFloat(document.getElementById("bot-cooldown").value) || 20,
     conversation_window_s: parseFloat(document.getElementById("bot-convwin").value) || 180,
     max_transcript_age_s:  parseFloat(document.getElementById("bot-maxage").value) || 120,
@@ -4374,11 +4581,13 @@ async function saveBotAdmin() {
     silence_call_threshold_s: parseFloat(document.getElementById("bot-silencecall").value) || 0,
     min_confidence:        (parseFloat(document.getElementById("bot-minconf").value) || 0) / 100,
     history_len:           parseFloat(document.getElementById("bot-historylen").value) || 10,
+    history_max_age_s:     (parseFloat(document.getElementById("bot-historymaxage").value) || 180) * 60,
     rooms:                 document.getElementById("bot-rooms").value,
     provider:              document.getElementById("bot-provider").value,
     ollama_model:          document.getElementById("bot-model").value,
     ollama_url:            document.getElementById("bot-ollama-url").value,
-    ollama_num_ctx:        parseFloat(document.getElementById("bot-ollama-numctx").value) || 30780,
+    ollama_num_ctx:        numOderStandard("bot-ollama-numctx", 30780),   // 0 gueltig = num_ctx weglassen
+    temperature:           numOderStandard("bot-temperatur", 0.4),         // 0 gueltig = immer dieselbe Antwort
     ollama_num_predict:    parseFloat(document.getElementById("bot-ollama-numpredict").value) || 150,
     ollama_token:          document.getElementById("bot-ollama-token").value,
     gemini_model:          document.getElementById("bot-gemini-model").value,
@@ -4419,7 +4628,7 @@ async function testBot() {
     if (d.error) { out.textContent = "Fehler: " + d.error; }
     else {
       const head = d.would_reply
-        ? `🤖 „${esc(d.answer)}" <span style="color:var(--muted)">(${d.seconds}s)</span>`
+        ? `🤖 „${esc(d.answer)}" <span style="color:var(--muted)">(${d.seconds}s${d.stimmung ? ", Stimmung " + esc(d.stimmung) : ""})</span>`
         : `🤐 Bot fühlt sich nicht angesprochen (SKIP) <span style="color:var(--muted)">(${d.seconds}s)</span>`;
       // Roh-Ausgabe des Modells (vor SKIP-Auswertung / think-Filter) mit anzeigen
       const raw = (d.raw || "").trim();
@@ -4627,7 +4836,7 @@ async function replayTrace(room, ts, btn) {
     if (d.error) { out.textContent = "Fehler: " + d.error; }
     else {
       const head = d.would_reply
-        ? `🤖 [${esc(d.model)}] „${esc(d.answer)}" <span style="color:var(--muted)">(${d.seconds}s)</span>`
+        ? `🤖 [${esc(d.model)}] „${esc(d.answer)}" <span style="color:var(--muted)">(${d.seconds}s${d.stimmung ? ", Stimmung " + esc(d.stimmung) : ""})</span>`
         : `🤐 [${esc(d.model)}] SKIP <span style="color:var(--muted)">(${d.seconds}s)</span>`;
       const raw = (d.raw || "").trim();
       const rawBlock = raw
@@ -4660,7 +4869,20 @@ async function enrollSpeaker(audio, btn) {
     const d = await r.json();
     if (d.error) { out.textContent = "Fehler: " + d.error; }
     else {
-      out.textContent = `✓ ${d.name} gelernt (${d.samples} Beispiel${d.samples === 1 ? "" : "e"} insgesamt)`;
+      let txt = `✓ ${d.name} gelernt (${d.samples} Beispiel${d.samples === 1 ? "" : "e"} insgesamt)`;
+      // Sofort-Pruefung: liegt die neue Probe naeher an jemand anderem? Dann
+      // war es vermutlich eine gemischte Aufnahme (zwei Sprecher im Mitschnitt).
+      const pr = d.pruefung || {};
+      if (pr.warnung) {
+        txt += ` — ⚠ klingt eher nach ${pr.fremd} (${(pr.fremd_sim || 0).toFixed(2)}` +
+               (pr.eigen != null ? ` gegen ${pr.eigen.toFixed(2)} zu ${d.name}` : "") +
+               `). Vielleicht zwei Sprecher in der Aufnahme? Dann im Reiter Sprecher-Erkennung wieder löschen.`;
+        out.style.color = "#c8a020";
+      } else if (pr.eigen != null) {
+        txt += ` — passt (${pr.eigen.toFixed(2)} zu ${d.name}, nächste fremde ${pr.fremd} ${(pr.fremd_sim || 0).toFixed(2)})`;
+        out.style.color = "";
+      }
+      out.textContent = txt;
       loadSpeakerIdSettings();
     }
   } catch(e) {

@@ -43,3 +43,68 @@ Beim Testen: Kill- und Start-Befehl NIE in denselben ssh-Aufruf legen —
 `pkill -f whisper_server_neu.py` trifft die eigene Remote-Shell mit, weil
 ihre Kommandozeile das Muster enthaelt (Exit 255). Muster als
 `"[w]hisper_server_neu"` schreiben und in getrennten Aufrufen absetzen.
+
+## Sprecher-Erkennung: ECAPA statt Resemblyzer (2026-09-18)
+
+`ecapa_server.py` laeuft auf der Box als `/home/administrator/ecapa_server.py`
+im venv `~/ecapa-env` (SpeechBrain `spkrec-ecapa-voxceleb`, CPU, **Port 9005**).
+Der alte Resemblyzer-Dienst (`speaker_id_server.py`, systemd
+`speaker-id-api.service`, Port 9004) laeuft unveraendert weiter, wird vom Pi
+aber nicht mehr angefragt — er ist der Rueckweg.
+
+**Kein systemd**, weil `sudo` auf der Box ein Passwort verlangt: Start und
+Wiederanlauf uebernimmt `~/ecapa_watchdog.sh` per crontab (`@reboot` und alle
+5 Minuten, prueft `/health` auf 9005).
+
+Warum der Wechsel (gemessen an Archiv-Aufnahmen):
+
+- Resemblyzer trennte im 8-kHz-GSM-Funkkanal kaum — Roberts Computerstimme
+  gegen menschliche Stimmen: 0.71 zu 0.67. Fehlerrate im Gleichgewicht 43 %.
+- ECAPA: 0.70 zu 0.17, Fehlerrate 30 %. WavLM-base-plus-sv war schlechter als
+  beide und wurde wieder entfernt.
+- Andere Zahlenskala: Schwellen im Pi jetzt 0.65 (Basis), 0.72/0.68 fuer kurze
+  Clips, Mindestabstand 0.05. Embedding hat 192 statt 256 Werte — beim Wechsel
+  muessen ALLE Stimmproben neu eingelernt werden.
+
+Einspielen:
+
+```bash
+scp gpubox/ecapa_server.py administrator@192.0.0.17:ecapa_server.py
+ssh administrator@192.0.0.17 "pkill -f '[e]capa_server.py'"
+ssh administrator@192.0.0.17 "~/ecapa_watchdog.sh && sleep 40 && curl -s localhost:9005/health"
+```
+
+## Piper: mehrere deutsche Stimmen (2026-09-23)
+
+`piper_server.py` (Arbeitskopie hier, Produktion auf der Box als
+`/home/administrator/piper_server.py`, systemd `piper-api.service`, Port 9003)
+kann jetzt mehrere Modelle statt nur dem einen aus `PIPER_MODEL`:
+
+- Alle `.onnx` in `/home/administrator/piper_models/` stehen zur Auswahl.
+- `POST /tts` nimmt zusaetzlich `voice` (Modellname). Fehlt es oder ist der
+  Name unbekannt, bleibt es beim Standardmodell aus `PIPER_MODEL` -- alte
+  Aufrufer merken nichts.
+- Neu `GET /voices`: Liste mit Sprechern/Emotionen je Modell (liest die
+  kleine `.onnx.json`, laedt dafuer kein Modell).
+- Geladene Modelle bleiben im Speicher (LRU, `PIPER_CACHE`, Standard 3), damit
+  ein Stimmwechsel nicht jedes Mal 60-110 MB nachlaedt.
+
+Installiert sind acht deutsche Stimmen: thorsten in high/medium,
+thorsten_emotional-medium (8 Stimmungen), karlsson-low, pavoque-low,
+eva_k-x_low, kerstin-low, ramona-low. Nachladen mit:
+
+```bash
+cd ~/piper_models && BASIS=https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE
+curl -sSLO "$BASIS/<stimme>/<qualitaet>/de_DE-<stimme>-<qualitaet>.onnx"
+curl -sSLO "$BASIS/<stimme>/<qualitaet>/de_DE-<stimme>-<qualitaet>.onnx.json"
+```
+
+Der Pi schickt die Auswahl als `voice` mit (`voice.remote_voice` in der
+config.json, einstellbar im Reiter Sprachausgabe). Leer = Standard der Box.
+
+**Einspielen** (sudo verlangt auf der Box ein Passwort, also nicht von hier):
+
+```bash
+scp gpubox/piper_server.py administrator@192.0.0.17:piper_server.py
+ssh administrator@192.0.0.17 'sudo systemctl restart piper-api && sleep 20 && curl -s localhost:9003/voices'
+```

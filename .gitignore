@@ -18,3 +18,5 @@ config.ini
 speaker_enrollments.json
 voices/
 prompttest/
+notiz_vorschlaege.json
+bot_replies.jsonl

@@ -1150,8 +1150,21 @@ async function enrollFromArchive(entryId, btn) {
       body: JSON.stringify({ name }),
     });
     const d = await r.json();
-    out.textContent = d.error ? ('Fehler: ' + d.error)
-      : `✓ ${d.name} gelernt (${d.samples} Beispiel${d.samples === 1 ? '' : 'e'} insgesamt)`;
+    if (d.error) { out.textContent = 'Fehler: ' + d.error; return; }
+    let txt = `✓ ${d.name} gelernt (${d.samples} Beispiel${d.samples === 1 ? '' : 'e'} insgesamt)`;
+    // Sofort-Pruefung: liegt die neue Probe naeher an jemand anderem? Dann
+    // stecken vermutlich zwei Sprecher im Mitschnitt.
+    const pr = d.pruefung || {};
+    out.style.color = '';
+    if (pr.warnung) {
+      txt += ` — ⚠ klingt eher nach ${pr.fremd} (${(pr.fremd_sim || 0).toFixed(2)}` +
+             (pr.eigen != null ? ` gegen ${pr.eigen.toFixed(2)} zu ${d.name}` : '') +
+             `). Zwei Sprecher in der Aufnahme? Dann in der Verwaltung unter Sprecher-Erkennung prüfen lassen.`;
+      out.style.color = '#c8a020';
+    } else if (pr.eigen != null) {
+      txt += ` — passt (${pr.eigen.toFixed(2)} zu ${d.name}, nächste fremde ${pr.fremd} ${(pr.fremd_sim || 0).toFixed(2)})`;
+    }
+    out.textContent = txt;
   } catch(e) {
     out.textContent = 'Fehler: ' + e;
   } finally {

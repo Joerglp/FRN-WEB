@@ -767,6 +767,16 @@ class TXServer:
         self._bot_last_reply: dict[str, float] = {} # Raum → Zeit letzter Bot-Sendung
         self._bot_own_tx: dict[str, list] = {}      # Raum → [(t0, t1, text), …]
         self._bot_protokoll_pfad = Path(__file__).parent / "bot_replies.jsonl"
+        self._prompt_anker: dict[int, float] = {}   # id(Verlauf) -> ts des ersten Spruchs
+        # Stiller Mitschreiber (2026-09-24): Vorschlaege, die erst nach
+        # Freigabe im Web ins Notizbuch wandern. Eigene Datei statt config.json,
+        # das sind Daten, keine Einstellungen.
+        self._notiz_vorschlaege_pfad = Path(__file__).parent / "notiz_vorschlaege.json"
+        self._mitschreiber_offen: dict[str, float] = {}   # Raum -> Treffer-ts (Lauf geplant)
+        # Whisper-Verlaesslichkeit je Verlaufszeile (Schluessel: ts), fuer den
+        # Vermerk "[schlecht verstanden]" im Prompt (2026-09-25).
+        self._hist_konfidenz: dict[float, float] = {}
+        self._mitschreiber_aufrufe: list[float] = []
         # Gedaechtnis ueber Neustarts retten (2026-09-17): 19 von 90
         # Vorstellungen seit 13.08. kamen direkt nach einem Dienst-Neustart,
         # weil diese drei Speicher nur im Arbeitsspeicher lagen.
@@ -786,6 +796,8 @@ class TXServer:
         # config.json (waere dort zu gross/unhandlich).
         self._speaker_enrollments_path = Path(__file__).parent / "speaker_enrollments.json"
         self._speaker_enrollments: dict[str, list[list[float]]] = {}
+        self._speaker_quellen: dict[str, list[str]] = {}
+        self._speaker_letzte_pruefung: dict = {}
         self._load_speaker_enrollments()
         self._transcription_cfg: dict = {}   # von main() befuellt (config.ini [transcription])
         self._archive_busy_entries: set[int] = set()   # Doppel-Klick-Schutz fuer Zerlegen UND Zusammenfuehren
@@ -1240,12 +1252,22 @@ class TXServer:
         import socket, io
         host, port, voice = self._piper_local_cfg()
         sp = (speaker or "").strip()
+        stimmung = ""
         if sp.lower().startswith("de_de-"):
             voice = "de_DE-" + sp.split("-", 1)[1]   # de_de-thorsten-high -> de_DE-thorsten-high
+        elif sp:
+            # Kein Stimmname -> Stimmung/Sprecher INNERHALB der Stimme, z.B.
+            # "drunk" beim emotionalen Modell (2026-09-23). Wyoming nimmt das
+            # als voice.speaker; kennt die Stimme den Namen nicht, ignoriert
+            # der Dienst ihn und spricht normal.
+            stimmung = sp
         sock = socket.create_connection((host, port), timeout=20)
         sock.settimeout(20)
         try:
-            d = json.dumps({"text": text, "voice": {"name": voice}}).encode()
+            v = {"name": voice}
+            if stimmung:
+                v["speaker"] = stimmung
+            d = json.dumps({"text": text, "voice": v}).encode()
             sock.sendall(json.dumps({"type": "synthesize", "data_length": len(d)}).encode()
                          + b"\n" + d)
             f = sock.makefile("rb")
@@ -1302,6 +1324,13 @@ class TXServer:
         if not url:
             raise RuntimeError("Voice-Funktion ist deaktiviert")
         payload = {"text": text, "language": lang, "speaker": speaker or "default"}
+        # Stimme der GPU-Box (2026-09-23): der Dienst dort kann seit heute
+        # mehrere Modelle, die Auswahl kommt aus voice.remote_voice. Leer =
+        # der Dienst nimmt sein Standardmodell (Verhalten wie bisher). Beim
+        # XTTS-Weg hat "voice" keine Bedeutung und wird ignoriert.
+        r_voice = (vcfg.get("remote_voice") or "").strip()
+        if r_voice and not force_xtts:
+            payload["voice"] = r_voice
         timeout = aiohttp.ClientTimeout(total=120)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as sess:
@@ -1373,6 +1402,12 @@ class TXServer:
                                       detail=f"Transkript unsicher ({100 * confidence:.0f}% "
                                              "Uebereinstimmung) -- keine Antwort", final=True)
                 return
+            if confidence is not None:
+                kz = self._hist_konfidenz
+                kz[round(ts, 3)] = float(confidence)
+                if len(kz) > 3000:          # alte Eintraege loswerden
+                    for k in sorted(kz)[:1000]:
+                        kz.pop(k, None)
             try:
                 self._bot_observe(room, room_name, callsign, text, ts, low)
             except Exception as e:
@@ -1592,8 +1627,12 @@ class TXServer:
             "max_transcript_age_s":     (0, 3600),   # Rueckstau-Bremse
             "repeat_block_s":           (0, 86400),  # Wiederholungssperre
             "silence_call_threshold_s": (0, 86400),
-            "ollama_num_ctx":           (0, 262144), # Modell-Max laut /api/tags
+            "ollama_num_ctx":           (-1, 262144),# -1 = vom geladenen Modell uebernehmen,
+                                                    # 0 = nicht mitschicken (Server-Vorgabe)
             "ollama_num_predict":       (0, 4096),
+            "follow_up_window_s":       (0, 3600),   # 0 = keine Anschlussfragen
+            "history_max_age_s":        (600, 86400),# Verlauf hoechstens so alt
+            "temperature":              (0.0, 2.0),  # 0 = immer gleiche Antwort
             "min_confidence":           (0.0, 1.0),  # 0 = Pruefung aus
         },
         "auto_reply": {
@@ -1622,6 +1661,14 @@ class TXServer:
         # Name faellt -- nicht im laufenden Gespraech, nicht auf allgemeine
         # Anrufe, nicht nach langer Funkstille (User-Wunsch 2026-09-16).
         "only_when_addressed": False,
+        # Anschlussfragen bei "nur auf Ansprache" (2026-09-24): nachdem Robert
+        # geantwortet hat, zaehlt sein Name fuer diese Zeit als gefallen -- man
+        # kann ihm also antworten, ohne ihn jedes Mal neu zu rufen. 0 = aus
+        # (dann muss der Name wirklich in jedem Spruch stehen).
+        "follow_up_window_s": 120,
+        # Wie weit der Verlauf hoechstens zurueckreicht (Sekunden). Die Anzahl
+        # begrenzt history_len; diese Grenze wirkt nur in ruhigen Phasen.
+        "history_max_age_s": 10800,
         "name":     "Robert",
         "trigger":  ["robert", "roboter", "funk-roboter"],
         "speaker":  "damien_black",
@@ -1644,6 +1691,15 @@ class TXServer:
         # 2026-09-17 ueber 30 Aufnahmen: Median 93 %, alles unter 65 % war
         # Halluzination ("Beheufe, Beheufe", "this is the police department").
         "min_confidence": 0.65,
+        # Zeilen zwischen min_confidence und 0.8 im Verlauf als "[schlecht
+        # verstanden]" kennzeichnen, damit das Modell sie nicht woertlich nimmt.
+        # Darunter kommen sie gar nicht erst in den Verlauf (siehe on_transcript).
+        # 2026-09-25 gemessen (6 echte Faelle x 3 Laeufe): kein Nutzen, 0/18
+        # uebernommene Hoerfehler mit wie ohne Vermerk. Dafuer markierte er eine
+        # sauber verstandene, wichtige Rueckfrage ("Geht deine Suche nicht?",
+        # Kontroll-Lauf < 0.8), waehrend echte Verhoerer ("Skange") 1.0 hatten.
+        # Deshalb standardmaessig AUS.
+        "unsicher_markieren": False,
         # Ollama-Kontextfenster (num_ctx) -- muss zu dem passen, mit dem
         # andere Clients (z.B. Open WebUI) dasselbe Modell laden, sonst
         # erzwingt jede Abweichung einen kompletten Neu-Load (~10-15s),
@@ -1658,6 +1714,19 @@ class TXServer:
         # _bot_ollama). Bewusst NICHT pauschal global hochgesetzt, damit
         # das eingespielte Hauptmodell (kurze, knappe CB-Antworten) nicht
         # beeinflusst wird -- pro Bot-Konfiguration einstellbar.
+        # Temperatur fuer Roberts Antworten, gilt fuer Ollama UND Gemini
+        # (2026-09-23 konfigurierbar gemacht, vorher fest 0.4 bzw. 0.6).
+        # Niedrig = sachlich und wiederholt sich, hoch = abwechslungsreicher,
+        # erfindet aber eher etwas dazu.
+        "temperature": 0.4,
+        # Stimmung der Sprachausgabe vom Modell waehlen lassen (2026-09-23):
+        # es stellt seiner Antwort [stimmung] voran, der Server schneidet das
+        # ab und schickt es als speaker mit. Kein zweiter Modellaufruf, also
+        # keine zusaetzliche Wartezeit. AUS = feste Stimmung aus bot.speaker.
+        "emotion_auto": False,
+        # Erlaubte Stimmungen (Komma). Leer = die des thorsten_emotional-
+        # Modells. Was nicht in der Liste steht, wird verworfen.
+        "emotion_list": "neutral, amused, surprised, sleepy",
         "ollama_num_predict": 150,
         # Personen-Gedaechtnis: manuell gepflegte Notizen pro Name, siehe
         # _bot_build_prompt. Liste aus {"name": ..., "notes": ...}.
@@ -1667,6 +1736,11 @@ class TXServer:
         # Gedaechtnis oben (das pflegt der Admin manuell). Liste aus
         # {"ts": ..., "text": ...}, aelteste zuerst raus (siehe _bot_save_note).
         "notebook_enabled": False,
+        # Stiller Mitschreiber: hoert ALLE Sprueche mit und schlaegt bei
+        # Stichworten (Geburtstag, Urlaub, krank ...) Notizen vor -- auch aus
+        # Gespraechen, die nicht an Robert gerichtet waren. Nur Vorschlaege,
+        # Robert benutzt sie erst nach Freigabe im Web.
+        "mitschreiber_enabled": True,
         "notebook": [],
         # System-Anweisung fürs Modell (leer = _BOT_SYSTEM_DEFAULT).
         # Platzhalter {name} und {persona} werden eingesetzt.
@@ -1800,16 +1874,25 @@ class TXServer:
         "type": "function",
         "function": {
             "name": "notiz_merken",
-            "description": ("Speichert eine kurze Notiz dauerhaft in deinem eigenen "
-                            "Notizbuch, die du dir fuer spaetere Gespraeche merken "
-                            "willst (z.B. wiederkehrende Themen auf dem Kanal, "
-                            "Ereignisse, Dinge die jemand erzaehlt hat). Nutze das "
-                            "sparsam -- nur fuer wirklich merkenswerte Dinge, nicht "
-                            "fuer jeden Smalltalk."),
+            # 2026-09-24: "Nutze das sparsam" gestrichen -- gemma4 hat das Werkzeug
+            # daraufhin NIE benutzt, auch nicht auf ausdrueckliches "merk dir"
+            # (antwortete "hab ich mir eingepraegt" und notierte nichts). Die
+            # Abgrenzung gegen Smalltalk steht jetzt positiv formuliert drin.
+            "description": ("Schreibt einen Satz dauerhaft in dein Notizbuch, damit du "
+                            "es in spaeteren Gespraechen noch weisst. Fuer Dinge ueber "
+                            "die Leute auf dem Kanal, die in Tagen oder Wochen noch "
+                            "stimmen: Urlaub, Geburtstag, Krankheit, Termine, neue "
+                            "Antenne oder Station, Umzug -- und IMMER, wenn jemand "
+                            "'merk dir' sagt. Nicht fuer Wetter oder Smalltalk."),
             "parameters": {
                 "type": "object",
                 "properties": {"text": {"type": "string",
-                                        "description": "Kurze Notiz (1 Satz)"}},
+                                        "description": ("Ein Satz MIT Namen, Zeitangaben "
+                                                        "genau so, wie sie gesagt wurden "
+                                                        "('am Samstag', 'ab Montag') -- "
+                                                        "rechne KEIN Datum selbst aus, das "
+                                                        "Notizdatum wird automatisch "
+                                                        "vermerkt.")}},
                 "required": ["text"],
             },
         },
@@ -1899,6 +1982,18 @@ class TXServer:
                 return (t0, t1, sent)
         return None
 
+    def bot_angesprochen(self, text: str) -> bool:
+        """Faellt Roberts Name (oder ein Trigger-Wort) im Text? Gleiche Pruefung
+        wie name_hit in _bot_observe -- fuer die Transkription, die damit den
+        Kontroll-Lauf spart."""
+        bot = self._bot_cfg()
+        if not bot.get("enabled"):
+            return False
+        low = (text or "").lower()
+        triggers = [t.lower() for t in bot.get("trigger", []) if t.strip()]
+        triggers.append((bot.get("name") or "Robert").lower())
+        return any(t in low for t in triggers)
+
     def resolve_known_text(self, room: str, ts: float, duration_s: float = 0.0) -> str | None:
         """Liefert den bereits bekannten Text einer eigenen Bot-Sendung, wenn
         die Aufnahmezeit in ein eigenes Sendefenster fällt — spart die Re-
@@ -1925,16 +2020,21 @@ class TXServer:
         try:
             data = json.loads(self._speaker_enrollments_path.read_text(encoding="utf-8"))
             self._speaker_enrollments = data.get("enrollments", {})
+            self._speaker_quellen = data.get("quellen", {})
         except FileNotFoundError:
             self._speaker_enrollments = {}
+            self._speaker_quellen = {}
         except Exception as e:
             log.warning("Sprecher-Enrollments nicht geladen: %s", e)
             self._speaker_enrollments = {}
+            self._speaker_quellen = {}
 
     def _save_speaker_enrollments(self) -> None:
         try:
             self._speaker_enrollments_path.write_text(
-                json.dumps({"enrollments": self._speaker_enrollments},
+                json.dumps({"enrollments": self._speaker_enrollments,
+                            "quellen": getattr(self, "_speaker_quellen", {}),
+                            "modell": "ecapa-tdnn"},
                           ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8")
         except Exception as e:
@@ -2069,14 +2169,39 @@ class TXServer:
                 "unter Schwelle %.2f)", best_name or "-", best_sim, threshold)
         return None, best_sim, threshold
 
-    async def _speaker_enroll(self, name: str, wav_path: str) -> bool:
+    async def _speaker_enroll(self, name: str, wav_path: str, quelle: str = "") -> bool:
         """Fuegt ein neues Stimm-Beispiel fuer eine Person hinzu (mehrere
         Beispiele pro Person moeglich, verbessert die Erkennung)."""
         emb = await self._speaker_embed(wav_path)
         if not emb:
             return False
-        self._speaker_enrollments.setdefault(name, []).append(emb)
+        proben = self._speaker_enrollments.setdefault(name, [])
+        # Quelle je Probe mitfuehren (2026-09-24): ohne sie liess sich nicht
+        # sagen, WELCHER Mitschnitt eine Probe verdorben hat (zweimal lagen
+        # neue "Gottfried"-Proben naeher an Joerg -- vermutlich gemischte
+        # Aufnahmen). Aeltere Proben ohne Quelle werden mit "" aufgefuellt.
+        quellen = self._speaker_quellen.setdefault(name, [])
+        quellen += [""] * (len(proben) - len(quellen))
+        proben.append(emb)
+        quellen.append(quelle or Path(wav_path).name)
         self._save_speaker_enrollments()
+        # Sofort-Pruefung: liegt die neue Probe naeher an jemand anderem?
+        naechster, abstand = None, -1.0
+        for anderer, ps in self._speaker_enrollments.items():
+            if anderer == name or not ps:
+                continue
+            sim = self._cosine_sim(emb, np.mean(np.array(ps), axis=0).tolist())
+            if sim > abstand:
+                naechster, abstand = anderer, sim
+        eigen = (self._cosine_sim(emb, np.mean(np.array(proben[:-1]), axis=0).tolist())
+                 if len(proben) > 1 else None)
+        log.info("Speaker-ID: Probe %d fuer %s angelernt aus %s (eigene %s, naechste fremde %s %.2f)",
+                 len(proben), name, quelle or Path(wav_path).name,
+                 f"{eigen:.2f}" if eigen is not None else "-", naechster or "-", abstand)
+        self._speaker_letzte_pruefung = {
+            "eigen": eigen, "fremd": naechster, "fremd_sim": abstand,
+            "warnung": bool(naechster and (eigen is None and abstand > 0.6
+                                            or eigen is not None and abstand > eigen))}
         return True
 
     # Sprecherwechsel-Erkennung fuers Archiv-"Zerlegen" (siehe
@@ -2525,7 +2650,7 @@ class TXServer:
         name = bot.get("name") or "Robert"
         own  = self._bot_is_own(room_name, text, ts)
         hist = self._room_hist.setdefault(room_name, [])
-        limit = max(4, int(bot.get("history_len", 10)))
+        limit = max(4, int(bot.get("history_len", 10))) + 2 * self._PROMPT_BLOCK
         own_tag = f"{name} (du)"
         # Eigenes Echo nicht erneut eintragen, wenn _bot_reply denselben Satz
         # schon beim Senden eingetragen hat -- sonst stand jede eigene Antwort
@@ -2539,6 +2664,7 @@ class TXServer:
             self._bot_state_merken()
         if own:
             return   # eigenes Echo -- keine Spur, das ist kein "gehoerter" Funkspruch
+        self._mitschreiber_pruefen(room_name, ts, text, bot)
         # Sprachsteuerung: greift AUCH bei deaktiviertem Bot (sonst kein Wecken).
         # No-Op (schon im Zielzustand) fällt durch zur normalen Antwort-Logik.
         cmd = self._bot_command(bot, name, low)
@@ -2605,10 +2731,20 @@ class TXServer:
         # Funkstille. Zweiter Schalter neben enabled, damit er mithoeren und
         # ansprechbar bleiben kann, ohne von sich aus zu funken.
         if bot.get("only_when_addressed") and not name_hit:
-            self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
-                                  detail="nur auf Ansprache aktiv -- Name nicht gefallen",
-                                  final=True)
-            return
+            # Anschlussfrage: Robert hat gerade selbst gesendet, dann ist ein
+            # Spruch ohne seinen Namen meist die Antwort DARAUF. Gemessen am
+            # 24.09.: von 11 Durchsagen im Gespraech mit ihm trugen nur 4
+            # seinen Namen, die anderen 7 (u.a. "Geht deine Suche nicht?")
+            # fielen hier raus -- der User musste ihn jedes Mal neu rufen.
+            folge_s = float(bot.get("follow_up_window_s", 120))
+            if folge_s <= 0 or (now - last) >= folge_s:
+                self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                      detail="nur auf Ansprache aktiv -- Name nicht gefallen",
+                                      final=True)
+                return
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
+                                  detail=f"Anschlussfrage ({now - last:.0f}s nach eigener "
+                                         f"Sendung, Fenster {folge_s:.0f}s)")
         # Nach laengerer Funkstille ist so gut wie jeder (auch kurze/durch
         # Whisper verhunzte) Spruch praktisch immer ein allgemeiner Anruf
         # ("ist wer da?") -- Vorfilter sonst zu streng (kein Name/Anruf-Muster
@@ -2693,6 +2829,13 @@ class TXServer:
                                       detail="Modell: SKIP (nicht gemeint)", final=True)
                 return
             name = bot.get("name") or "Robert"
+            answer, stimmung = self._emotion_abtrennen(answer, bot)
+            if not answer.strip():
+                log.info("[%s] KI-Funker: nur Stimmung, kein Text -- nichts gesendet", room_name)
+                self.debug_trace_step(room_name, heard_ts, "Ergebnis", "skip",
+                                      detail="Antwort bestand nur aus der Stimmungs-Markierung",
+                                      final=True)
+                return
             gehoert = next((x for t, w, x in hist
                             if trigger_ts is not None and abs(t - trigger_ts) < 0.5
                             and w != f"{name} (du)"), "")
@@ -2749,8 +2892,19 @@ class TXServer:
                          room_name, tx_ts - t0)
                 self.debug_trace_step(room_name, heard_ts, "Sende-Start", "ok",
                                      tx_ts - t0, "Sender getastet, Übertragung beginnt")
+            if stimmung:
+                log.info("[%s] KI-Funker: Stimmung %s", room_name, stimmung)
+                self.debug_trace_step(room_name, heard_ts, "Stimmung", "ok",
+                                      detail=f"Modell waehlte {stimmung}")
+            # Ohne (gueltige) Markierung bei aktiver Automatik NICHT auf die
+            # feste Stimmung zurueckfallen (2026-09-23): die ist dann meist
+            # etwas Spezielles wie "sleepy" und passt nicht -- z.B. eine
+            # Todesnachricht muede vorgetragen. Erster Eintrag der erlaubten
+            # Liste ist die neutrale Ruecklage.
+            if not stimmung and bot.get("emotion_auto"):
+                stimmung = self._emotion_liste(bot)[0]
             sent = await self._auto_send_voice(room, answer,
-                                               bot.get("speaker") or "default",
+                                               stimmung or bot.get("speaker") or "default",
                                                on_tx_start=_on_tx_start)
             t1   = time.time()
             log.info("[%s] KI-Funker TTS+Senden: %.1fs — Gesamt (gehört→gesendet): %.1fs",
@@ -2770,7 +2924,7 @@ class TXServer:
             name = bot.get("name") or "Robert"
             self._hist_insert(self._room_hist.setdefault(room_name, []),
                               (t1, f"{name} (du)", answer),
-                              max(4, int(bot.get("history_len", 10))))
+                              max(4, int(bot.get("history_len", 10))) + 2 * self._PROMPT_BLOCK)
             self._bot_state_merken()
             payload = {"type": "voice_autosent", "room": room_name,
                        "from": "KI-Funker", "text": answer, "ok": True,
@@ -3055,7 +3209,216 @@ class TXServer:
 
     _NOTEBOOK_MAX = 60   # aelteste Notizen fallen raus, sonst waechst der Prompt
 
-    def _bot_save_note(self, text: str) -> None:
+    # ---- Stiller Mitschreiber (2026-09-24) --------------------------------
+    # Robert bekam nur Sprueche zu sehen, die an ihn gerichtet waren. Gemessen
+    # 17.-24.09.: 16 von 2056 Durchsagen enthielten Merkenswertes (Krankenhaus,
+    # gestorben, Geburtstag, Urlaub ...) -- keine davon an Robert. Der
+    # Mitschreiber liest bei einem Stichwort den Gespraechsausschnitt und
+    # schlaegt Notizen vor; ins Notizbuch kommen sie erst nach Freigabe.
+    _MITSCHREIBER_RE = re.compile(
+        r"geburtstag|urlaub|krankenhaus|\bkrank|operation|\barzt\b|hochzeit|"
+        r"umgezogen|umzug|gestorben|beerdigung|verstorben|"
+        r"neue[nrs]? (mast|antenne|funkger|station)", re.I)
+    _MITSCHREIBER_WARTE_S = 45        # Nachsatz abwarten, der erklaert oft erst
+    _MITSCHREIBER_MAX_STUNDE = 12
+    _VORSCHLAEGE_MAX = 200
+    _MITSCHREIBER_PROMPT = (
+        "Du liest mitgehoerte CB-Funksprueche einer Stammrunde (per Whisper "
+        "verschriftet, kann Hoerfehler enthalten). Format je Zeile 'Rufname: Text', "
+        "'Funker' heisst: Sprecher unbekannt.\n"
+        "Finde NUR Dinge ueber konkrete Personen der Runde, die in Tagen oder Wochen "
+        "noch wichtig sind: Geburtstag, Urlaub, Krankheit/Krankenhaus/Operation, "
+        "Todesfall, Umzug, Hochzeit, neuer Mast/Antenne/Funkgeraet, feste Termine.\n"
+        "Gib je Fakt eine Zeile aus, die mit '- ' beginnt: ein Satz, mit Namen, "
+        "Zeitangaben WOERTLICH wie gesagt ('am Samstag'), kein selbst errechnetes "
+        "Datum. Ist der Sprecher unbekannt, schreib 'jemand aus der Runde'.\n"
+        "Nur was eindeutig gesagt wurde -- bei verstuemmeltem oder unklarem Text, "
+        "allgemeinem Gerede oder Scherzen: nichts. Findest du nichts, antworte "
+        "NUR mit dem Wort NICHTS.")
+
+    def _mitschreiber_pruefen(self, room_name: str, ts: float, text: str, bot: dict) -> None:
+        """Bei Stichwort einen Lauf planen (nicht blockierend)."""
+        if not bot.get("mitschreiber_enabled", True):
+            return
+        if not self._MITSCHREIBER_RE.search(text or ""):
+            return
+        if room_name in self._mitschreiber_offen:
+            return   # Lauf fuer den Raum laeuft schon -- nimmt diesen Spruch mit
+        jetzt = time.time()
+        self._mitschreiber_aufrufe = [t for t in self._mitschreiber_aufrufe if jetzt - t < 3600]
+        if len(self._mitschreiber_aufrufe) >= self._MITSCHREIBER_MAX_STUNDE:
+            log.info("Mitschreiber: Stundenlimit (%d) erreicht -- %.60s",
+                     self._MITSCHREIBER_MAX_STUNDE, text)
+            return
+        self._mitschreiber_offen[room_name] = ts
+        asyncio.create_task(self._mitschreiber_lauf(room_name, ts))
+
+    async def _mitschreiber_lauf(self, room_name: str, treffer_ts: float) -> None:
+        try:
+            await asyncio.sleep(self._MITSCHREIBER_WARTE_S)
+            self._mitschreiber_aufrufe.append(time.time())
+            basis = self._bot_cfg()
+            own_tag = f"{basis.get('name') or 'Robert'} (du)"
+            ausschnitt = [(t, w, x) for t, w, x in self._room_hist.get(room_name, [])
+                          if treffer_ts - 150 <= t and w != own_tag]
+            if not ausschnitt:
+                return
+            zeilen = "\n".join(f"{w}: {x}" for _t, w, x in ausschnitt)
+            # Eigener Aufruf: keine Werkzeuge, niedrige Temperatur, keine Persona
+            bot = dict(basis, notebook_enabled=False, temperature=0.2,
+                       ollama_num_predict=200,
+                       websearch=dict(basis.get("websearch") or {}, enabled=False))
+            system = self._MITSCHREIBER_PROMPT + "\n" + self._jetzt_satz()
+            messages = [{"role": "user", "content": zeilen}]
+            _t0 = time.time()
+            if (bot.get("provider") or "ollama").strip().lower() == "gemini":
+                roh = await self._llm_gemini(bot, system, messages)
+            else:
+                roh = await self._llm_ollama(bot, system, messages)
+            notizen = [z.strip()[2:].strip() for z in (roh or "").splitlines()
+                       if z.strip().startswith("- ") and len(z.strip()) > 8]
+            log.info("Mitschreiber [%s]: %.1fs, %d Vorschlag/Vorschlaege aus %d Zeilen",
+                     room_name, time.time() - _t0, len(notizen), len(ausschnitt))
+            if notizen:
+                liste = self._vorschlaege_laden()
+                # Doppelte vermeiden (2026-09-24): zwei Stichworte im selben
+                # Gespraech -> zwei Laeufe ueber fast denselben Ausschnitt ->
+                # derselbe Vorschlag zweimal (im Test "Urlaub im November auf
+                # den Kanaren"). Verglichen mit offenen Vorschlaegen UND dem
+                # Notizbuch der letzten 14 Tage.
+                vergleich = [v.get("text", "") for v in liste] + [
+                    n.get("text", "") for n in (basis.get("notebook") or [])
+                    if isinstance(n, dict) and time.time() - float(n.get("ts") or 0) < 14 * 86400]
+                def _schon_da(neu: str) -> bool:
+                    return any(difflib.SequenceMatcher(None, neu.lower(), alt.lower(),
+                                                       autojunk=False).ratio() > 0.6
+                               for alt in vergleich)
+                vorher = len(notizen)
+                notizen = [n for n in notizen if not _schon_da(n)]
+                if len(notizen) < vorher:
+                    log.info("Mitschreiber [%s]: %d doppelte Vorschlaege verworfen",
+                             room_name, vorher - len(notizen))
+                for n in notizen:
+                    vergleich.append(n)
+                    liste.append({"id": f"{treffer_ts:.3f}-{len(liste)}", "ts": treffer_ts,
+                                  "room": room_name, "text": n[:300], "quelle": zeilen[-1500:],
+                                  "erstellt": time.time()})
+                self._vorschlaege_speichern(liste)
+        except Exception as e:
+            log.warning("Mitschreiber [%s] fehlgeschlagen: %s", room_name, e)
+        finally:
+            self._mitschreiber_offen.pop(room_name, None)
+
+    def _vorschlaege_laden(self) -> list:
+        try:
+            return json.loads(self._notiz_vorschlaege_pfad.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError) as e:
+            log.warning("Notiz-Vorschlaege nicht lesbar: %s", e)
+            return []
+
+    def _vorschlaege_speichern(self, liste: list) -> None:
+        tmp = self._notiz_vorschlaege_pfad.with_suffix(".tmp")
+        tmp.write_text(json.dumps(liste[-self._VORSCHLAEGE_MAX:], ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        tmp.replace(self._notiz_vorschlaege_pfad)
+
+    # Anzeige der Anfragegroesse (2026-09-25, User: "schockiert, wie gross
+    # Roberts System-Kontext war"). Geeicht am 25.09. an einer echten Anfrage:
+    # 12673 Zeichen = 3648 Tokens laut Ollama (gemma4:12b, mit Werkzeugen).
+    # Bezugswerte: vor dem Kuerzen am 23.09. ~4300, direkt danach ~3050.
+    _ZEICHEN_PRO_TOKEN = 3.47
+    _PROMPT_GELB = 3500
+    _PROMPT_ROT  = 4500
+
+    async def handle_admin_prompt_groesse(self, request):
+        """POST {persona?, system_prompt?} -- geschaetzte Groesse von Roberts
+        Anfrage, aufgeschluesselt. Nimmt die (auch ungespeicherten) Texte aus
+        dem Formular, sonst die gespeicherten. Verlauf: die letzten
+        history_len echten Funksprueche aus dem Archiv, wie im Betrieb."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        bot = dict(self._bot_cfg())
+        for k in ("persona", "system_prompt"):
+            if isinstance(body.get(k), str):
+                bot[k] = body[k]
+        n = max(4, int(bot.get("history_len", 10)))
+        hist = []
+        if _ARCHIVE_AVAILABLE:
+            def _laden():
+                import sqlite3
+                conn = sqlite3.connect(str(_archive.DB_PATH))
+                try:
+                    return conn.execute(
+                        "SELECT timestamp, callsign, text FROM transmissions "
+                        "WHERE text<>'' ORDER BY timestamp DESC LIMIT ?", (n,)).fetchall()
+                finally:
+                    conn.close()
+            rows = (await asyncio.get_running_loop().run_in_executor(None, _laden))[::-1]
+            if rows:
+                schub = time.time() - 60 - rows[-1][0]
+                name = bot.get("name") or "Robert"
+                hist = [(t + schub, f"{name} (du)" if cs == name else (cs or "Funker"), x)
+                        for t, cs, x in rows]
+        system, messages = self._bot_build_prompt(bot, hist)
+        tools = []
+        if (bot.get("websearch") or {}).get("enabled"):
+            tools += self._BOT_WEBSEARCH_TOOL
+        if bot.get("notebook_enabled"):
+            tools += self._BOT_NOTE_TOOL
+        persona = len((bot.get("persona") or "").strip())
+        sysp    = len((bot.get("system_prompt") or self._BOT_SYSTEM_DEFAULT).replace("{persona}", ""))
+        zusatz  = max(0, len(system) - persona - sysp)
+        verlauf = sum(len(m["content"]) for m in messages)
+        werkz   = len(json.dumps(tools, ensure_ascii=False)) if tools else 0
+        z = self._ZEICHEN_PRO_TOKEN
+        teile = [("Persona", persona), ("System-Prompt", sysp),
+                 ("Zusätze (Stimmung, Notizen, Uhrzeit …)", zusatz),
+                 ("Werkzeuge", werkz), (f"Verlauf ({len(messages)} Sprüche)", verlauf)]
+        gesamt = sum(v for _, v in teile)
+        return web.json_response({
+            "tokens": round(gesamt / z),
+            "teile": [{"name": k, "zeichen": v, "tokens": round(v / z)} for k, v in teile],
+            "gelb": self._PROMPT_GELB, "rot": self._PROMPT_ROT,
+            "bezug": {"vor_kuerzen": 4300, "nach_kuerzen": 3050},
+        })
+
+    async def handle_admin_notiz_vorschlaege(self, request):
+        """GET: offene Vorschlaege des Mitschreibers. POST {id, aktion:
+        uebernehmen|verwerfen, text?}: uebernehmen schreibt (ggf. korrigiert)
+        ins Notizbuch -- mit der Zeit des Gespraechs, nicht der Freigabe."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        liste = self._vorschlaege_laden()
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+            vid, aktion = str(body.get("id") or ""), body.get("aktion")
+            treffer = next((v for v in liste if v.get("id") == vid), None)
+            if not treffer or aktion not in ("uebernehmen", "verwerfen"):
+                return web.json_response({"error": "unbekannter Vorschlag/Aktion"}, status=400)
+            if aktion == "uebernehmen":
+                text = str(body.get("text") or treffer["text"]).strip()
+                self._bot_save_note(text, ts=treffer.get("ts"))
+            liste = [v for v in liste if v.get("id") != vid]
+            self._vorschlaege_speichern(liste)
+            log.info("Notiz-Vorschlag %s: %.70s", aktion, treffer["text"])
+        # Notizbuch mitliefern: die Seite schreibt beim SPEICHERN ihre ganze
+        # Liste zurueck -- ohne Neuzeichnen waere eine eben uebernommene Notiz
+        # damit wieder weg.
+        return web.json_response({"vorschlaege": liste,
+                                  "notebook": self._bot_cfg().get("notebook") or []})
+
+    def _bot_save_note(self, text: str, ts: float | None = None) -> None:
         """Haengt eine Notiz ans Notizbuch (voice.bot.notebook) an -- im
         Speicher (fuer sofortige Wirkung) UND auf der Platte (ueberlebt
         Neustarts). Read-modify-write gegen die Disk-Datei wie in
@@ -3065,7 +3428,7 @@ class TXServer:
         text = text.strip()[:300]
         if not text:
             return
-        entry = {"ts": time.time(), "text": text}
+        entry = {"ts": ts or time.time(), "text": text}
         bot = self.cfg.setdefault("voice", {}).setdefault("bot", {})
         notebook = bot.setdefault("notebook", [])
         notebook.append(entry)
@@ -3086,6 +3449,61 @@ class TXServer:
         except Exception as e:
             log.warning("KI-Funker Notizbuch nicht auf Platte gespeichert: %s", e)
 
+    # Stimmungen des thorsten_emotional-Modells (Rueckfall, wenn nichts
+    # konfiguriert ist). "drunk"/"angry"/"disgusted" bewusst NICHT im
+    # Standard -- am Funk wirkt das schnell daneben, wer sie will, traegt sie
+    # in voice.bot.emotion_list ein.
+    _EMOTIONEN_STANDARD = ("neutral", "amused", "surprised", "sleepy")
+    _EMOTION_RE = re.compile(r"^\s*[\[(]\s*([A-Za-zäöüÄÖÜ_-]{3,20})\s*[\])]\s*")
+
+    @classmethod
+    def _emotion_liste(cls, bot: dict) -> list:
+        roh = [e.strip().lower() for e in (bot.get("emotion_list") or "").split(",")]
+        return [e for e in roh if e] or list(cls._EMOTIONEN_STANDARD)
+
+    @classmethod
+    def _emotion_abtrennen(cls, text: str, bot: dict) -> tuple[str, str]:
+        """Fuehrende [stimmung]-Markierung abtrennen. Liefert (Text ohne
+        Markierung, Stimmung oder ""). Die Markierung wird IMMER entfernt,
+        auch wenn sie nicht erlaubt oder die Automatik aus ist -- sonst liest
+        Robert sie vor."""
+        m = cls._EMOTION_RE.match(text or "")
+        if not m:
+            return text, ""
+        rest = text[m.end():].lstrip()
+        gefunden = m.group(1).lower()
+        if not bot.get("emotion_auto"):
+            return rest, ""
+        if gefunden not in cls._emotion_liste(bot):
+            log.info("KI-Funker: Stimmung %r nicht erlaubt -- ignoriert", gefunden)
+            return rest, ""
+        return rest, gefunden
+
+    # Prompt-Zwischenspeicher (2026-09-24): Ollama verwendet den Anfang eines
+    # Prompts wieder, solange er Zeichen fuer Zeichen gleich bleibt. Gemessen:
+    # 3295 Tokens kalt 6.7s, identisch 0.4s -- aber mit EINEM neuen Spruch
+    # wieder 4.4s, weil sich vorn bei jedem Aufruf etwas aenderte (Uhrzeit,
+    # Personen-Infos je nach Verlauf, und der Verlauf rutschte Spruch fuer
+    # Spruch). Jetzt: Veraenderliches in einen Hinweis direkt VOR den letzten
+    # Spruch, und der Verlauf rueckt nur in Bloecken weiter.
+    _PROMPT_BLOCK = 10
+
+    _WOCHENTAGE = ("Montag", "Dienstag", "Mittwoch", "Donnerstag",
+                   "Freitag", "Samstag", "Sonntag")
+    _MONATE = ("Januar", "Februar", "Maerz", "April", "Mai", "Juni", "Juli",
+               "August", "September", "Oktober", "November", "Dezember")
+
+    @classmethod
+    def _jetzt_satz(cls) -> str:
+        """Datum/Uhrzeit fuer den Prompt. Ohne das kennt das Modell nur seinen
+        Trainingsstand -- am 24.09.2026 suchte es deshalb nach "Fussball heute
+        Abend 24. Mai 2024" (User-Frage: "hat Robert keine aktuelle Zeit?").
+        Bewusst ohne Sekunden: der Wert landet sonst bei jedem Aufruf anders im
+        Prompt, was das Zwischenspeichern auf der Ollama-Seite stoert."""
+        n = datetime.now()
+        return (f"Jetzt ist {cls._WOCHENTAGE[n.weekday()]}, der {n.day}. "
+                f"{cls._MONATE[n.month - 1]} {n.year}, {n.hour}:{n.minute:02d} Uhr.")
+
     def _bot_build_prompt(self, bot: dict, hist: list,
                           search_context: str = "") -> tuple[str, list]:
         """Baut System-Anweisung + Nachrichtenverlauf (provider-neutral).
@@ -3099,8 +3517,25 @@ class TXServer:
         tmpl = bot.get("system_prompt") or self._BOT_SYSTEM_DEFAULT
         system = (tmpl.replace("{persona}", (bot.get("persona") or "").strip())
                       .replace("{name}", name))
+        # Datum/Uhrzeit: die ANWEISUNG steht hier fest, der WERT kommt in den
+        # Hinweis vor dem letzten Spruch (aendert sich jede Minute -- hier vorn
+        # wuerde er den Zwischenspeicher fuer den ganzen Rest zerstoeren).
+        system += ("\n\nDatum und Uhrzeit stehen in einem [Hinweis] direkt vor dem "
+                   "letzten Funkspruch. Verlass dich darauf statt auf dein eigenes "
+                   "Gefuehl fuer das Datum, und schreib in Suchanfragen kein Datum, "
+                   "das du nicht sicher weisst. Solche [Hinweise] sind keine "
+                   "Funksprueche, antworte nicht darauf.")
+        spaet = [self._jetzt_satz()]   # Teile des Hinweises vor dem letzten Spruch
+        if bot.get("emotion_auto"):
+            stimmungen = self._emotion_liste(bot)
+            system += ("\n\nStell deiner Antwort die passende Stimmung in eckigen "
+                       "Klammern voran, ganz am Anfang und nur eine: "
+                       + ", ".join(f"[{e}]" for e in stimmungen) +
+                       ". Danach folgt normal dein Funkspruch, ohne die Klammern "
+                       "vorzulesen. Im Zweifel " + f"[{stimmungen[0]}]" + ". "
+                       "Antwortest du mit SKIP, lass die Klammer weg.")
         if search_context:
-            system += ("\n\nAktuelle Websuche-Ergebnisse (nutze sie nur, "
+            spaet.append("Aktuelle Websuche-Ergebnisse (nutze sie nur, "
                        "wenn sie zur Frage passen, fass sie kurz und locker "
                        "wie am Funk üblich zusammen, keine Web-Adressen "
                        "vorlesen). WICHTIG: Nenne nur Daten, Termine, Zahlen "
@@ -3112,14 +3547,31 @@ class TXServer:
         # von vor 6 Stunden sah fuers Modell genauso "gerade eben" gesagt aus
         # wie einer von vor 10 Sekunden. Fix: uralte Eintraege raus, echte
         # Pausen dazwischen als Marker sichtbar machen.
-        STALE_DROP_S = 3600   # aelter als 1h -- fuer die aktuelle Lage irrelevant
+        # War fest 1h. 2026-09-25 einstellbar, Standard 3h: seit history_len
+        # die ANZAHL begrenzt (30), greift die Zeitgrenze nur noch in ruhigen
+        # Phasen -- und genau da schadete sie. Am 24.09. 21:41 fragte der User
+        # "weisst du, was wir vor 45 Minuten besprochen haben?", das Gespraech
+        # lag 60-61 Minuten zurueck und fiel um 20 Sekunden aus dem Fenster;
+        # von 50 gespeicherten Spruechen kamen nur 4 beim Modell an.
+        STALE_DROP_S = float(bot.get("history_max_age_s", 10800))
         GAP_NOTE_S   = 300    # ab 5 Min. Pause einen Hinweis einfuegen (war 3 --
                                # zu kurz auf einem belebten Kanal, wo Antworten
                                # oft ein paar Minuten brauchen)
         now = time.time()
-        recent = [(ts, who, txt)
-                  for ts, who, txt in hist[-int(bot.get("history_len", 10)):]
-                  if now - ts <= STALE_DROP_S]
+        n_ziel = int(bot.get("history_len", 10))
+        kandidaten = [(ts, who, txt) for ts, who, txt in hist if now - ts <= STALE_DROP_S]
+        # Blockweise: das Fenster beginnt am gemerkten Anker und waechst, bis es
+        # n_ziel + _PROMPT_BLOCK Sprueche hat -- erst dann rueckt der Anker vor.
+        # So bleibt der Anfang des Verlaufs ueber mehrere Antworten gleich.
+        # Schluessel ist das Verlaufs-Objekt des Raums (lebt so lange wie der
+        # Raum); fremde Listen (Tests, Wiederholung aus dem Archiv) bekommen
+        # einfach das normale Fenster.
+        anker = self._prompt_anker.get(id(hist)) if hasattr(self, "_prompt_anker") else None
+        recent = [e for e in kandidaten if anker is not None and e[0] >= anker]
+        if not recent or len(recent) > n_ziel + self._PROMPT_BLOCK:
+            recent = kandidaten[-n_ziel:] if n_ziel > 0 else []
+        if recent and hasattr(self, "_prompt_anker"):
+            self._prompt_anker[id(hist)] = recent[0][0]
         if recent:
             system += ("\n\nWenn eine Nachricht wie '[... 12 Minuten Pause ...]' "
                        "erscheint, ist seitdem eine Pause im Funkverkehr vergangen. "
@@ -3156,7 +3608,7 @@ class TXServer:
             if hits:
                 notes_txt = "\n".join(f"- {m['name'].strip()}: {m['notes'].strip()}"
                                       for m in hits)
-                system += ("\n\nBekannte Infos zu Personen im aktuellen Gespräch "
+                spaet.append("Bekannte Infos zu Personen im aktuellen Gespräch "
                            "(nutze sie nur, wenn's natürlich passt, erzähl nicht "
                            "unaufgefordert alles auf einmal runter, und erwähne "
                            "nicht, dass du dir das notiert hast):\n" + notes_txt)
@@ -3168,7 +3620,17 @@ class TXServer:
         notebook = bot.get("notebook") or []
         if notebook:
             recent_notes = notebook[-12:]
-            notes_txt = "\n".join(f"- {n['text'].strip()}" for n in recent_notes
+            # Mit Datum der Notiz (2026-09-24): "Gottfried hat am Samstag
+            # Geburtstag" ist sonst in einer Woche nicht mehr einzuordnen, und
+            # das Modell soll Wochentage NICHT selbst in Daten umrechnen -- im
+            # Test schrieb es "Samstag 27.09." an einem Donnerstag, den 24.
+            def _mit_datum(n):
+                try:
+                    d = datetime.fromtimestamp(float(n.get("ts")))
+                    return f"(notiert {self._WOCHENTAGE[d.weekday()]}, {d:%d.%m.%Y}) "
+                except (TypeError, ValueError):
+                    return ""
+            notes_txt = "\n".join(f"- {_mit_datum(n)}{n['text'].strip()}" for n in recent_notes
                                   if isinstance(n, dict) and (n.get("text") or "").strip())
             if notes_txt:
                 system += ("\n\nDeine eigenen bisherigen Notizen (was du dir "
@@ -3177,6 +3639,8 @@ class TXServer:
                            + notes_txt)
         messages = []
         prev_ts = None
+        konf = getattr(self, "_hist_konfidenz", {}) if bot.get("unsicher_markieren", False) else {}
+        markiert = False
         for ts, who, txt in recent:
             if prev_ts is not None and ts - prev_ts >= GAP_NOTE_S:
                 gap_min = round((ts - prev_ts) / 60)
@@ -3185,8 +3649,25 @@ class TXServer:
             if who == own_tag:
                 messages.append({"role": "assistant", "content": txt})
             else:
-                messages.append({"role": "user", "content": f"{who}: {txt}"})
+                k = konf.get(round(ts, 3))
+                if k is not None and k < 0.8:
+                    markiert = True
+                    messages.append({"role": "user", "content": f"{who} [schlecht verstanden]: {txt}"})
+                else:
+                    messages.append({"role": "user", "content": f"{who}: {txt}"})
             prev_ts = ts
+        if markiert:
+            # Erklaerung nur, wenn wirklich eine Zeile markiert ist -- kostet
+            # sonst in jeder Anfrage Tokens fuer nichts.
+            system += ("\n\nZeilen mit [schlecht verstanden] hat die Spracherkennung "
+                       "wahrscheinlich falsch verschriftet: nimm einzelne Woerter daraus "
+                       "nicht woertlich, wiederhole sie nicht und geh nicht auf "
+                       "Einzelheiten daraus ein, als waeren sie sicher gesagt.")
+        hinweis = {"role": "user", "content": "[Hinweis, kein Funkspruch] " + "\n\n".join(spaet)}
+        if messages:
+            messages.insert(len(messages) - 1, hinweis)
+        else:
+            messages.append(hinweis)
         return system, messages
 
     @staticmethod
@@ -3296,7 +3777,15 @@ class TXServer:
         if provider == "gemini":
             raw = await self._llm_gemini(bot, system, messages)
         else:
-            raw = await self._llm_ollama(bot, system, messages,
+            # Schon automatisch gesucht UND etwas gefunden? Dann das Such-
+            # werkzeug nicht nochmal anbieten (2026-09-24): das Modell suchte
+            # sonst ein zweites Mal selbst -- zweite Modellrunde, Antwort nach
+            # 12 statt 5 Sekunden. War die erste Suche leer, darf es mit einer
+            # eigenen, besseren Anfrage nachlegen.
+            llm_bot = bot
+            if search_query and search_context and not search_context.startswith("(SUCHE FEHLGESCHLAGEN"):
+                llm_bot = dict(bot, websearch=dict(bot.get("websearch") or {}, enabled=False))
+            raw = await self._llm_ollama(llm_bot, system, messages,
                                          room_name=room_name, trace_ts=trace_ts,
                                          force_model=force_model)
         _lldt = time.time() - _t0
@@ -3390,7 +3879,8 @@ class TXServer:
         # ueberspringt die Auto-Erkennung komplett -- sonst wuerde das dort
         # explizit gewaehlte Modell sofort wieder durch das gerade geladene
         # ersetzt werden (2026-08-15 als Bug gemeldet: Test griff nicht).
-        if not force_model:
+        geladener_ctx = None
+        if not force_model or num_ctx < 0:
             try:
                 ps_timeout = aiohttp.ClientTimeout(total=5)
                 async with aiohttp.ClientSession(timeout=ps_timeout) as sess:
@@ -3399,8 +3889,9 @@ class TXServer:
                             loaded = (await resp.json()).get("models") or []
                             if loaded:
                                 entry = loaded[0]
+                                geladener_ctx = entry.get("context_length")
                                 loaded_name = entry.get("name") or entry.get("model")
-                                if loaded_name and loaded_name != model:
+                                if loaded_name and loaded_name != model and not force_model:
                                     log.info("KI-Funker: nutze bereits geladenes Modell %s "
                                             "statt konfiguriertem %s (spart Neu-Load)",
                                             loaded_name, model)
@@ -3415,16 +3906,49 @@ class TXServer:
                                 # Eigener fester Wert (ollama_num_ctx) ist stabiler.
             except Exception as e:
                 log.debug("KI-Funker: /api/ps nicht erreichbar (%s) -- nutze konfiguriertes Modell/Kontext", e)
+        # -1 = Kontext des GERADE GELADENEN Modells uebernehmen (2026-09-23).
+        # Fuers Modell-Testen: laedt der User ein Modell mit kleinerem Kontext
+        # (Messung 23.09.: 25600), zwingt jede Abweichung Ollama zum kompletten
+        # Neu-Load. Weglassen (0) hilft dabei NICHT: Ollama nimmt dann seinen
+        # eigenen Standard -- am 23.09. im Log der Box nachgemessen 4096, was
+        # ausserdem zu klein fuer Roberts Prompt ist (dessen Anfrage zaehlte
+        # 5825 Tokens). Nur der uebernommene Wert laesst die laufende Instanz
+        # in Ruhe. ACHTUNG: Ist das Testmodell mit weniger Kontext geladen als
+        # Roberts Prompt braucht, wird dessen Anfang abgeschnitten. Bewusst NICHT der Standard: sobald ein
+        # anderer Client (Open WebUI) mit wechselnden Werten anfragt, jagt
+        # Robert dem hinterher -- das war 2026-08-10 der Grund fuer den festen
+        # Wert (Neu-Lade-Ping-Pong).
+        if num_ctx < 0:
+            if geladener_ctx:
+                num_ctx = int(geladener_ctx)
+                log.info("KI-Funker: nutze Kontextfenster des geladenen Modells (%d)", num_ctx)
+                if num_ctx < 8192:
+                    log.warning("KI-Funker: geladenes Kontextfenster %d ist klein -- Roberts "
+                                "Prompt (~6000 Tokens) wird dabei vorne abgeschnitten", num_ctx)
+            else:
+                # Nichts geladen oder /api/ps nicht erreichbar: dann ist auch
+                # nichts zu schonen -> normaler Standardwert. NICHT das Feld
+                # weglassen: Ollamas eigener Standard ist 4096 (23.09. im Log
+                # der Box gemessen) und schneidet Roberts Prompt ab.
+                num_ctx = int(self._BOT_DEFAULTS.get("ollama_num_ctx", 97280))
+                log.info("KI-Funker: kein Modell geladen -- Kontextfenster %d", num_ctx)
+        # num_ctx: fest aus voice.bot.ollama_num_ctx (Default 97280). Bewusst
+        # NICHT dynamisch vom gerade geladenen Modell uebernommen (siehe
+        # Kommentar oben) -- das verursachte Neu-Lade-Ping-Pong, wenn andere
+        # Clients (Open WebUI) selbst wechselnde num_ctx anfragen.
+        # 0 = Feld GAR NICHT mitschicken (2026-09-23): dann behaelt Ollama das
+        # Kontextfenster, mit dem das Modell gerade geladen ist. Fuers
+        # Modell-Testen -- sonst laedt Roberts naechste Antwort ein mit
+        # kleinerem Kontext geladenes Testmodell mit SEINEM Wert neu und haelt
+        # es per keep_alive stundenlang so fest.
+        optionen = {"num_predict": int(bot.get("ollama_num_predict", 150)),
+                    "temperature": float(bot.get("temperature", 0.4))}
+        if num_ctx > 0:
+            optionen["num_ctx"] = num_ctx
         body = {"model": model,
                 "messages": full_messages,
                 "stream": False, "keep_alive": bot.get("ollama_keep_alive", 0),
-                # num_ctx: fest aus voice.bot.ollama_num_ctx (Default 97280).
-                # Bewusst NICHT dynamisch vom gerade geladenen Modell
-                # uebernommen (siehe Kommentar oben) -- das verursachte
-                # Neu-Lade-Ping-Pong, wenn andere Clients (Open WebUI) selbst
-                # wechselnde num_ctx anfragen.
-                "options": {"num_predict": int(bot.get("ollama_num_predict", 150)),
-                            "temperature": 0.4, "num_ctx": num_ctx},
+                "options": optionen,
                 # Immer aus: bei Thinking-Modellen (qwen3, gemma4, deepseek-r1, …)
                 # frisst der Grübel-Block sonst das ganze num_predict-Budget auf
                 # (done_reason="length" BEVOR ueberhaupt eine sichtbare Antwort
@@ -3523,7 +4047,8 @@ class TXServer:
                      "parts": [{"text": m["content"]}]} for m in messages]
         body = {"systemInstruction": {"parts": [{"text": system}]},
                 "contents": contents,
-                "generationConfig": {"temperature": 0.6, "maxOutputTokens": 200}}
+                "generationConfig": {"temperature": float(bot.get("temperature", 0.4)),
+                                     "maxOutputTokens": 200}}
         url = ("https://generativelanguage.googleapis.com/v1beta/models/"
                f"{model}:generateContent")
         try:
@@ -3892,6 +4417,14 @@ class TXServer:
                 # "Aaron,dreschner" leise reparieren statt spaeter TTS-400
                 bot["speaker"] = re.sub(
                     r"[^a-z0-9_\-]", "_", body["speaker"].strip().lower())
+            if "unsicher_markieren" in body:
+                bot["unsicher_markieren"] = bool(body["unsicher_markieren"])
+            if "mitschreiber_enabled" in body:
+                bot["mitschreiber_enabled"] = bool(body["mitschreiber_enabled"])
+            if "emotion_auto" in body:
+                bot["emotion_auto"] = bool(body["emotion_auto"])
+            if "emotion_list" in body and isinstance(body["emotion_list"], str):
+                bot["emotion_list"] = body["emotion_list"].strip()
             if "ollama_keep_alive" in body and isinstance(
                     body["ollama_keep_alive"], (str, int, float)):
                 bot["ollama_keep_alive"] = body["ollama_keep_alive"]
@@ -4006,9 +4539,12 @@ class TXServer:
         t0 = time.time()
         answer, raw = await self._bot_ollama(bot, hist, with_raw=True,
                                              search_query=search_query)
+        answer, stimmung = self._emotion_abtrennen(answer or "", bot)   # wie live
+        answer = answer.strip()
         return web.json_response({
             "would_reply": bool(answer),
             "answer": answer or "SKIP",
+            "stimmung": stimmung,
             "raw": raw,
             "search_query": search_query,
             "seconds": round(time.time() - t0, 1)})
@@ -4141,6 +4677,8 @@ class TXServer:
             "ok": True,
             "name": name,
             "samples": len(self._speaker_enrollments.get(name, [])),
+            # Sofort-Pruefung der neuen Probe (siehe _speaker_enroll)
+            "pruefung": self._speaker_letzte_pruefung,
         })
 
     async def handle_admin_speaker_delete(self, request):
@@ -4186,7 +4724,9 @@ class TXServer:
         if err:
             return err
         try:
-            ok = await self._speaker_enroll(name, tmp_wav)
+            # Archiv-Nummer als Quelle -- die Temp-Datei sagt spaeter nichts
+            ok = await self._speaker_enroll(
+                name, tmp_wav, quelle=f"archiv#{entry_id} {entry.get('audio_file') or ''}".strip())
         finally:
             try:
                 os.unlink(tmp_wav)
@@ -4199,6 +4739,7 @@ class TXServer:
         return web.json_response({
             "ok": True, "name": name,
             "samples": len(self._speaker_enrollments.get(name, [])),
+            "pruefung": self._speaker_letzte_pruefung,
         })
 
     async def handle_admin_archive_callsign(self, request):
@@ -4764,6 +5305,9 @@ class TXServer:
                 update["local_port"] = prt
             if "local_voice" in body:
                 update["local_voice"] = str(body["local_voice"] or "").strip() or self._PIPER_LOCAL_VOICE
+            if "remote_voice" in body:
+                # Leer = der Dienst auf der GPU-Box nimmt sein Standardmodell.
+                update["remote_voice"] = str(body["remote_voice"] or "").strip()
             if engine in ("piper", "xtts"):
                 update["remote_url"] = piper if engine == "piper" else xtts
             v.update(update)
@@ -4789,7 +5333,8 @@ class TXServer:
                                   "piper_url": piper, "xtts_url": xtts,
                                   "fallback_local": bool(v.get("tts_fallback_local", True)),
                                   "local_host": host, "local_port": port,
-                                  "local_voice": voice})
+                                  "local_voice": voice,
+                                  "remote_voice": (v.get("remote_voice") or "")})
     async def handle_admin_tts_voices(self, request):
         """GET /api/admin/tts/voices — installierte Stimmen des lokalen Piper
         (Wyoming "describe"), deutsche zuerst. Fuer die Auswahlliste in der
@@ -4799,12 +5344,35 @@ class TXServer:
         if err:
             return err
         loop = asyncio.get_running_loop()
+        antwort = {}
         try:
-            voices = await loop.run_in_executor(None, self._piper_local_voices)
+            antwort["voices"] = await loop.run_in_executor(None, self._piper_local_voices)
         except Exception as e:
             log.warning("Stimmen des lokalen Piper nicht abrufbar: %s", e)
-            return web.json_response({"voices": [], "error": str(e)[:150]})
-        return web.json_response({"voices": voices})
+            antwort["voices"], antwort["error"] = [], str(e)[:150]
+        # Stimmen des entfernten Piper (GPU-Box). Aelterer Dienst ohne
+        # /voices -> leere Liste, die Oberflaeche zeigt dann nur das Textfeld.
+        try:
+            antwort["remote"], antwort["remote_default"] = await self._piper_remote_voices()
+        except Exception as e:
+            log.debug("Stimmen der GPU-Box nicht abrufbar: %s", e)
+            antwort["remote"], antwort["remote_error"] = [], str(e)[:150]
+        return web.json_response(antwort)
+
+    async def _piper_remote_voices(self) -> tuple[list, str]:
+        """(Stimmen, Standardstimme) vom entfernten Piper. Fragt /voices an der
+        Basis von voice.remote_url (…/tts -> …/voices)."""
+        url = (self.cfg.get("voice", {}).get("remote_url") or "").strip()
+        if not url:
+            return [], ""
+        basis = url.rsplit("/", 1)[0] if url.rstrip("/").endswith("/tts") else url.rstrip("/")
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.get(basis + "/voices") as resp:
+                if resp.status != 200:
+                    return [], ""
+                d = await resp.json()
+        return (d.get("voices") or []), (d.get("default") or "")
 
     def _piper_local_voices(self) -> list:
         """Stimmenliste vom lokalen Piper (blockierend -- Executor)."""
@@ -4980,10 +5548,13 @@ class TXServer:
         answer, raw = await self._bot_ollama(
             bot, hist, with_raw=True,
             force_model=bool(model) and (bot.get("provider") or "ollama") != "gemini")
+        # Stimmungs-Markierung wie im Funkbetrieb abtrennen (2026-09-25: die
+        # Analyse-Seite zeigte "[neutral] Stimmt, ..." roh an).
+        answer, stimmung = self._emotion_abtrennen(answer or "", bot)
         return web.json_response({
             "provider": bot.get("provider") or "ollama",
             "damals": eintrag.get("text", ""),
-            "jetzt": answer or "SKIP", "raw": raw,
+            "jetzt": answer.strip() or "SKIP", "stimmung": stimmung, "raw": raw,
             "model": (bot.get("gemini_model") if (bot.get("provider") or "ollama") == "gemini"
                       else bot.get("ollama_model")),
             "seconds": round(time.time() - t0, 1),
@@ -7133,6 +7704,9 @@ class TXServer:
         app.router.add_post("/api/admin/tts",       self.handle_admin_tts)
         app.router.add_get ("/api/admin/tts/voices", self.handle_admin_tts_voices)
         app.router.add_get ("/api/admin/bot-chats",  self.handle_admin_bot_chats)
+        app.router.add_get ("/api/admin/notiz-vorschlaege", self.handle_admin_notiz_vorschlaege)
+        app.router.add_post("/api/admin/prompt-groesse", self.handle_admin_prompt_groesse)
+        app.router.add_post("/api/admin/notiz-vorschlaege", self.handle_admin_notiz_vorschlaege)
         app.router.add_post("/api/admin/bot-replay-archive", self.handle_admin_bot_replay_archive)
         app.router.add_post("/api/admin/transcribe-compare", self.handle_admin_transcribe_compare)
         app.router.add_get ("/api/admin/crosslink", self.handle_admin_crosslink)
@@ -7193,6 +7767,7 @@ def main():
             pipeline.on_transcript = server.on_transcript
             pipeline.resolve_callsign = server.bot_archive_callsign
             pipeline.resolve_known_text = server.resolve_known_text
+            pipeline.ist_angesprochen = server.bot_angesprochen
             pipeline.debug_trace = server.debug_trace_step
             log.info("Transkription aktiviert (Aufnahmen via frn_stream.py)")
 

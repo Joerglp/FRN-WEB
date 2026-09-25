@@ -933,7 +933,17 @@ class TranscriptionPipeline:
                                     "" if confidence is None
                                     else (" -- verstanden" if confidence
                                           else " -- geraten")))
+                    # Robert beim Namen gerufen? Dann den Kontroll-Lauf sparen
+                    # (2026-09-24, ~1s Wartezeit bis zur Antwort in jedem
+                    # dritten Fall). Die Pruefung soll Rateergebnisse aus dem
+                    # Rauschen abfangen -- ein erkannter Name heisst aber: da
+                    # hat jemand ihn gemeint, er soll antworten. confidence
+                    # bleibt dann None (= unbewertet, keine Sperre).
+                    gerufen = getattr(self, "ist_angesprochen", None)
                     if (text.strip() and remote_url and _dur_s >= 1.5
+                            and confidence is None and gerufen and gerufen(text)):
+                        log.info("[%s] Kontroll-Lauf gespart -- Robert angesprochen", room)
+                    elif (text.strip() and remote_url and _dur_s >= 1.5
                             and confidence is None):
                         _var = None
                         try:
