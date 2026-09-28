@@ -546,7 +546,6 @@ audio {
   border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 14px; margin-bottom: 10px; background: rgba(20,32,50,0.35);
 }
-.dbg-trace.dbg-stale { opacity: 0.45; }
 .dbg-trace-head .dbg-age { font-weight: bold; }
 .dbg-trace-head .dbg-age.dbg-age-fresh { color: var(--green); }
 .dbg-trace-head {
@@ -1477,6 +1476,20 @@ audio {
           Gilt nur zusammen mit dem Schalter darüber.
         </div>
       </div>
+      <label style="display:flex;align-items:center;gap:8px;margin:4px 0 6px;cursor:pointer">
+        <input type="checkbox" id="bot-begruessung" style="accent-color:#f0b429" autocomplete="off">
+        Begrüßung — meldet sich einmal, wenn nach längerer Ruhe wieder Betrieb ist
+      </label>
+      <div style="margin:0 0 14px 24px;font-size:.72rem;color:var(--text-muted);line-height:1.5">
+        <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          nach mindestens <input type="number" id="bot-begr-ruhe" min="0.5" max="48" step="0.5" style="width:60px" autocomplete="off"> h Ruhe,
+          wenn <input type="number" id="bot-begr-sprueche" min="1" max="200" style="width:55px" autocomplete="off"> Sprüche gefallen sind,
+          dann zufällig nach <input type="number" id="bot-begr-min" min="0" max="180" style="width:50px" autocomplete="off">
+          bis <input type="number" id="bot-begr-max" min="0" max="180" style="width:50px" autocomplete="off"> Minuten
+        </span>
+        Gesendet wird erst in einer Funkpause. Hat Robert vorher schon auf jemanden geantwortet, entfällt die Begrüßung.
+        Nebeneffekt: Sprachmodell und Sprachausgabe sind danach warm.
+      </div>
       <div class="form-grid">
         <div class="form-field" style="flex:1">
           <label>Name</label>
@@ -1577,8 +1590,15 @@ audio {
             <label style="font-size:.7rem;color:var(--muted);margin-top:4px">Piper-Stimme
               <select id="tts-remote-voice" style="width:100%" onchange="saveTts()" autocomplete="off"></select></label>
             <label style="font-size:.7rem;color:var(--muted);margin-top:4px">XTTS (geklonte Stimmen)
-              <input type="text" id="tts-xtts-url" placeholder="http://192.0.0.17:9010/tts"
+              <input type="text" id="tts-xtts-url" placeholder="http://192.0.0.17:9002/tts"
                      style="width:100%" onchange="saveTts()" autocomplete="off"></label>
+            <label style="font-size:.7rem;color:var(--muted);margin-top:4px">XTTS-Sprecher für Robert
+              <select id="tts-xtts-speaker" style="width:100%" onchange="saveTts()" autocomplete="off"></select></label>
+            <label style="display:flex;align-items:center;gap:6px;margin-top:4px;font-size:.72rem;cursor:pointer"
+                   title="Der erste Ton kommt nach ~0,6 s statt erst nach der ganzen Synthese (3-5 s). Schlägt es fehl, wird wie bisher am Stück erzeugt.">
+              <input type="checkbox" id="tts-xtts-stream" onchange="saveTts()" style="accent-color:#f0b429" autocomplete="off">
+              XTTS stückweise senden (schneller Sendebeginn)
+            </label>
             <div style="font-size:.68rem;color:var(--accent);margin-top:6px">Änderungen gelten sofort</div>
           </div>
 
@@ -1598,12 +1618,13 @@ audio {
           </div>
 
           <div class="form-field" style="flex:1 1 260px">
-            <label>Roberts Stimme <span style="color:var(--muted)">— im Normalbetrieb</span></label>
+            <label>Feste Stimmung <span style="color:var(--muted)">— nur bei Piper</span></label>
             <input type="text" id="bot-speaker" list="bot-speaker-list" placeholder="damien_black" autocomplete="off">
             <datalist id="bot-speaker-list"></datalist>
             <div style="font-size:.7rem;color:var(--muted);margin-top:4px;line-height:1.35">
-              Bei XTTS die Sprecher-ID (z.&nbsp;B. <code>aaron_dreschner</code>).
-              Bei Piper die <b>Stimmung innerhalb der gewählten Stimme</b> — beim Modell
+              <b>Spricht Robert über XTTS, gilt dieses Feld nicht</b> — dann nimmt er den
+              „XTTS-Sprecher für Robert" im Kasten GPU-Box, und Stimmungen gibt es nicht.
+              Bei Piper ist es die <b>Stimmung innerhalb der gewählten Stimme</b> — beim Modell
               <code>thorsten_emotional</code> also z.&nbsp;B. <code>neutral</code>,
               <code>amused</code> oder <code>whisper</code>. Die Liste erscheint beim
               Hineinklicken, sobald oben eine Stimme mit Stimmungen gewählt ist.
@@ -1619,8 +1640,10 @@ audio {
             <div style="font-size:.7rem;color:var(--muted);margin-top:4px;line-height:1.35">
               Robert stellt seiner Antwort dann selbst <code>[stimmung]</code> voran; der Server
               schneidet das ab und spricht den Rest damit. Kein zweiter Modellaufruf, also nicht
-              langsamer. Braucht oben eine Stimme mit Stimmungen. Das Feld „Roberts Stimme" gilt
+              langsamer. Braucht oben eine Stimme mit Stimmungen. Das Feld „Feste Stimmung" gilt
               dann nur noch, wenn das Modell keine oder eine unerlaubte Stimmung nennt.
+              <b>Wirkt nur, solange Piper spricht</b> — bei XTTS wird die Regel automatisch
+              weggelassen und kostet keine Tokens.
             </div>
             <div style="font-size:.68rem;color:var(--amber, #f0b429);margin-top:6px">Erst mit SPEICHERN übernommen</div>
           </div>
@@ -4248,6 +4271,11 @@ async function loadBotAdmin() {
     document.getElementById("bot-enabled").checked = !!d.enabled;
     document.getElementById("bot-only-addressed").checked = !!d.only_when_addressed;
     document.getElementById("bot-followup").value = d.follow_up_window_s ?? 120;
+    document.getElementById("bot-begruessung").checked = d.begruessung_enabled !== false;
+    document.getElementById("bot-begr-ruhe").value     = d.begruessung_ruhe_h ?? 3;
+    document.getElementById("bot-begr-sprueche").value = d.begruessung_min_sprueche ?? 6;
+    document.getElementById("bot-begr-min").value      = d.begruessung_warte_min ?? 3;
+    document.getElementById("bot-begr-max").value      = d.begruessung_warte_max ?? 10;
     document.getElementById("bot-name").value      = d.name || "";
     document.getElementById("bot-trigger").value   = (d.trigger || []).join(", ");
     document.getElementById("bot-persona").value   = d.persona || "";
@@ -4470,6 +4498,37 @@ function fillRemoteVoices(liste, standard, current) {
   sel.addEventListener("change", () => fuelleStimmungen(liste, sel.value));
 }
 
+// XTTS-Sprecher fuer Robert als Auswahl (2026-09-27): eigene Aufnahmen und
+// Studio-Stimmen. "default" ist die geklonte Stimme aus ref/joerg.wav -- im
+// Namen kenntlich machen, damit Robert nicht versehentlich mit Joergs Stimme spricht.
+function fillXttsSpeakers(eigene, studio) {
+  const sel = document.getElementById("tts-xtts-speaker");
+  if (!sel) return;
+  const aktuell = sel.dataset.aktuell || sel.value || "aaron_dreschner";
+  sel.innerHTML = "";
+  const gruppe = (titel, namen, beschrift) => {
+    if (!namen || !namen.length) return;
+    const g = document.createElement("optgroup"); g.label = titel;
+    namen.forEach(n => {
+      const o = document.createElement("option");
+      o.value = n; o.textContent = beschrift ? beschrift(n) : n;
+      g.appendChild(o);
+    });
+    sel.appendChild(g);
+  };
+  gruppe("Eigene Aufnahmen", eigene,
+         n => n === "default" ? "default (deine geklonte Stimme)" : n);
+  gruppe("Studio-Stimmen", studio);
+  const alle = [...(eigene || []), ...(studio || [])];
+  if (!alle.includes(aktuell)) {            // nie verlieren, auch wenn die Box gerade nicht antwortet
+    const o = document.createElement("option");
+    o.value = aktuell; o.textContent = aktuell + " (aktuell)";
+    sel.insertBefore(o, sel.firstChild);
+  }
+  sel.value = aktuell;
+  sel.dataset.aktuell = aktuell;
+}
+
 // Stimmungen/Sprecher der gewaehlten Stimme als Vorschlagsliste fuer das Feld
 // "Roberts Stimme" -- das wird als speaker mitgeschickt.
 function fuelleStimmungen(liste, stimme) {
@@ -4488,6 +4547,7 @@ async function fillLocalVoices(current, remoteCurrent) {
     const d = await r.json();
     voices = d.voices || [];
     fillRemoteVoices(d.remote, d.remote_default, remoteCurrent);
+    fillXttsSpeakers(d.xtts_eigene, d.xtts_studio);
   } catch(e) { /* offline: unten Ersatz */ }
   if (!voices.length && current) voices = [{name: current, lang: "", info: "(Piper nicht erreichbar)"}];
   voices.forEach(v => {
@@ -4521,6 +4581,8 @@ async function loadTts() {
     document.getElementById("tts-engine").value = d.engine || "piper";
     document.getElementById("tts-fallback-local").checked = d.fallback_local !== false;
     document.getElementById("tts-piper-url").value   = d.piper_url  || "";
+    document.getElementById("tts-xtts-speaker").dataset.aktuell = d.xtts_speaker || "aaron_dreschner";
+    document.getElementById("tts-xtts-stream").checked = d.xtts_stream !== false;
     document.getElementById("tts-xtts-url").value    = d.xtts_url   || "";
     document.getElementById("tts-local-host").value  = d.local_host || "";
     document.getElementById("tts-local-port").value  = d.local_port || "";
@@ -4543,7 +4605,12 @@ async function saveTts() {
         local_host:     document.getElementById("tts-local-host").value.trim(),
         local_port:     parseInt(document.getElementById("tts-local-port").value, 10) || 10200,
         local_voice:    document.getElementById("tts-local-voice").value.trim(),
-        remote_voice:   document.getElementById("tts-remote-voice").value.trim() }),
+        remote_voice:   document.getElementById("tts-remote-voice").value.trim(),
+        // Liste nicht geladen (Box weg, Sitzung abgelaufen)? Dann den bekannten
+        // Sprecher schicken statt "" -- der Server setzte sonst still den Standard.
+        xtts_speaker:   (document.getElementById("tts-xtts-speaker").value
+                         || document.getElementById("tts-xtts-speaker").dataset.aktuell || "").trim(),
+        xtts_stream:    document.getElementById("tts-xtts-stream").checked }),
     });
     const d = await r.json();
     if (d.error) { showMsg("msg-bot", "Fehler: " + d.error, "error"); return; }
@@ -4567,6 +4634,11 @@ async function saveBotAdmin() {
     mitschreiber_enabled:  document.getElementById("bot-mitschreiber").checked,
     unsicher_markieren:    document.getElementById("bot-unsicher").checked,
     follow_up_window_s:    numOderStandard("bot-followup", 120),   // 0 gueltig = aus
+    begruessung_enabled:   document.getElementById("bot-begruessung").checked,
+    begruessung_ruhe_h:    numOderStandard("bot-begr-ruhe", 3),
+    begruessung_min_sprueche: numOderStandard("bot-begr-sprueche", 6),
+    begruessung_warte_min: numOderStandard("bot-begr-min", 3),
+    begruessung_warte_max: numOderStandard("bot-begr-max", 10),
     name:                  document.getElementById("bot-name").value,
     trigger:               document.getElementById("bot-trigger").value,
     persona:               document.getElementById("bot-persona").value,

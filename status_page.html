@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>FRN Status</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:      #0d1117;
+  --panel:   #141c2b;
+  --inset:   #0e1520;
+  --border:  #2a3f5f;
+  --accent:  #4fc3f7;
+  --text:    #dce8f0;
+  --muted:   #8aabbf;
+  --dim:     #2d3f55;
+  --red:     #ef5350;
+  --green:   #4caf50;
+  --green2:  #69f0ae;
+  --yellow:  #ffee58;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Rajdhani', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  max-width: 900px;
+  margin: 0 auto;
+  padding: env(safe-area-inset-top) 16px calc(32px + env(safe-area-inset-bottom)) 16px;
+  min-height: 100dvh;
+  background-image:
+    linear-gradient(rgba(79,195,247,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(79,195,247,0.02) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+h1 {
+  font-family: 'Orbitron', monospace;
+  font-size: 1.25em; font-weight: 900;
+  letter-spacing: 0.06em; color: var(--accent);
+  text-shadow: 0 0 16px rgba(79,195,247,0.4);
+  margin: 20px 0 4px;
+}
+h2 {
+  font-family: 'Orbitron', monospace; font-size: .72em; font-weight: 700;
+  letter-spacing: .12em; color: var(--muted); text-transform: uppercase;
+  margin: 22px 0 8px;
+}
+.sub { font-family: 'Share Tech Mono', monospace; font-size: 0.72em;
+       color: var(--muted); margin-bottom: 14px; }
+.mono { font-family: 'Share Tech Mono', monospace; }
+.form-field input {
+  width: 100%; background: var(--inset); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 9px 12px; font-family: 'Rajdhani', sans-serif; font-size: 0.95em;
+}
+.form-field input:focus { outline: none; border-color: var(--accent); }
+.form-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.btn-save, .btn-ghost {
+  border-radius: 6px; padding: 8px 16px; font-family: 'Rajdhani', sans-serif;
+  font-weight: 600; font-size: 0.95em; cursor: pointer;
+}
+.btn-save { background: var(--accent); color: #06121c; border: none; }
+.btn-ghost { background: none; color: var(--accent); border: 1px solid var(--border); }
+.btn-save:hover, .btn-ghost:hover { filter: brightness(1.15); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.admin-msg { font-size: 0.85em; margin-top: 8px; min-height: 1.2em; color: var(--red); }
+#login-box { max-width: 340px; margin-top: 30px; }
+
+/* Kopfzeile mit Gesamtzustand */
+.kopf { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 6px; }
+.gesamt {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-weight: 600; font-size: 1.05em; padding: 6px 14px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--panel);
+}
+.gesamt.ok     { color: var(--green2); border-color: rgba(105,240,174,.35); }
+.gesamt.fehler { color: var(--red);    border-color: rgba(239,83,80,.5); }
+.gesamt.warn   { color: var(--yellow); border-color: rgba(255,238,88,.4); }
+.kopf .rechts { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.stand { font-family: 'Share Tech Mono', monospace; font-size: .75em; color: var(--muted); }
+
+.probleme { background: rgba(239,83,80,.08); border: 1px solid rgba(239,83,80,.45);
+            border-radius: 8px; padding: 10px 14px; margin-top: 10px; }
+.probleme li { margin-left: 18px; line-height: 1.5; }
+.probleme .mono { color: var(--muted); font-size: .85em; }
+
+/* Kennzahlen Robert */
+.werte { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+.wert { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.wert .l { font-size: .72em; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.wert .v { font-family: 'Share Tech Mono', monospace; font-size: 1.15em; margin-top: 2px;
+           font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.wert .s { font-size: .8em; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
+
+/* Dienstlisten */
+.liste { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.zeile { display: grid; grid-template-columns: 14px minmax(0, 1.2fr) minmax(0, 1.6fr) auto;
+         gap: 10px; align-items: center; padding: 7px 12px; border-top: 1px solid var(--dim); }
+.zeile:first-child { border-top: none; }
+.zeile .n { font-weight: 600; }
+.zeile .n small { display: block; font-family: 'Share Tech Mono', monospace; font-weight: 400;
+                  font-size: .72em; color: var(--muted); overflow-wrap: anywhere; }
+.zeile .d { font-family: 'Share Tech Mono', monospace; font-size: .8em; color: var(--muted);
+            overflow-wrap: anywhere; }
+.zeile .ms { font-family: 'Share Tech Mono', monospace; font-size: .78em; color: var(--muted);
+             font-variant-numeric: tabular-nums; text-align: right; }
+.zeile.fehler { background: rgba(239,83,80,.07); }
+.zeile.fehler .d { color: var(--red); }
+.punkt { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); }
+.punkt.ok     { background: var(--green2); box-shadow: 0 0 8px rgba(105,240,174,.5); }
+.punkt.fehler { background: var(--red);    box-shadow: 0 0 8px rgba(239,83,80,.6); }
+.punkt.warn   { background: var(--yellow); }
+.punkt.aus    { background: var(--dim); }
+.spalten { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 640px) {
+  .spalten { grid-template-columns: 1fr; }
+  .zeile { grid-template-columns: 14px minmax(0, 1fr) auto; }
+  .zeile .d { grid-column: 2 / -1; }
+}
+
+/* GPU-Balken */
+.gpu { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+       padding: 10px 12px; display: grid; gap: 6px; }
+.gpu + .gpu { margin-top: 8px; }
+.gpu .t { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; font-weight: 600; }
+.gpu .t span { font-family: 'Share Tech Mono', monospace; font-weight: 400; font-size: .8em; color: var(--muted); }
+.balken { height: 10px; background: var(--inset); border: 1px solid var(--dim); border-radius: 5px; overflow: hidden; }
+.balken i { display: block; height: 100%; background: var(--accent); }
+.balken i.voll { background: var(--yellow); }
+.balken i.kritisch { background: var(--red); }
+.hinweis { font-size: .8em; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+@media (prefers-reduced-motion: no-preference) { .balken i { transition: width .4s; } }
+</style>
+</head>
+<body>
+
+<div id="login-box">
+  <h1>FRN STATUS</h1>
+  <div class="sub">Anmeldung erforderlich</div>
+  <div class="form-field">
+    <label for="login-user">Benutzername</label>
+    <input type="text" id="login-user" autocomplete="username">
+  </div>
+  <div class="form-field">
+    <label for="login-pass">Passwort</label>
+    <input type="password" id="login-pass" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter') doLogin()">
+  </div>
+  <button class="btn-save" onclick="doLogin()">ANMELDEN</button>
+  <div class="admin-msg" id="login-error"></div>
+</div>
+
+<div id="status-box" hidden>
+  <h1>FRN STATUS</h1>
+  <div class="sub" id="who"></div>
+  <div class="kopf">
+    <span class="gesamt" id="gesamt"><span class="punkt"></span><span>Wird geprüft …</span></span>
+    <div class="rechts">
+      <span class="stand" id="stand"></span>
+      <button class="btn-ghost" id="btn-neu" onclick="laden()">Jetzt prüfen</button>
+    </div>
+  </div>
+  <div id="probleme"></div>
+
+  <h2>Robert</h2>
+  <div class="werte" id="robert"></div>
+
+  <h2>GPU-Box <span class="mono" id="box-host" style="letter-spacing:0;text-transform:none"></span></h2>
+  <div id="gpus"></div>
+  <div class="spalten" style="margin-top:10px">
+    <div>
+      <div class="hinweis" style="margin:0 0 6px">Dienste antworten (HTTP)</div>
+      <div class="liste" id="box-http"></div>
+    </div>
+    <div>
+      <div class="hinweis" style="margin:0 0 6px">systemd-Dienste</div>
+      <div class="liste" id="box-units"></div>
+    </div>
+  </div>
+
+  <h2>Server01 (Pi)</h2>
+  <div class="spalten">
+    <div>
+      <div class="hinweis" style="margin:0 0 6px">systemd-Dienste</div>
+      <div class="liste" id="pi-units"></div>
+    </div>
+    <div>
+      <div class="hinweis" style="margin:0 0 6px">Docker &amp; Erreichbarkeit</div>
+      <div class="liste" id="pi-docker"></div>
+    </div>
+  </div>
+
+  <h2>FRN-Verbindungen des TX-Servers</h2>
+  <div class="liste" id="frn"></div>
+  <div class="hinweis">Der TX-Server verbindet sich nur bei Bedarf (Robert sendet, jemand hat die Webseite offen).
+    „Nicht verbunden“ ist deshalb normal – mitgehört wird über die Stream-Dienste.</div>
+</div>
+
+<script>
+const TX_BASE = location.protocol + "//" + location.host;
+let authToken = null;
+try { authToken = localStorage.getItem("frn_token"); } catch (e) {}
+let timer = null;
+
+function adminFetch(url, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers, { "X-Token": authToken });
+  return fetch(TX_BASE + url, opts);
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+function speichern(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+async function doLogin() {
+  const user = document.getElementById("login-user").value.trim();
+  const pass = document.getElementById("login-pass").value;
+  const fehl = document.getElementById("login-error");
+  fehl.textContent = "";
+  try {
+    const resp = await fetch(`${TX_BASE}/api/login`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: user, password: pass }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { fehl.textContent = data.error || "Anmeldung fehlgeschlagen"; return; }
+    if (!data.is_admin) { fehl.textContent = "Kein Admin-Konto – die Statusseite ist nur für Admins."; return; }
+    authToken = data.token;
+    speichern("frn_token", authToken);
+    speichern("frn_callsign", data.callsign || "");
+    speichern("frn_is_admin", true);
+    zeigen(data.callsign || "");
+  } catch (err) {
+    fehl.textContent = "Keine Verbindung zum Server: " + err.message;
+  }
+}
+
+async function start() {
+  if (!authToken) return;
+  try {
+    const r = await adminFetch("/api/admin/dienste");
+    if (r.ok) {
+      let cs = ""; try { cs = localStorage.getItem("frn_callsign") || ""; } catch (e) {}
+      zeigen(cs, await r.json());
+      return;
+    }
+  } catch (e) {}
+  authToken = null;
+  try { localStorage.removeItem("frn_token"); } catch (e) {}
+}
+
+function zeigen(who, daten) {
+  document.getElementById("login-box").hidden = true;
+  document.getElementById("status-box").hidden = false;
+  document.getElementById("who").textContent = who ? `angemeldet als ${who}` : "";
+  if (daten) darstellen(daten); else laden();
+  clearInterval(timer);
+  timer = setInterval(laden, 30000);
+}
+
+async function laden() {
+  const b = document.getElementById("btn-neu");
+  b.disabled = true; b.textContent = "Prüfe …";
+  try {
+    const r = await adminFetch("/api/admin/dienste");
+    if (r.status === 401 || r.status === 403) { location.reload(); return; }
+    darstellen(await r.json());
+  } catch (e) {
+    const g = document.getElementById("gesamt");
+    g.className = "gesamt fehler";
+    g.innerHTML = `<span class="punkt fehler"></span><span>TX-Server nicht erreichbar</span>`;
+  } finally {
+    b.disabled = false; b.textContent = "Jetzt prüfen";
+  }
+}
+
+function vor(ts) {
+  if (!ts) return "–";
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 90) return `vor ${Math.round(s)} s`;
+  if (s < 5400) return `vor ${Math.round(s / 60)} min`;
+  if (s < 172800) return `vor ${(s / 3600).toFixed(1).replace(".", ",")} h`;
+  return `vor ${Math.round(s / 86400)} Tagen`;
+}
+function uhr(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString("de-DE", { weekday: "short", hour: "2-digit", minute: "2-digit" }) : "";
+}
+
+function zeilen(el, liste) {
+  document.getElementById(el).innerHTML = liste.map(e => `
+    <div class="zeile ${e.status === "fehler" ? "fehler" : ""}">
+      <span class="punkt ${e.status}" title="${esc(e.status)}"></span>
+      <div class="n">${esc(e.name)}<small>${esc(e.id)}</small></div>
+      <div class="d">${esc(e.detail || "")}</div>
+      <div class="ms">${e.ms != null ? e.ms + " ms" : ""}</div>
+    </div>`).join("");
+}
+
+function darstellen(d) {
+  const r = d.robert || {};
+  const bs = d.box_ssh || { units: [], gpus: [] };
+  const alle = [
+    ...d.pi.units.map(e => ({ ...e, ort: "Pi" })), ...d.pi.docker.map(e => ({ ...e, ort: "Pi" })),
+    ...d.pi.http.map(e => ({ ...e, ort: "Pi" })), ...d.box_http.map(e => ({ ...e, ort: "Box" })),
+    ...bs.units.map(e => ({ ...e, ort: "Box" })),
+  ];
+  const fehler = alle.filter(e => e.status === "fehler");
+  const warn = alle.filter(e => e.status === "warn");
+  if (!r.enabled) warn.push({ name: "Robert ist ausgeschaltet", ort: "Pi", detail: "" });
+  if (r.warteschlange > 5) warn.push({ name: `${r.warteschlange} Aufnahmen warten auf Whisper`, ort: "Pi", detail: "" });
+
+  const g = document.getElementById("gesamt");
+  const art = fehler.length ? "fehler" : warn.length ? "warn" : "ok";
+  const txt = fehler.length ? `${fehler.length} ${fehler.length === 1 ? "Dienst gestört" : "Dienste gestört"}`
+            : warn.length ? `${warn.length} ${warn.length === 1 ? "Hinweis" : "Hinweise"}` : "Alles läuft";
+  g.className = "gesamt " + art;
+  g.innerHTML = `<span class="punkt ${art}"></span><span>${txt}</span>`;
+  document.getElementById("stand").textContent =
+    "Stand " + new Date(d.zeit * 1000).toLocaleTimeString("de-DE") + " · alle 30 s";
+  document.getElementById("probleme").innerHTML = (fehler.length || warn.length) ? `
+    <div class="probleme"><ul>${[...fehler, ...warn].map(e =>
+      `<li><b>${esc(e.ort)}:</b> ${esc(e.name)} <span class="mono">${esc(e.detail || "")}</span></li>`).join("")}
+    </ul></div>` : "";
+
+  // Robert
+  const la = r.letzte_antwort;
+  const llm = r.llm_letzte;
+  document.getElementById("robert").innerHTML = `
+    <div class="wert"><div class="l">Robert</div>
+      <div class="v" style="color:${r.enabled ? "var(--green2)" : "var(--yellow)"}">${r.enabled ? "an" : "aus"}</div>
+      <div class="s">${esc((r.rooms || []).join(", ") || "alle Räume")}</div></div>
+    <div class="wert"><div class="l">Letzte Antwort</div>
+      <div class="v">${la ? vor(la.ts) : "–"}</div>
+      <div class="s">${la ? esc(uhr(la.ts) + " · " + la.room) : "noch keine"}</div></div>
+    <div class="wert"><div class="l">Letzte Modell-Antwort</div>
+      <div class="v">${llm ? llm.s.toFixed(1).replace(".", ",") + " s" : "–"}</div>
+      <div class="s">${llm ? vor(llm.ts) : "seit Neustart keine"}</div></div>
+    <div class="wert"><div class="l">Warten auf Whisper</div>
+      <div class="v" style="color:${r.warteschlange > 5 ? "var(--yellow)" : "inherit"}">${r.warteschlange ?? "?"}</div>
+      <div class="s">Aufnahmen in der Warteschlange</div></div>
+    <div class="wert"><div class="l">Stimme</div>
+      <div class="v">${esc(r.tts || "–")}</div>
+      <div class="s">${esc(r.xtts_speaker || "")}${r.vorwaermen ? " · Vorwärmen an" : ""}</div></div>`;
+  if (la && la.text) {
+    document.getElementById("robert").insertAdjacentHTML("beforeend",
+      `<div class="wert" style="grid-column:1/-1"><div class="l">Zuletzt gesagt</div>
+       <div class="s" style="color:var(--text);font-size:.95em">„${esc(la.text)}“</div></div>`);
+  }
+
+  // GPU-Box
+  document.getElementById("box-host").textContent = d.box;
+  const gpus = (bs.gpus || []).map(x => {
+    const p = Math.round(100 * x.mem_used / x.mem_total);
+    const kl = p >= 97 ? "kritisch" : p >= 90 ? "voll" : "";
+    return `<div class="gpu">
+      <div class="t">GPU ${x.index} · ${esc(x.name)}
+        <span>${x.mem_used} / ${x.mem_total} MiB (${p} %) · ${x.temp} °C · ${esc(x.pstate)} · Last ${x.util} %</span></div>
+      <div class="balken"><i class="${kl}" style="width:${p}%"></i></div></div>`;
+  }).join("");
+  const ram = bs.ram ? `<div class="hinweis">Arbeitsspeicher: ${Math.round(bs.ram.available / 1024)} von ${Math.round(bs.ram.total / 1024)} GB frei
+      ${bs.load ? " · Last " + esc(bs.load.join(" ")) : ""}</div>` : "";
+  const knapp = (bs.gpus || []).some(x => x.index === 0 && x.mem_total - x.mem_used < 512)
+    ? `<div class="hinweis" style="color:var(--yellow)">A2000 fast voll: weniger als 512 MiB frei. Ein weiteres Modell oder ein größerer Kontext passt nicht mehr dazu.</div>` : "";
+  document.getElementById("gpus").innerHTML = (gpus || `<div class="hinweis">GPU-Werte nicht abrufbar (ssh).</div>`) + ram + knapp;
+  zeilen("box-http", d.box_http);
+  zeilen("box-units", bs.units);
+  zeilen("pi-units", d.pi.units);
+  zeilen("pi-docker", [...d.pi.docker, ...d.pi.http]);
+  zeilen("frn", (r.frn_raeume || []).map(x => ({
+    name: x.name, id: "", status: x.verbunden ? "ok" : "aus",
+    detail: x.verbunden ? "verbunden" : "nicht verbunden (bei Bedarf)" })));
+}
+
+start();
+</script>
+</body>
+</html>

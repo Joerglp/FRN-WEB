@@ -542,6 +542,15 @@ async def _tempo_variante(wav_path: str, tempo: float = 1.03) -> str | None:
         return None
 
 
+def _gerufen(fn, text: str, room: str) -> bool:
+    """Ruft den Hook ist_angesprochen -- mit Raum, falls er ihn kennt (seit
+    2026-09-25: Anschlussfenster), sonst wie frueher nur mit dem Text."""
+    try:
+        return bool(fn(text, room))
+    except TypeError:
+        return bool(fn(text))
+
+
 def _unlink(path: str | None) -> None:
     if not path:
         return
@@ -941,7 +950,7 @@ class TranscriptionPipeline:
                     # bleibt dann None (= unbewertet, keine Sperre).
                     gerufen = getattr(self, "ist_angesprochen", None)
                     if (text.strip() and remote_url and _dur_s >= 1.5
-                            and confidence is None and gerufen and gerufen(text)):
+                            and confidence is None and gerufen and _gerufen(gerufen, text, room)):
                         log.info("[%s] Kontroll-Lauf gespart -- Robert angesprochen", room)
                     elif (text.strip() and remote_url and _dur_s >= 1.5
                             and confidence is None):
@@ -953,6 +962,22 @@ class TranscriptionPipeline:
                                 raise RuntimeError("keine Kontroll-Variante")
                             kontrolle = await asyncio.wait_for(
                                 transcribe_wav(_var, model_size, language), timeout=120.0)
+                            if not kontrolle.strip():
+                                # Kontroll-Lauf vom Halluzinationsfilter geleert
+                                # (2026-09-25): bisher ergab das 0 % und warf den
+                                # Spruch weg -- 49x seit 17.09., darunter sauber
+                                # verstandene ("Das war jetzt ein bisschen kurz,
+                                # das war ein bisschen wie abgebrochen."). Ein
+                                # leerer Kontroll-Lauf ist aber nur EIN Indiz:
+                                # zweiter Versuch mit 3 % langsamer. Bleibt auch
+                                # der leer, war es wirklich Rauschen.
+                                _unlink(_var)
+                                _var = await _tempo_variante(wav_path, tempo=0.97)
+                                if _var is not None:
+                                    kontrolle = await asyncio.wait_for(
+                                        transcribe_wav(_var, model_size, language), timeout=120.0)
+                                    log.info("[%s] Kontroll-Lauf leer -- zweiter Versuch (langsamer): %s",
+                                             room, "auch leer" if not kontrolle.strip() else "Text erkannt")
                             confidence = difflib.SequenceMatcher(
                                 None, text.lower(), kontrolle.lower(), autojunk=False).ratio()
                             log.info("[%s] Kontroll-Lauf: %.1fs, Uebereinstimmung %.0f%%%s",

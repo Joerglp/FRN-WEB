@@ -108,3 +108,27 @@ config.json, einstellbar im Reiter Sprachausgabe). Leer = Standard der Box.
 scp gpubox/piper_server.py administrator@192.0.0.17:piper_server.py
 ssh administrator@192.0.0.17 'sudo systemctl restart piper-api && sleep 20 && curl -s localhost:9003/voices'
 ```
+
+## XTTS stueckweise (2026-09-27)
+
+`voice_server.py` (Arbeitskopie hier, Produktion `~/voice/voice_server.py`,
+systemd `voice-api`, Port 9002, seit 25.09. dauerhaft auf der T1000:
+`VOICE_DEVICE=cuda`, `CUDA_VISIBLE_DEVICES=1` in `10-gpu.conf`) hat einen
+zweiten Eingang `POST /tts_stream`: gleicher JSON-Aufbau wie `/tts`, Antwort
+rohes PCM 16 Bit mono 24 kHz, stueckweise, sobald XTTS es erzeugt.
+
+- Erster Ton nach ~0,6 s statt nach der ganzen Synthese (1,8-5,6 s).
+- Laengenbremse 1,5 s + 0,09 s je Zeichen gegen das XTTS-Gebrabbel am
+  Satzende (kurzer Satz vorher 6,9 s, jetzt 2,8 s).
+- Der Pi rechnet 24 -> 8 kHz selbst um (FIR, Stueckgrenzen getestet), hebt um
+  1,5 dB an (XTTS roh -17,5 LUFS, Ziel -16) und sendet nach 0,4 s Vorlauf.
+  Scheitert der Stream, faellt er auf `/tts` zurueck, danach auf Piper.
+- Gemessen ueber den Pi: Taste gedrueckt nach 0,69-0,80 s, keine Luecken.
+
+Robert ueber XTTS spricht fest mit `voice.xtts_speaker` (Web: "XTTS-Sprecher
+fuer Robert"); Stimmungen gibt es dort nicht, die Stimmungsregel wird dann
+automatisch aus dem Prompt genommen.
+
+Einspielen: Datei kopieren, dann `sudo systemctl restart voice-api`.
+Beim Aufraeumen von Testinstanzen `pkill` NIE mit einem Muster, das im
+eigenen ssh-Befehl vorkommt (trifft die eigene Shell).

@@ -62,6 +62,9 @@ FRN_TYPE_PC_ONLY  = "2"
 MARKER_KEEPALIVE  = 0x00
 MARKER_TX_APPROVE = 0x01
 MARKER_SOUND      = 0x02
+# Abkuerzungen, deren Punkt vor einem Grossbuchstaben KEIN Satzende ist (_xtts_text)
+XTTS_ABKUERZUNGEN = {"dr", "nr", "st", "hr", "fr", "prof", "bzw", "usw", "ca",
+                     "vgl", "ggf", "inkl", "evtl", "bspw", "etc", "tel", "str"}
 MARKER_CLIENTS    = 0x03
 MARKER_MESSAGE    = 0x04
 MARKER_NETWORKS   = 0x05
@@ -256,6 +259,7 @@ class FRNTXRoom:
         self._chat_clients: set = set() # WebSocket connections for chat messages
         self._recorder        = None    # SessionRecorder (gesetzt nach load_config)
         self.on_message       = None    # callback(sender, text, room_name)
+        self.on_rx_audio      = None    # callback(room_name) je Audiopaket (Vorwaermen)
         try:
             self._gsm_dec = GSMDecoder()
         except RuntimeError as e:
@@ -517,6 +521,11 @@ class FRNTXRoom:
                     elif marker == MARKER_SOUND:            # 0x02 — 1+2+325 = 328 bytes
                         if len(buf) < 328:
                             break
+                        if self.on_rx_audio:
+                            try:
+                                self.on_rx_audio(self.name)
+                            except Exception as e:
+                                log.debug("[%s] on_rx_audio: %s", self.name, e)
                         if self._gsm_dec and (self._rx_clients or self._recorder):
                             wav49 = buf[3:328]
                             try:
@@ -767,7 +776,7 @@ class TXServer:
         self._bot_last_reply: dict[str, float] = {} # Raum → Zeit letzter Bot-Sendung
         self._bot_own_tx: dict[str, list] = {}      # Raum → [(t0, t1, text), …]
         self._bot_protokoll_pfad = Path(__file__).parent / "bot_replies.jsonl"
-        self._prompt_anker: dict[int, float] = {}   # id(Verlauf) -> ts des ersten Spruchs
+        self._prompt_anker: dict = {}   # Raumname (sonst id(Verlauf)) -> ts des ersten Spruchs
         # Stiller Mitschreiber (2026-09-24): Vorschlaege, die erst nach
         # Freigabe im Web ins Notizbuch wandern. Eigene Datei statt config.json,
         # das sind Daten, keine Einstellungen.
@@ -784,6 +793,8 @@ class TXServer:
         self._bot_state_pending = False
         self._bot_state_load()
         self._bot_busy: set[str] = set()
+        # Begruessung, wenn nach laengerer Ruhe wieder Betrieb ist (2026-09-25)
+        self._begruessung: dict[str, dict] = {}
         # Debug-Ablaufverfolgung: jede gehoerte Durchsage bekommt eine "Spur"
         # mit einzelnen Schritten (Aufnahme/Whisper/Bot-Trigger/LLM/TTS/
         # Senden), je mit Status (ok/warn/error/skip) + Zeitmessung, fuers
@@ -996,6 +1007,7 @@ class TXServer:
 
     def _set_room_callback(self, room: "FRNTXRoom"):
         room.on_message = self._handle_frn_command
+        room.on_rx_audio = self._bot_vorwaermen_pruefen
 
     def load_rooms(self):
         path = Path(self.args.rooms)
@@ -1323,6 +1335,8 @@ class TXServer:
             url = (vcfg.get("remote_url") or "").strip()
         if not url:
             raise RuntimeError("Voice-Funktion ist deaktiviert")
+        if self._xtts_ist_aktiv(force_xtts):
+            text = self._xtts_text(text)
         payload = {"text": text, "language": lang, "speaker": speaker or "default"}
         # Stimme der GPU-Box (2026-09-23): der Dienst dort kann seit heute
         # mehrere Modelle, die Auswahl kommt aus voice.remote_voice. Leer =
@@ -1493,6 +1507,191 @@ class TXServer:
         except Exception as e:
             log.warning("[%s] Auto-Antwort (%s): %s", room_name, uname, e)
 
+    # ── XTTS stueckweise (2026-09-27) ────────────────────────────────────
+    # User: "Piper ist doch sehr maschinenmaessig, kam nicht gut an". XTTS
+    # klingt natuerlicher, brauchte aber 3,3-5,1 s bis zum ersten Ton (Piper
+    # 0,35-0,7 s). Mit /tts_stream auf der Box kommt der erste Ton nach ~0,6 s.
+    # Pegel: XTTS roh -17,5 LUFS (gemessen 27.09.), der Ganz-Weg normalisiert
+    # per loudnorm auf -16 -- loudnorm braucht 3 s Vorlauf, deshalb hier eine
+    # feste Anhebung um 1,5 dB mit Begrenzer.
+    _STREAM_VORLAUF_S = 0.4
+    # Laengste zusammenhaengende Stille, bevor der Sender freigegeben wird
+    # (Code-Review 28.09.: haengt die Box, blieb er bis zu 20 s getastet).
+    _STREAM_MAX_LUECKE_S = 3.0
+    _STREAM_GAIN = 10 ** (1.5 / 20)
+    _STREAM_TIEFPASS = None     # FIR fuer 24 -> 8 kHz, wird beim ersten Mal gebaut
+
+    @classmethod
+    def _tiefpass_24k(cls):
+        if cls._STREAM_TIEFPASS is None:
+            n = np.arange(63) - 31
+            h = np.sinc(2 * 3600 / 24000 * n) * np.hamming(63)
+            cls._STREAM_TIEFPASS = (h / h.sum()).astype(np.float32)
+        return cls._STREAM_TIEFPASS
+
+    @staticmethod
+    def _xtts_text(text: str) -> str:
+        """Satzpunkte fuer XTTS entfernen (2026-09-28, User: "Den Punkt liest er
+        immer mit"). Das deutsche XTTS-Modell spricht den Punkt am Satzende
+        oft als Wort "Punkt" aus -- bekanntes Problem. Nur Punkte vor Leerraum
+        bzw. am Ende; Zahlen wie 13.5 und Abkuerzungen mitten im Wort bleiben.
+        ?/! bleiben stehen, die liest XTTS nicht vor und sie tragen die Melodie."""
+        t = re.sub(r"(?<!\.)\.\s*$", "", text.strip())       # am Ende: weg
+        # Mitten drin nur ECHTE Satzenden (Code-Review 28.09.): Wort aus >=2
+        # Buchstaben, dann Grossbuchstabe. Sonst wurde "28. September" zu
+        # "28, September" (Ordinalzahl weg) und "z. B." zu "z, B,".
+        def _satzende(m):
+            return m.group(0) if m.group(1).lower() in XTTS_ABKUERZUNGEN else m.group(1) + ","
+        t = re.sub(r"\b([^\W\d_]{2,})\.(?=\s+[A-ZÄÖÜ])", _satzende, t)
+        return t or text
+
+    def _xtts_ist_aktiv(self, force_xtts: bool) -> bool:
+        vcfg = self.cfg.get("voice", {})
+        if force_xtts:
+            return True
+        engine = (vcfg.get("tts_engine") or "").strip().lower()
+        if engine == "xtts":
+            return True
+        if engine:   # piper/google ausdruecklich gewaehlt (Code-Review 28.09.:
+            return False   # remote_url zeigt nach dem Umstellen evtl. noch auf XTTS)
+        return bool(vcfg.get("xtts_url")) and (vcfg.get("remote_url") or "").strip() == (vcfg.get("xtts_url") or "").strip()
+
+    async def _xtts_stream_8k(self, text: str, lang: str, speaker: str, url: str):
+        """Async-Generator: holt /tts_stream (24 kHz) und liefert 8-kHz-PCM
+        (s16le) in Stuecken, sobald sie da sind."""
+        basis = url[:-len("/tts")] if url.rstrip("/").endswith("/tts") else url.rstrip("/")
+        h = self._tiefpass_24k()
+        rest = np.zeros(0, dtype=np.float32)       # Filter-Vorlauf aus dem letzten Stueck
+        phase = 0                                   # Dezimierungs-Phase ueber Stueckgrenzen
+        uebrig = b""
+        timeout = aiohttp.ClientTimeout(total=120, sock_read=20)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.post(basis + "/tts_stream",
+                                 json={"text": self._xtts_text(text), "language": lang,
+                                       "speaker": speaker}) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"tts_stream HTTP {resp.status}: {(await resp.text())[:120]}")
+                async for roh in resp.content.iter_any():
+                    roh = uebrig + roh
+                    gerade = len(roh) // 2 * 2
+                    roh, uebrig = roh[:gerade], roh[gerade:]
+                    if not roh:
+                        continue
+                    x = np.frombuffer(roh, dtype="<i2").astype(np.float32) / 32768.0
+                    xx = np.concatenate([rest, x])
+                    if len(xx) < len(h):
+                        # Zu kurz fuer den Filter: aufheben. numpy.convolve
+                        # "valid" vertauscht sonst Signal und Filter und liefert
+                        # Unsinn (Testfund 27.09.: bis 0,35 Abweichung, Knacken).
+                        rest = xx
+                        continue
+                    y = np.convolve(xx, h, mode="valid")          # len = len(xx) - 62
+                    rest = xx[-(len(h) - 1):]
+                    y = y[phase::3]
+                    phase = (phase - (len(xx) - len(h) + 1)) % 3
+                    y = np.clip(y * self._STREAM_GAIN, -0.95, 0.95)
+                    if y.size:
+                        yield (y * 32767.0).astype("<i2").tobytes()
+
+    async def _auto_send_voice_stream(self, room, text: str, speaker: str,
+                                      url: str, on_tx_start=None) -> bool | None:
+        """Stueckweise senden. None = Stream kam gar nicht zustande (Aufrufer
+        faellt auf den Ganz-Weg zurueck); True/False wie _auto_send_voice."""
+        vcfg = self.cfg.get("voice", {})
+        puffer = bytearray()
+        neu = asyncio.Event()
+        status = {"fertig": False, "fehler": None}
+
+        async def holen():
+            try:
+                async for stueck in self._xtts_stream_8k(text, vcfg.get("language", "de"), speaker, url):
+                    puffer.extend(stueck)
+                    neu.set()
+            except Exception as e:
+                status["fehler"] = e
+            finally:
+                status["fertig"] = True
+                neu.set()
+
+        t0 = time.time()
+        task = asyncio.create_task(holen())
+        vorlauf = int(self._STREAM_VORLAUF_S * 8000 * 2)
+        try:
+            while len(puffer) < vorlauf and not status["fertig"]:
+                neu.clear()
+                await asyncio.wait_for(neu.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            status["fehler"] = status["fehler"] or RuntimeError("kein Ton nach 15 s")
+        if not puffer:
+            task.cancel()
+            log.warning("[%s] XTTS stueckweise fehlgeschlagen (%s) -- Ganz-Weg", room.name, status["fehler"])
+            return None
+        log.info("[%s] XTTS stueckweise: %.2fs Vorlauf nach %.2fs", room.name,
+                 len(puffer) / 16000, time.time() - t0)
+        luecken = 0
+        luecke_seit = None     # Beginn der aktuellen Liefer-Luecke (Wanduhr)
+        abgebrochen = ""
+        stille = b"\x00" * PCM_PACKET_BYTES
+        try:
+            async with room._tx_lock:
+                await room.ensure_connected()
+                ok = await room.request_tx(timeout=15.0)
+                if not ok:
+                    log.info("[%s] Auto-Senden: TX nicht genehmigt (Kanal belegt)", room.name)
+                    task.cancel()
+                    return False
+                if on_tx_start:
+                    on_tx_start()
+                try:
+                    pos = 0
+                    while True:
+                        if len(puffer) - pos >= PCM_PACKET_BYTES:
+                            chunk = bytes(puffer[pos:pos + PCM_PACKET_BYTES]); pos += PCM_PACKET_BYTES
+                            luecke_seit = None
+                        elif status["fertig"]:
+                            if pos >= len(puffer):
+                                break
+                            chunk = bytes(puffer[pos:]).ljust(PCM_PACKET_BYTES, b"\x00"); pos = len(puffer)
+                        else:
+                            # Stueck kommt zu spaet: kurz warten, sonst Stille statt Abbruch
+                            neu.clear()
+                            try:
+                                await asyncio.wait_for(neu.wait(), timeout=PCM_PACKET_BYTES / 16000)
+                                continue
+                            except asyncio.TimeoutError:
+                                chunk = stille
+                                luecken += 1
+                                luecke_seit = luecke_seit or time.time()
+                                if time.time() - luecke_seit > self._STREAM_MAX_LUECKE_S:
+                                    abgebrochen = f"Box liefert seit {self._STREAM_MAX_LUECKE_S:.0f} s nichts"
+                                    break
+                        await room.send_pcm(chunk)
+                        if room._rx_clients:
+                            asyncio.create_task(room._broadcast_rx(chunk))
+                        # Bei Stille aus der Warte-Zeit ist der Takt schon abgewartet
+                        # (sonst lief jede Luecke doppelt so lang wie ihr Ton).
+                        if luecke_seit is None:
+                            await asyncio.sleep(PCM_PACKET_BYTES / (8000 * 2))
+                finally:
+                    await room.end_tx()
+            if not abgebrochen and status["fehler"]:
+                abgebrochen = f"Stream abgerissen: {status['fehler']}"
+            if abgebrochen:
+                # Teil ist schon raus -- True, damit der Echo-Schutz die eigene
+                # Sendung kennt; kein zweiter Versuch (sonst doppelt gesprochen).
+                log.warning("[%s] XTTS stueckweise ABGEBROCHEN nach %.1fs Ton (%s) -- Satz unvollstaendig",
+                            room.name, pos / 16000, abgebrochen)
+                return True
+            log.info("[%s] XTTS stueckweise gesendet: %.1fs Ton%s", room.name,
+                     len(puffer) / 16000, f", {luecken} Luecke(n) mit Stille gefuellt" if luecken else "")
+            return True
+        except Exception as e:
+            log.warning("[%s] XTTS stueckweise: Senden fehlgeschlagen: %s", room.name, e)
+            return False
+        finally:
+            if not task.done():
+                task.cancel()
+
     async def _auto_send_voice(self, room: "FRNTXRoom", text: str,
                                speaker: str = "default",
                                force_xtts: bool = False,
@@ -1506,8 +1705,19 @@ class TXServer:
         -- fürs Debug-Panel, damit neben "fertig" auch "Sendebeginn" sichtbar
         ist. Kein Effekt auf andere Aufrufer (Default None = kein Callback).
         """
+        vcfg = self.cfg.get("voice", {})
+        xtts = self._xtts_ist_aktiv(force_xtts)
+        if xtts and not force_xtts:
+            # Robert ueber XTTS: fester Sprecher. Seine Stimmung (amused,
+            # neutral ...) kennt XTTS nicht -- die gehoert zu Piper.
+            speaker = (vcfg.get("xtts_speaker") or "aaron_dreschner").strip()
+        if xtts and vcfg.get("xtts_stream", True):
+            url = (vcfg.get("xtts_url") if force_xtts else vcfg.get("remote_url")) or vcfg.get("xtts_url") or ""
+            ergebnis = await self._auto_send_voice_stream(room, text, speaker, url.strip(),
+                                                          on_tx_start=on_tx_start)
+            if ergebnis is not None:
+                return ergebnis
         try:
-            vcfg = self.cfg.get("voice", {})
             pcm  = await self._get_voice_pcm(text, vcfg.get("language", "de"),
                                              speaker, force_xtts=force_xtts)
         except Exception as e:
@@ -1632,6 +1842,10 @@ class TXServer:
             "ollama_num_predict":       (0, 4096),
             "follow_up_window_s":       (0, 3600),   # 0 = keine Anschlussfragen
             "history_max_age_s":        (600, 86400),# Verlauf hoechstens so alt
+            "begruessung_ruhe_h":       (0.5, 48),
+            "begruessung_min_sprueche": (1, 200),
+            "begruessung_warte_min":    (0, 180),
+            "begruessung_warte_max":    (0, 180),
             "temperature":              (0.0, 2.0),  # 0 = immer gleiche Antwort
             "min_confidence":           (0.0, 1.0),  # 0 = Pruefung aus
         },
@@ -1669,6 +1883,14 @@ class TXServer:
         # Wie weit der Verlauf hoechstens zurueckreicht (Sekunden). Die Anzahl
         # begrenzt history_len; diese Grenze wirkt nur in ruhigen Phasen.
         "history_max_age_s": 10800,
+        # Robert meldet sich einmal in der Runde, wenn nach laengerer Ruhe
+        # wieder Betrieb ist -- nicht sofort, sondern wenn sich ein Gespraech
+        # entwickelt hat, nach zufaelliger Wartezeit, in einer Funkpause.
+        "begruessung_enabled": True,
+        "begruessung_ruhe_h": 3,          # so lange Ruhe vorher = "wieder da"
+        "begruessung_min_sprueche": 6,    # erst wenn das Gespraech laeuft
+        "begruessung_warte_min": 3,       # danach zufaellig 3..10 Minuten
+        "begruessung_warte_max": 10,
         "name":     "Robert",
         "trigger":  ["robert", "roboter", "funk-roboter"],
         "speaker":  "damien_black",
@@ -1982,7 +2204,7 @@ class TXServer:
                 return (t0, t1, sent)
         return None
 
-    def bot_angesprochen(self, text: str) -> bool:
+    def bot_angesprochen(self, text: str, room: str = "") -> bool:
         """Faellt Roberts Name (oder ein Trigger-Wort) im Text? Gleiche Pruefung
         wie name_hit in _bot_observe -- fuer die Transkription, die damit den
         Kontroll-Lauf spart."""
@@ -1992,7 +2214,20 @@ class TXServer:
         low = (text or "").lower()
         triggers = [t.lower() for t in bot.get("trigger", []) if t.strip()]
         triggers.append((bot.get("name") or "Robert").lower())
-        return any(t in low for t in triggers)
+        if any(t in low for t in triggers):
+            return True
+        # Im Fenster fuer Anschlussfragen gilt der Spruch ebenfalls als an ihn
+        # gerichtet (2026-09-25): sonst lief dort der Kontroll-Lauf und
+        # kostete je Anschlussfrage rund 1 s (Filter+Sprecher-ID 1,2 statt 0,5 s).
+        # Code-Review 28.09.: nur fuer Sprueche ab 4 Woertern -- Whisper-
+        # Fehlerkennungen aus Rauschen sind fast immer kurz und brauchen den
+        # Kontroll-Lauf (sonst beantwortet Robert im Fenster jedes Geraeusch).
+        if room and len(re.findall(r"\w+", low)) >= 4:
+            folge_s = float(bot.get("follow_up_window_s", 120))
+            letzte = self._bot_last_reply.get(room, 0.0)
+            if folge_s > 0 and time.time() - letzte < folge_s:
+                return True
+        return False
 
     def resolve_known_text(self, room: str, ts: float, duration_s: float = 0.0) -> str | None:
         """Liefert den bereits bekannten Text einer eigenen Bot-Sendung, wenn
@@ -2665,6 +2900,7 @@ class TXServer:
         if own:
             return   # eigenes Echo -- keine Spur, das ist kein "gehoerter" Funkspruch
         self._mitschreiber_pruefen(room_name, ts, text, bot)
+        self._begruessung_pruefen(room, room_name, ts, bot)
         # Sprachsteuerung: greift AUCH bei deaktiviertem Bot (sonst kein Wecken).
         # No-Op (schon im Zielzustand) fällt durch zur normalen Antwort-Logik.
         cmd = self._bot_command(bot, name, low)
@@ -2798,6 +3034,283 @@ class TXServer:
         self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok", detail=reason)
         asyncio.create_task(self._bot_reply(room, room_name, bot, search_query, trigger_ts=ts))
 
+    # Vorwaermen (2026-09-28): Nach laengerer Pause brauchte die erste Modell-
+    # Anfrage >2 s statt ~1 s. Box-Log 28.09. 13:39: Prompt-Cache war noch
+    # gueltig (nur 52 neue Tokens), die kostete trotzdem 890 ms (17 ms/Token
+    # statt ~2) -- die A2000 steht im Leerlauf in P8 mit 210 MHz. Zweiter Fall:
+    # fragt zwischendurch Open WebUI/Firma an, ist Roberts Prompt-Cache
+    # ueberschrieben (12:26: 2750 Tokens neu = 5 s). Darum schon beim ersten
+    # Audiopaket (jemand faengt an zu sprechen, Whisper laeuft erst nach dem
+    # Loslassen) eine Anfrage mit Roberts ECHTEM Prompt und num_predict=1:
+    # taktet die GPU hoch UND fuellt den Cache mit System+Verlauf, die echte
+    # Anfrage rechnet danach nur noch den neuen Spruch. Aus: voice.bot.vorwaermen=false.
+    _VORWAERM_PAUSE_S = 30   # nur wenn so lange keine Modell-Anfrage lief
+
+    def _bot_vorwaermen_pruefen(self, room_name: str):
+        """Je Audiopaket aufgerufen (~alle 40 ms) -- nur billige Pruefungen."""
+        now = time.time()
+        if now - getattr(self, "_llm_zuletzt", 0.0) < self._VORWAERM_PAUSE_S:
+            return
+        if getattr(self, "_vorwaerm_laeuft", False):
+            return
+        bot = self._bot_cfg()
+        if not bot.get("enabled") or not bot.get("vorwaermen", True):
+            return
+        if (bot.get("provider") or "ollama").strip().lower() != "ollama":
+            return
+        rooms = bot.get("rooms") or []
+        if (rooms and room_name not in rooms) or room_name in self._bot_busy:
+            return
+        self._vorwaerm_laeuft = True
+        self._llm_zuletzt = now     # Drossel greift sofort, nicht erst nach der Anfrage
+        asyncio.create_task(self._bot_vorwaermen(bot, room_name))
+
+    # ── Statusseite (2026-09-28) ──────────────────────────────────────────
+    # Alle Dienste auf einen Blick: Pi (systemd, Docker, HTTP) und GPU-Box
+    # (HTTP-Health, systemd + GPU per ssh). Anlass: am 28.09. war Whisper von
+    # 09:02 bis 18:04 aus, ohne dass es jemand bemerkte.
+    _STATUS_PI_UNITS = [("frn-server", "FRN-Server (Java)"),
+                        ("frn-stream@eickelborn", "Stream Eickelborn-Freenet"),
+                        ("frn-stream@eickelborn_ch74", "Stream Eickelborn-CH74"),
+                        ("frn-stream@quasel", "Stream Quasel-Ecke"),
+                        ("icecast2", "Icecast (Audio-Streams)"),
+                        ("docker", "Docker")]
+    _STATUS_PI_DOCKER = [("searxng", "SearXNG (Websuche)"),
+                         ("searxng-valkey", "SearXNG-Cache"),
+                         ("frn-piper", "Piper lokal (Ersatzstimme)"),
+                         ("mosquitto", "MQTT-Broker")]
+    _STATUS_BOX_HTTP = [(9001, "/health", "Whisper (Spracherkennung)"),
+                        (11439, "/api/ps", "Sprachmodell (llama.cpp)"),
+                        (9002, "/health", "XTTS (Robert-Stimme)"),
+                        (9003, "/health", "Piper (Box)"),
+                        (9005, "/health", "ECAPA (Sprecher-Erkennung)"),
+                        (9004, "/health", "Resemblyzer (Sprecher, alt)")]
+    # ollama-buv ist im llama.cpp-Betrieb absichtlich aus -> "aus" statt Fehler
+    _STATUS_BOX_UNITS = [("llama-buv", "llama.cpp", True),
+                         ("whisper-api", "Whisper", True),
+                         ("voice-api", "XTTS", True),
+                         ("piper-api", "Piper", True),
+                         ("a2000-priority-guard", "Adapter/Guard", True),
+                         ("ollama-buv", "Ollama", False)]
+
+    def _status_box_host(self) -> str:
+        from urllib.parse import urlparse
+        v = self.cfg.get("voice", {})
+        for u in (v.get("xtts_url"), (v.get("bot") or {}).get("ollama_url"),
+                  (self.cfg.get("whisper") or {}).get("remote_url")):
+            h = urlparse(u or "").hostname
+            if h and h not in ("127.0.0.1", "localhost"):
+                return h
+        return "192.0.0.17"
+
+    @staticmethod
+    async def _status_cmd(*cmd, timeout: float = 6.0) -> tuple[int, str]:
+        try:
+            p = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            out, _ = await asyncio.wait_for(p.communicate(), timeout)
+            return p.returncode, out.decode(errors="replace").strip()
+        except asyncio.TimeoutError:
+            try:
+                p.kill()
+            except Exception:
+                pass
+            return -1, "Zeitueberschreitung"
+        except Exception as e:
+            return -1, str(e)
+
+    async def _status_http(self, url: str, timeout: float = 4.0) -> tuple[bool, float, dict | str]:
+        t0 = time.time()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as sess:
+                async with sess.get(url) as resp:
+                    body = await resp.text()
+                    dt = time.time() - t0
+                    try:
+                        body = json.loads(body)
+                    except ValueError:
+                        body = body[:120]
+                    return resp.status == 200, dt, body
+        except Exception as e:
+            return False, time.time() - t0, (str(e) or type(e).__name__)[:120]
+
+    async def handle_admin_dienste(self, request):
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        box = self._status_box_host()
+
+        async def pi_units():
+            rc, out = await self._status_cmd(
+                "systemctl", "is-active", *[u for u, _ in self._STATUS_PI_UNITS])
+            zust = out.splitlines()
+            return [{"name": n, "id": u, "status": "ok" if z == "active" else "fehler",
+                     "detail": z}
+                    for (u, n), z in zip(self._STATUS_PI_UNITS, zust + ["?"] * 9)]
+
+        async def pi_docker():
+            erg = []
+            rc, out = await self._status_cmd(
+                "docker", "inspect", "-f",
+                "{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.State.StartedAt}}",
+                *[c for c, _ in self._STATUS_PI_DOCKER])
+            info = {}
+            for z in out.splitlines():
+                t = z.split("|")
+                if len(t) == 4:
+                    info[t[0].lstrip("/")] = t
+            for c, n in self._STATUS_PI_DOCKER:
+                t = info.get(c)
+                if not t:
+                    erg.append({"name": n, "id": c, "status": "fehler", "detail": "nicht gefunden"})
+                    continue
+                ok = t[1] == "running" and t[2] in ("", "healthy")
+                erg.append({"name": n, "id": c, "status": "ok" if ok else "fehler",
+                            "detail": t[1] + (f", {t[2]}" if t[2] else ""),
+                            "seit": t[3][:19]})
+            return erg
+
+        async def pi_http():
+            erg = []
+            ws = (self.cfg.get("voice", {}).get("bot", {}).get("websearch") or {})
+            sx = (ws.get("searxng_url") or "http://127.0.0.1:8075/search").rsplit("/search", 1)[0]
+            for name, url in (("SearXNG antwortet", sx + "/healthz"),
+                              ("Piper lokal antwortet", "http://127.0.0.1:9003/health")):
+                ok, dt, body = await self._status_http(url)
+                erg.append({"name": name, "id": url, "status": "ok" if ok else "fehler",
+                            "ms": round(dt * 1000), "detail": "" if ok else str(body)})
+            return erg
+
+        async def box_http():
+            async def eins(port, pfad, name):
+                ok, dt, body = await self._status_http(f"http://{box}:{port}{pfad}")
+                e = {"name": name, "id": f"{box}:{port}", "status": "ok" if ok else "fehler",
+                     "ms": round(dt * 1000)}
+                if ok and isinstance(body, dict):
+                    if port == 11439:
+                        m = (body.get("models") or [])
+                        if m:
+                            e["detail"] = (f"{m[0].get('name')}, Kontext "
+                                           f"{m[0].get('context_length') or '?'}")
+                        else:
+                            e["status"], e["detail"] = "warn", "kein Modell geladen"
+                    else:
+                        e["detail"] = ", ".join(str(body[k]) for k in ("model", "engine", "device")
+                                                if body.get(k))
+                elif not ok:
+                    e["detail"] = str(body)
+                return e
+            return list(await asyncio.gather(*[eins(*x) for x in self._STATUS_BOX_HTTP]))
+
+        async def box_ssh():
+            units = " ".join(u for u, _, _ in self._STATUS_BOX_UNITS)
+            rc, out = await self._status_cmd(
+                "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
+                f"administrator@{box}",
+                f"systemctl is-active {units}; echo ===; "
+                "nvidia-smi --query-gpu=index,name,memory.used,memory.total,temperature.gpu,pstate,utilization.gpu "
+                "--format=csv,noheader,nounits; echo ===; free -m | awk '/^Mem:/{print $2, $7}'; "
+                "echo ===; cat /proc/loadavg",
+                timeout=8.0)
+            teile = out.split("===")
+            if rc == -1 or len(teile) < 4:
+                return {"units": [{"name": n, "id": u, "status": "fehler",
+                                   "detail": "ssh nicht moeglich: " + out[:80]}
+                                  for u, n, _ in self._STATUS_BOX_UNITS], "gpus": [], "ram": None}
+            zust = teile[0].split()
+            units = []
+            for (u, n, pflicht), z in zip(self._STATUS_BOX_UNITS, zust + ["?"] * 9):
+                st = "ok" if z == "active" else ("fehler" if pflicht else "aus")
+                units.append({"name": n, "id": u, "status": st, "detail": z})
+            gpus = []
+            for z in teile[1].strip().splitlines():
+                t = [x.strip() for x in z.split(",")]
+                if len(t) >= 7:
+                    try:
+                        gpus.append({"index": int(t[0]), "name": t[1], "mem_used": int(t[2]),
+                                     "mem_total": int(t[3]), "temp": int(t[4]),
+                                     "pstate": t[5], "util": int(t[6])})
+                    except ValueError:
+                        pass
+            ram = None
+            r = teile[2].split()
+            if len(r) == 2:
+                ram = {"total": int(r[0]), "available": int(r[1])}
+            return {"units": units, "gpus": gpus, "ram": ram,
+                    "load": teile[3].split()[:3]}
+
+        def robert():
+            bot = self._bot_cfg()
+            letzte = None
+            try:
+                with open(self._bot_protokoll_pfad, "rb") as f:
+                    f.seek(0, 2)
+                    f.seek(max(0, f.tell() - 4000))
+                    z = f.read().decode(errors="replace").strip().splitlines()[-1]
+                e = json.loads(z)
+                letzte = {"ts": e.get("ts"), "room": e.get("room"), "text": e.get("text")}
+            except Exception:
+                pass
+            wav_dir = Path((getattr(self, "_transcription_cfg", {}) or {}).get(
+                "wav_dir", "/opt/FRN/recordings"))
+            try:
+                wartend = sum(1 for _ in wav_dir.glob("*.meta"))
+            except OSError:
+                wartend = None
+            llm = getattr(self, "_llm_letzte", None)
+            return {"enabled": bool(bot.get("enabled")), "rooms": bot.get("rooms") or [],
+                    "tts": (self.cfg.get("voice", {}).get("tts_engine") or ""),
+                    "xtts_speaker": self.cfg.get("voice", {}).get("xtts_speaker") or "",
+                    "vorwaermen": bool(bot.get("vorwaermen", True)),
+                    "letzte_antwort": letzte, "warteschlange": wartend,
+                    "llm_letzte": {"ts": llm[0], "s": round(llm[1], 2)} if llm else None,
+                    "frn_raeume": [{"name": r.name, "verbunden": bool(getattr(r, "_connected", False))}
+                                   for r in self.rooms.values()]}
+
+        pu, pd, ph, bh, bs = await asyncio.gather(pi_units(), pi_docker(), pi_http(),
+                                                  box_http(), box_ssh())
+        return web.json_response({
+            "zeit": time.time(), "box": box,
+            "pi": {"units": [{"name": "TX-Server (diese Seite)", "id": "frn-tx-server",
+                              "status": "ok", "detail": "active"}] + pu,
+                   "docker": pd, "http": ph},
+            "box_http": bh, "box_ssh": bs, "robert": robert()})
+
+    async def handle_status_page(self, request):
+        html_path = Path(__file__).parent / "status_page.html"
+        if html_path.exists():
+            return web.FileResponse(html_path)
+        return web.Response(text="Status page not found.", content_type="text/html")
+
+    async def handle_intern_sprechbeginn(self, request):
+        """POST {room} von frn_stream.py beim Beginn einer Durchsage. Die
+        Eickelborn-Raeume haelt der TX-Server nur bei Bedarf verbunden --
+        mithoeren tun die frn-stream-Dienste, darum kommt der Ausloeser von
+        dort (am 28.09. griff on_rx_audio allein deshalb nie). Nur localhost."""
+        if request.remote not in ("127.0.0.1", "::1"):
+            return web.json_response({"error": "forbidden"}, status=403)
+        try:
+            room = str((await request.json()).get("room") or "")
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        if room:
+            self._bot_vorwaermen_pruefen(room)
+        return web.json_response({"ok": True})
+
+    async def _bot_vorwaermen(self, bot: dict, room_name: str):
+        t0 = time.time()
+        try:
+            hist = list(self._room_hist.get(room_name, []))
+            system, messages = self._bot_build_prompt(bot, hist, "", anker_key=room_name)
+            if not messages:
+                return
+            await self._llm_ollama(dict(bot, ollama_num_predict=1), system, messages)
+            log.info("[%s] KI-Funker vorgewaermt: %.1fs", room_name, time.time() - t0)
+        except Exception as e:
+            log.debug("[%s] Vorwaermen fehlgeschlagen: %s", room_name, e)
+        finally:
+            self._vorwaerm_laeuft = False
+
     async def _bot_reply(self, room: "FRNTXRoom", room_name: str, bot: dict,
                          search_query: str = "", trigger_ts: float | None = None):
         """Antwort generieren und senden (höchstens ein Lauf pro Raum)."""
@@ -2819,6 +3332,14 @@ class TXServer:
             answer = await self._bot_ollama(bot, hist, search_query=search_query,
                                             room_name=room_name, trace_ts=heard_ts)
             if not answer:
+                fehler = self._debug_trace_get(room_name, heard_ts).get("llm_fehler")
+                if fehler:
+                    log.warning("[%s] KI-Funker: KEINE Antwort, Sprachmodell-Fehler -- %s",
+                                room_name, fehler)
+                    self.debug_trace_step(room_name, heard_ts, "Ergebnis", "error",
+                                          detail=f"Sprachmodell-Fehler, nicht gesendet: {fehler}",
+                                          final=True)
+                    return
                 if self._debug_trace_get(room_name, heard_ts).get("answer_dropped"):
                     self.debug_trace_step(room_name, heard_ts, "Ergebnis", "warn",
                                           detail="Antwort verworfen (siehe LLM-Schritt) -- nicht gesendet",
@@ -2872,7 +3393,14 @@ class TXServer:
             # ist wer da?", darf Robert sich erneut genauso melden -- vorher
             # blieb die Sperre gegen seine letzte Sendung unbegrenzt aktiv.
             own_prev = self._bot_own_tx.get(room_name, [])
-            if own_prev and time.time() - own_prev[-1][1] < float(bot.get("repeat_block_s", 3600)):
+            # Bittet jemand ausdruecklich um Wiederholung, darf Robert wiederholen
+            # (2026-09-25: "Kannst du das nochmal sagen?" -> Modell wiederholte,
+            # die Bremse sah 100 % und Robert schwieg).
+            wiederholbitte = bool(self._WIEDERHOL_RE.search(gehoert or ""))
+            if wiederholbitte:
+                log.info("[%s] KI-Funker: Bitte um Wiederholung -- Wiederhol-Bremse aus", room_name)
+            if (own_prev and not wiederholbitte
+                    and time.time() - own_prev[-1][1] < float(bot.get("repeat_block_s", 3600))):
                 sim = difflib.SequenceMatcher(
                     None, answer.lower(), own_prev[-1][2].lower(),
                     autojunk=False).ratio()
@@ -3020,6 +3548,19 @@ class TXServer:
         r"\b(bundesliga|liga|fu(?:ß|ss)ball\w*|spiel(?:t|te|ten|en|plan|stand)|"
         r"gespielt|ergebnis\w*|tabelle\w*|gewonnen|verloren|unentschieden|"
         r"bvb|s04|hsv|tabellenf\w*)\b", re.IGNORECASE)
+    # Laenderspiele und internationale Wettbewerbe kennt OpenLigaDB (Bundesliga)
+    # nicht -- die gehen an die normale Suche (2026-09-27: "Deutschland gegen
+    # Griechenland, Startzeit" bekam den 4. Bundesliga-Spieltag, Robert sagte
+    # dreimal "keine Infos gefunden").
+    _BOT_LAENDERSPIEL_RE = re.compile(
+        r"\b(l(?:ä|ae)nderspiel\w*|nationalmannschaft|nationalelf|nationalteam|dfb|"
+        r"nations ?league|wm|em|weltmeisterschaft|europameisterschaft|qualifikation\w*|"
+        r"champions ?league|europa ?league|conference ?league|pokal\w*|"
+        r"deutschland (?:gegen|vs)|gegen deutschland)\b", re.IGNORECASE)
+    # Nur wenn die Frage ausdruecklich die Liga meint, gibt es ohne erkannte
+    # Mannschaft den aktuellen Spieltag -- sonst lieber die normale Suche.
+    _BOT_LIGA_RE = re.compile(r"\b(bundesliga|liga|spieltag|tabelle\w*|tabellenf\w*)\b",
+                              re.IGNORECASE)
     _BOT_NEWS_RE = re.compile(
         r"\b(nachricht\w*|news|schlagzeile\w*|neuigkeit\w*|tagesschau)\b",
         re.IGNORECASE)
@@ -3117,6 +3658,8 @@ class TXServer:
                             if t.get("teamInfoId") == tid:
                                 zeilen.append(f"  Tabelle: Platz {platz}, {t['points']} Punkte, "
                                               f"Tore {t['goals']}:{t['opponentGoals']}")
+                if not zeilen and not self._BOT_LIGA_RE.search(frage or ""):
+                    return ""          # keine Bundesliga-Frage -> normale Suche
                 if not zeilen:
                     akt = await self._oldb_get(sess, "getmatchdata/bl1")
                     tabelle = await self._oldb_get(
@@ -3177,7 +3720,8 @@ class TXServer:
             w = await self._bot_nachrichten()
             if w:
                 return w
-        if self._BOT_FUSSBALL_RE.search(query or ""):
+        if (self._BOT_FUSSBALL_RE.search(query or "")
+                and not self._BOT_LAENDERSPIEL_RE.search(query or "")):
             w = await self._bot_fussball(query)
             if w:
                 return w
@@ -3208,6 +3752,143 @@ class TXServer:
         return "\n".join(lines)
 
     _NOTEBOOK_MAX = 60   # aelteste Notizen fallen raus, sonst waechst der Prompt
+
+    # ---- Begruessung, wenn wieder Betrieb ist (2026-09-25) ----------------
+    # User-Wunsch: "wenn was los ist auf Funk, dass sich Robert einmal hallo
+    # sagt, dass er wieder da ist -- nicht gleich am Anfang". Nebeneffekt:
+    # Sprachmodell, Sprachausgabe und Sender sind danach warm.
+    _BEGRUESSUNG_PAUSE_S = 8          # so lange niemand gesprochen -> Luecke
+    _BEGRUESSUNG_WARTEN_MAX_S = 300   # laenger keine Luecke -> spaeter erneut
+    _BEGRUESSUNG_RUECKSTAU_S = 600    # aeltere Sprueche = Whisper-Rueckstau
+    _BEGRUESSUNG_NEU_S = 300          # Abstand zwischen zwei Versuchen
+    _BEGRUESSUNG_MAX_VERSUCHE = 3
+
+    def _begruessung_pruefen(self, room, room_name: str, ts: float, bot: dict) -> None:
+        if not bot.get("enabled") or not bot.get("begruessung_enabled", True):
+            return
+        rooms = bot.get("rooms") or []
+        if rooms and room_name not in rooms:
+            return
+        import random
+        jetzt = time.time()
+        ruhe_s = float(bot.get("begruessung_ruhe_h", 3)) * 3600
+        st = self._begruessung.get(room_name)
+        if st is None:
+            # Erster Spruch seit dem (Neu-)Start des Dienstes: im gespeicherten
+            # Verlauf nachsehen, ob davor wirklich Ruhe war -- sonst wuerde
+            # Robert nach jedem Neustart mitten in der Runde erneut gruessen.
+            frueher = [t for t, _w, _x in self._room_hist.get(room_name, []) if t < ts - 1]
+            st = {"letzte": max(frueher) if frueher else 0.0, "gegruesst": True,
+                  "geplant": False, "n": 0, "start": ts, "warte_s": 0.0}
+            self._begruessung[room_name] = st
+        # Alte Sprueche aus einem Whisper-Rueckstau (Code-Review 28.09.: die
+        # Warteschlange laeuft neu->alt) nur als Zeitpunkt merken -- sonst
+        # sprang "letzte" rueckwaerts, der naechste Live-Spruch sah >3 h Ruhe
+        # und Robert gruesste mitten in der Runde.
+        if jetzt - ts > self._BEGRUESSUNG_RUECKSTAU_S:
+            st["letzte"] = max(st["letzte"], ts)
+            return
+        if ts - st["letzte"] > ruhe_s:
+            st.update(start=ts, n=0, gegruesst=False, geplant=False, versuche=0, naechster=0.0,
+                      warte_s=60 * random.uniform(float(bot.get("begruessung_warte_min", 3)),
+                                                  max(float(bot.get("begruessung_warte_min", 3)),
+                                                      float(bot.get("begruessung_warte_max", 10)))))
+            log.info("[%s] Begruessung: neue Sitzung nach %.1f h Ruhe -- fruehestens in %.0f min",
+                     room_name, (ts - st["letzte"]) / 3600 if st["letzte"] else 99, st["warte_s"] / 60)
+        st["letzte"] = max(st["letzte"], ts)
+        st["eingang"] = jetzt
+        st["n"] += 1
+        # Hat Robert in dieser Sitzung schon geantwortet, ist er ja da.
+        if self._bot_last_reply.get(room_name, 0.0) >= st["start"]:
+            st["gegruesst"] = True
+        if st["gegruesst"] or st["geplant"]:
+            return
+        if (st["n"] >= int(bot.get("begruessung_min_sprueche", 6)) and ts - st["start"] >= st["warte_s"]
+                and jetzt >= st.get("naechster", 0.0)):
+            st["geplant"] = True
+            asyncio.create_task(self._bot_begruessung(room, room_name, st))
+
+    async def _bot_begruessung(self, room, room_name: str, st: dict) -> None:
+        """In der naechsten Funkpause einmal kurz in der Runde melden."""
+        gesendet = False
+        belegt = False
+        try:
+            ende = time.time() + self._BEGRUESSUNG_WARTEN_MAX_S
+            while time.time() < ende:
+                await asyncio.sleep(2)
+                if (st.get("gegruesst")
+                        or self._bot_last_reply.get(room_name, 0.0) >= st["start"]):
+                    st["gegruesst"] = True
+                    return                      # inzwischen normal geantwortet
+                if (time.time() - st.get("eingang", 0) >= self._BEGRUESSUNG_PAUSE_S
+                        and room_name not in self._bot_busy):
+                    break
+            else:
+                log.info("[%s] Begruessung: keine Funkpause gefunden -- spaeter erneut", room_name)
+                return
+            basis = self._bot_cfg()
+            if not basis.get("enabled"):
+                return
+            self._bot_busy.add(room_name)
+            belegt = True
+            bot = dict(basis, notebook_enabled=False,
+                       websearch=dict(basis.get("websearch") or {}, enabled=False))
+            hist = list(self._room_hist.get(room_name, []))
+            system, messages = self._bot_build_prompt(bot, hist, anker_key=room_name)
+            messages.append({"role": "user", "content": (
+                "[Hinweis, kein Funkspruch] Auf dem Kanal ist seit einer Weile wieder "
+                "Betrieb, und du hast dich noch nicht gemeldet. Meld dich jetzt EINMAL "
+                "kurz in der Runde: dass du auch da und QRV bist. Ein Satz, locker und "
+                "passend zur Tageszeit; greif gern kurz auf, worueber gerade geredet "
+                "wird, aber stell niemandem eine direkte Frage. Antworte NICHT mit SKIP.")})
+            if (bot.get("provider") or "ollama").strip().lower() == "gemini":
+                roh = await self._llm_gemini(bot, system, messages)
+            else:
+                roh = await self._llm_ollama(bot, system, messages)
+            text, stimmung = self._emotion_abtrennen(roh or "", bot)
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip().strip('"')
+            if not text or text.upper().startswith("SKIP") or len(text) > 300:
+                log.info("[%s] Begruessung: keine brauchbare Antwort (%.60r)", room_name, roh)
+                return
+            if not stimmung and bot.get("emotion_auto"):
+                stimmung = self._emotion_liste(bot)[0]
+            log.info("[%s] Begruessung: %s", room_name, text)
+            t0 = time.time()
+            gesendet = await self._auto_send_voice(room, text,
+                                                   stimmung or bot.get("speaker") or "default")
+            t1 = time.time()
+            if not gesendet:
+                log.info("[%s] Begruessung: Senden nicht moeglich (Kanal belegt?) -- spaeter erneut",
+                         room_name)
+                return
+            st["gegruesst"] = True
+            # Buchfuehrung wie bei einer normalen Antwort: Anschlussfragen,
+            # Wiederhol-Bremse, Echo-Schutz und Analyse-Seite kennen sie so.
+            self._bot_last_reply[room_name] = t1
+            self._bot_protokoll(room_name, t0, t1, text, "(Begruessung)", t0)
+            own = self._bot_own_tx.setdefault(room_name, [])
+            own.append((t0, t1, text))
+            del own[:-6]
+            name = bot.get("name") or "Robert"
+            self._hist_insert(self._room_hist.setdefault(room_name, []),
+                              (t1, f"{name} (du)", text),
+                              max(4, int(bot.get("history_len", 10))) + 2 * self._PROMPT_BLOCK)
+            self._bot_state_merken()
+        except Exception as e:
+            log.warning("[%s] Begruessung fehlgeschlagen: %s", room_name, e)
+        finally:
+            if belegt:
+                self._bot_busy.discard(room_name)
+            if not gesendet and not st.get("gegruesst"):
+                # Neuer Versuch fruehestens nach 5 min, hoechstens 3 insgesamt
+                # (Code-Review 28.09.: sonst bei SKIP/Fehler ein Modell-Aufruf
+                # nach JEDEM weiteren Spruch der Sitzung).
+                st["versuche"] = st.get("versuche", 0) + 1
+                st["naechster"] = time.time() + self._BEGRUESSUNG_NEU_S
+                if st["versuche"] >= self._BEGRUESSUNG_MAX_VERSUCHE:
+                    st["gegruesst"] = True
+                    log.info("[%s] Begruessung: nach %d Versuchen aufgegeben", room_name, st["versuche"])
+                st["geplant"] = False
 
     # ---- Stiller Mitschreiber (2026-09-24) --------------------------------
     # Robert bekam nur Sprueche zu sehen, die an ihn gerichtet waren. Gemessen
@@ -3488,6 +4169,11 @@ class TXServer:
     # Spruch, und der Verlauf rueckt nur in Bloecken weiter.
     _PROMPT_BLOCK = 10
 
+    _WIEDERHOL_RE = re.compile(
+        r"noch ?mal (sagen|wiederholen|kommen)|nochmal\b.*\bsagen|wiederhol|"
+        r"was hast du (gesagt|da gesagt)|(hab|habe) (dich|das) nicht (verstanden|mitbekommen)|"
+        r"sag das (noch ?mal|bitte noch ?mal)|wie bitte", re.I)
+
     _WOCHENTAGE = ("Montag", "Dienstag", "Mittwoch", "Donnerstag",
                    "Freitag", "Samstag", "Sonntag")
     _MONATE = ("Januar", "Februar", "Maerz", "April", "Mai", "Juni", "Juli",
@@ -3505,7 +4191,8 @@ class TXServer:
                 f"{cls._MONATE[n.month - 1]} {n.year}, {n.hour}:{n.minute:02d} Uhr.")
 
     def _bot_build_prompt(self, bot: dict, hist: list,
-                          search_context: str = "") -> tuple[str, list]:
+                          search_context: str = "",
+                          anker_key: str | None = None) -> tuple[str, list]:
         """Baut System-Anweisung + Nachrichtenverlauf (provider-neutral).
         Nachrichten: role 'user' (fremde Funksprüche) / 'assistant' (eigene).
         search_context: optionale Websuche-Treffer, werden dem System-Prompt
@@ -3526,7 +4213,11 @@ class TXServer:
                    "das du nicht sicher weisst. Solche [Hinweise] sind keine "
                    "Funksprueche, antworte nicht darauf.")
         spaet = [self._jetzt_satz()]   # Teile des Hinweises vor dem letzten Spruch
-        if bot.get("emotion_auto"):
+        # Stimmungsregel nur, solange eine Stimme mit Stimmungen spricht
+        # (2026-09-27): XTTS spricht fest mit dem xtts_speaker, die gewaehlte
+        # Stimmung wuerde verworfen -- die Regel kostete dann ~90 Tokens je
+        # Anfrage fuer nichts.
+        if bot.get("emotion_auto") and not self._xtts_ist_aktiv(False):
             stimmungen = self._emotion_liste(bot)
             system += ("\n\nStell deiner Antwort die passende Stimmung in eckigen "
                        "Klammern voran, ganz am Anfang und nur eine: "
@@ -3566,12 +4257,18 @@ class TXServer:
         # Schluessel ist das Verlaufs-Objekt des Raums (lebt so lange wie der
         # Raum); fremde Listen (Tests, Wiederholung aus dem Archiv) bekommen
         # einfach das normale Fenster.
-        anker = self._prompt_anker.get(id(hist)) if hasattr(self, "_prompt_anker") else None
+        # Schluessel: Raumname (2026-09-28). Vorher id(hist) -- die Aufrufer
+        # uebergeben aber jedes Mal eine frische KOPIE des Verlaufs, der Anker
+        # griff also nur, wenn Python zufaellig dieselbe Speicheradresse
+        # wiederverwendete; der Verlaufsanfang rutschte sonst bei jeder Antwort
+        # und der Prompt-Cache auf der Box war ab dort wertlos.
+        akey = anker_key or id(hist)
+        anker = self._prompt_anker.get(akey) if hasattr(self, "_prompt_anker") else None
         recent = [e for e in kandidaten if anker is not None and e[0] >= anker]
         if not recent or len(recent) > n_ziel + self._PROMPT_BLOCK:
             recent = kandidaten[-n_ziel:] if n_ziel > 0 else []
         if recent and hasattr(self, "_prompt_anker"):
-            self._prompt_anker[id(hist)] = recent[0][0]
+            self._prompt_anker[akey] = recent[0][0]
         if recent:
             system += ("\n\nWenn eine Nachricht wie '[... 12 Minuten Pause ...]' "
                        "erscheint, ist seitdem eine Pause im Funkverkehr vergangen. "
@@ -3717,6 +4414,17 @@ class TXServer:
             if match.size < 20:
                 continue
             before = text[:match.a].strip()
+            # Nur an einer Satzgrenze kappen (2026-09-25): angehaengte alte
+            # Antworten beginnen immer nach einem Satzende. Beginnt die
+            # Uebereinstimmung mitten im Satz, hat das Modell nur eine Wendung
+            # wiederverwendet -- Kappen liess dann einen Fetzen uebrig
+            # ("Wahrscheinlich noch" statt "Wahrscheinlich noch einfach mal ein
+            # bisschen auf dem Band rumduempeln"). Echte Wortgleich-Wiederholung
+            # faengt spaeter die Wiederhol-Bremse in _bot_reply (Aehnlichkeit > 0.7).
+            if before and not before.rstrip().endswith((".", "!", "?")):
+                log.info("[%s] KI-Funker: Wendung aus frueherer Antwort mitten im Satz "
+                         "-- nicht gekappt: %.60s", room_name, text)
+                continue
             if before:
                 log.warning("[%s] KI-Funker: fruehere eigene Antwort in neuer Antwort "
                            "wiedererkannt -- ab Position %d gekappt: %.60s",
@@ -3771,7 +4479,8 @@ class TXServer:
             # Modell nicht, dass es nachgeschaut hat, und improvisiert
             # (2026-09-14: erfundener Wetterbericht nach 0 Treffern).
             search_context = "(SUCHE FEHLGESCHLAGEN: kein Ergebnis, die Suchdienste sind gerade nicht erreichbar. Du hast also KEINE aktuellen Infos dazu. Sag ehrlich und kurz, dass du das gerade nicht nachschauen kannst. Erfinde auf KEINEN Fall Wetter, Nachrichten oder Ergebnisse.)"
-        system, messages = self._bot_build_prompt(bot, hist, search_context)
+        system, messages = self._bot_build_prompt(bot, hist, search_context,
+                                                  anker_key=room_name or None)
         provider = (bot.get("provider") or "ollama").strip().lower()
         _t0 = time.time()
         if provider == "gemini":
@@ -3790,6 +4499,8 @@ class TXServer:
                                          force_model=force_model)
         _lldt = time.time() - _t0
         log.info("KI-Funker LLM (%s): %.1fs", provider, _lldt)
+        if room_name:
+            self._llm_letzte = (time.time(), _lldt)   # fuer die Statusseite
         ans = ""
         dropped = False   # Modell hat geantwortet, Nachbearbeitung hat alles entfernt
         if raw:
@@ -3956,6 +4667,7 @@ class TXServer:
                 # SKIP). Bei Modellen ohne Thinking-Modus wird das Feld einfach
                 # ignoriert, schadet also nicht.
                 "think": False}
+        self._llm_zuletzt = time.time()   # fuers Vorwaermen: GPU gerade warm
         tools = []
         if (bot.get("websearch") or {}).get("enabled"):
             tools += self._BOT_WEBSEARCH_TOOL
@@ -3969,12 +4681,21 @@ class TXServer:
                 async with sess.post(f"{url}/api/chat", json=body,
                                      headers=hdrs) as resp:
                     if resp.status != 200:
-                        log.warning("KI-Funker Ollama HTTP %d: %s", resp.status,
-                                    (await resp.text())[:120])
+                        fehler = (await resp.text())[:160]
+                        log.warning("KI-Funker Ollama HTTP %d: %s", resp.status, fehler)
+                        # Fuer _bot_reply merken: das ist KEIN SKIP des Modells.
+                        # (2026-09-25: "Model 'gemma4:12b' is unavailable" stand
+                        # im Log als "nicht gemeint (SKIP)" -- Robert schwieg
+                        # auf einen Ruf, und es sah nach Absicht aus.)
+                        if room_name and trace_ts is not None:
+                            self._debug_trace_get(room_name, trace_ts)["llm_fehler"] = \
+                                f"HTTP {resp.status}: {fehler}"
                         return ""
                     data = await resp.json()
         except Exception as e:
             log.warning("KI-Funker: Ollama nicht erreichbar (%s): %s", url, e)
+            if room_name and trace_ts is not None:
+                self._debug_trace_get(room_name, trace_ts)["llm_fehler"] = f"nicht erreichbar: {e}"
             return ""
 
         msg = data.get("message") or {}
@@ -4419,6 +5140,8 @@ class TXServer:
                     r"[^a-z0-9_\-]", "_", body["speaker"].strip().lower())
             if "unsicher_markieren" in body:
                 bot["unsicher_markieren"] = bool(body["unsicher_markieren"])
+            if "begruessung_enabled" in body:
+                bot["begruessung_enabled"] = bool(body["begruessung_enabled"])
             if "mitschreiber_enabled" in body:
                 bot["mitschreiber_enabled"] = bool(body["mitschreiber_enabled"])
             if "emotion_auto" in body:
@@ -4502,6 +5225,41 @@ class TXServer:
             out["system_prompt"] = self._BOT_SYSTEM_DEFAULT
         out["_grenzen"] = self._GRENZEN
         return web.json_response(out)
+
+    async def handle_admin_bot_probe(self, request):
+        """POST /api/admin/bot/probe {room, text, wer?} -- tut so, als haette
+        jemand im Raum "text" gefunkt, und laesst Robert GANZ NORMAL antworten
+        und SENDEN (anders als /bot/test). Fuer Live-Tests auf dem Kanal
+        (2026-09-27, User: "kannste ruhig auf Freenet ausgeben lassen")."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        room_name = (body.get("room") or "").strip()
+        text = (body.get("text") or "").strip()[:300]
+        wer = (body.get("wer") or "Test").strip()[:30]
+        room = next((r for r in self.rooms.values() if r.name == room_name), None)
+        if room is None or not text:
+            return web.json_response({"error": "room/text fehlt oder unbekannter Raum"}, status=400)
+        bot = self._bot_cfg()
+        if not bot.get("enabled"):
+            return web.json_response({"error": "KI-Funker ist aus"}, status=409)
+        if room_name in self._bot_busy:
+            return web.json_response({"error": "Robert antwortet gerade schon"}, status=409)
+        ts = time.time()
+        name = bot.get("name") or "Robert"
+        self._hist_insert(self._room_hist.setdefault(room_name, []), (ts, wer, text),
+                          max(4, int(bot.get("history_len", 10))) + 2 * self._PROMPT_BLOCK)
+        log.info("[%s] KI-Funker Probe (%s): %s", room_name, wer, text)
+        self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok", detail=f"Probe aus der Verwaltung: {text[:120]}")
+        await self._bot_reply(room, room_name, bot, trigger_ts=ts)
+        tr = self._debug_trace_get(room_name, ts)
+        schritte = tr.get("steps") or tr.get("schritte") or []
+        return web.json_response({"ok": True, "room": room_name,
+                                  "letzte_antwort": (self._bot_own_tx.get(room_name) or [(0, 0, "")])[-1][2]})
 
     async def handle_admin_bot_test(self, request):
         """Trockenlauf: Satz einwerfen → Entscheidung + Antwort (sendet NICHT).
@@ -5305,6 +6063,14 @@ class TXServer:
                 update["local_port"] = prt
             if "local_voice" in body:
                 update["local_voice"] = str(body["local_voice"] or "").strip() or self._PIPER_LOCAL_VOICE
+            if "xtts_speaker" in body:
+                sp = str(body["xtts_speaker"] or "").strip()
+                if sp and not re.fullmatch(r"[a-z0-9_\-]{1,40}", sp):
+                    return web.json_response({"error": "XTTS-Sprecher: nur a-z, 0-9, _ und -"}, status=400)
+                if sp:   # leer = unveraendert lassen (nicht still auf den Standard)
+                    update["xtts_speaker"] = sp
+            if "xtts_stream" in body:
+                update["xtts_stream"] = bool(body["xtts_stream"])
             if "remote_voice" in body:
                 # Leer = der Dienst auf der GPU-Box nimmt sein Standardmodell.
                 update["remote_voice"] = str(body["remote_voice"] or "").strip()
@@ -5334,7 +6100,9 @@ class TXServer:
                                   "fallback_local": bool(v.get("tts_fallback_local", True)),
                                   "local_host": host, "local_port": port,
                                   "local_voice": voice,
-                                  "remote_voice": (v.get("remote_voice") or "")})
+                                  "remote_voice": (v.get("remote_voice") or ""),
+                                  "xtts_speaker": (v.get("xtts_speaker") or "aaron_dreschner"),
+                                  "xtts_stream": bool(v.get("xtts_stream", True))})
     async def handle_admin_tts_voices(self, request):
         """GET /api/admin/tts/voices — installierte Stimmen des lokalen Piper
         (Wyoming "describe"), deutsche zuerst. Fuer die Auswahlliste in der
@@ -5352,6 +6120,21 @@ class TXServer:
             antwort["voices"], antwort["error"] = [], str(e)[:150]
         # Stimmen des entfernten Piper (GPU-Box). Aelterer Dienst ohne
         # /voices -> leere Liste, die Oberflaeche zeigt dann nur das Textfeld.
+        # XTTS-Sprecher (2026-09-27): eigene Aufnahmen + Studio-Stimmen fuer
+        # die Auswahlliste "XTTS-Sprecher fuer Robert".
+        try:
+            xurl = (self.cfg.get("voice", {}).get("xtts_url") or "").strip()
+            xbasis = xurl[:-len("/tts")] if xurl.rstrip("/").endswith("/tts") else xurl.rstrip("/")
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as sess:
+                async with sess.get(xbasis + "/speakers") as resp:
+                    xd = await resp.json() if resp.status == 200 else {}
+            antwort["xtts_eigene"] = xd.get("speakers") or []
+            # Namen mit Sonderzeichen (alma_maría …) lehnt der Voice-Server ab
+            antwort["xtts_studio"] = [n for n in (xd.get("builtin") or [])
+                                      if re.fullmatch(r"[a-z0-9_\-]{1,40}", n)]
+        except Exception as e:
+            log.debug("XTTS-Sprecher nicht abrufbar: %s", e)
+            antwort["xtts_eigene"], antwort["xtts_studio"] = [], []
         try:
             antwort["remote"], antwort["remote_default"] = await self._piper_remote_voices()
         except Exception as e:
@@ -7700,6 +8483,10 @@ class TXServer:
         app.router.add_get ("/api/admin/bot",       self.handle_admin_bot)
         app.router.add_post("/api/admin/bot",       self.handle_admin_bot)
         app.router.add_post("/api/admin/bot/test",  self.handle_admin_bot_test)
+        app.router.add_post("/api/admin/bot/probe", self.handle_admin_bot_probe)
+        app.router.add_post("/api/intern/sprechbeginn", self.handle_intern_sprechbeginn)
+        app.router.add_get("/status",                self.handle_status_page)
+        app.router.add_get("/api/admin/dienste",     self.handle_admin_dienste)
         app.router.add_get ("/api/admin/tts",       self.handle_admin_tts)
         app.router.add_post("/api/admin/tts",       self.handle_admin_tts)
         app.router.add_get ("/api/admin/tts/voices", self.handle_admin_tts_voices)

@@ -609,6 +609,7 @@ class RoomRecorder:
                 self._buf      = []
                 self._callsign = callsign or ""
                 log.debug("[%s] TX-Session gestartet (%s)", self.room_name, callsign)
+                _sprechbeginn_melden(self.room_name)
             elif callsign:
                 self._callsign = callsign
 
@@ -906,6 +907,23 @@ class RoomRecorder:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+def _sprechbeginn_melden(room: str):
+    """TX-Server ueber den Beginn einer Durchsage informieren (2026-09-28):
+    dort wird das Sprachmodell vorgewaermt, waehrend noch gesprochen wird.
+    Eigener Thread + kurzer Timeout -- darf die Aufnahme nie aufhalten."""
+    def _senden():
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:8765/api/intern/sprechbeginn",
+                data=json.dumps({"room": room}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=1).close()
+        except Exception as e:
+            log.debug("Sprechbeginn-Meldung fehlgeschlagen: %s", e)
+    threading.Thread(target=_senden, daemon=True).start()
+
 
 def main():
     parser = argparse.ArgumentParser(
