@@ -3847,6 +3847,7 @@ class TXServer:
                 roh = await self._llm_ollama(bot, system, messages)
             text, stimmung = self._emotion_abtrennen(roh or "", bot)
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip().strip('"')
+            text = re.sub(r"^\[?\d{1,2}:\d{2}\]\s*", "", text).strip()
             if not text or text.upper().startswith("SKIP") or len(text) > 300:
                 log.info("[%s] Begruessung: keine brauchbare Antwort (%.60r)", room_name, roh)
                 return
@@ -4190,9 +4191,28 @@ class TXServer:
         return (f"Jetzt ist {cls._WOCHENTAGE[n.weekday()]}, der {n.day}. "
                 f"{cls._MONATE[n.month - 1]} {n.year}, {n.hour}:{n.minute:02d} Uhr.")
 
+    # Raum-Hinweis (2026-09-28): Persona sagt "CB-Kanal 74", Robert funkt aber
+    # auch auf Freenet -- dort stimmte seine Selbstverortung nicht. Eigene
+    # Texte je Raum: voice.bot.raum_hinweise = {"Raumname": "Text"}.
+    def _raum_hinweis(self, bot: dict, raum: str) -> str:
+        if not raum:
+            return ""
+        eigene = bot.get("raum_hinweise") or {}
+        if isinstance(eigene, dict) and eigene.get(raum):
+            return str(eigene[raum]).strip()
+        low = raum.lower()
+        if "freenet" in low:
+            return ("Dieser Verlauf laeuft gerade auf FREENET (149 MHz, Jedermannfunk), "
+                    "nicht auf CB-Kanal 74. Die Leute hier hoeren dich ueber Freenet; "
+                    "sag also nicht, du waerst auf Kanal 74.")
+        if "ch74" in low or "kanal74" in low or low.endswith("74"):
+            return "Dieser Verlauf laeuft auf CB-Kanal 74."
+        return ""
+
     def _bot_build_prompt(self, bot: dict, hist: list,
                           search_context: str = "",
-                          anker_key: str | None = None) -> tuple[str, list]:
+                          anker_key: str | None = None,
+                          raum: str = "") -> tuple[str, list]:
         """Baut System-Anweisung + Nachrichtenverlauf (provider-neutral).
         Nachrichten: role 'user' (fremde Funksprüche) / 'assistant' (eigene).
         search_context: optionale Websuche-Treffer, werden dem System-Prompt
@@ -4334,6 +4354,13 @@ class TXServer:
                            "schon gemerkt hast, nutze es nur wenn's passt, "
                            "erwähne nicht, dass du dir das notiert hast):\n"
                            + notes_txt)
+        system += ("\n\nVor jedem fremden Funkspruch steht in eckigen Klammern die "
+                   "Uhrzeit, zu der er gesendet wurde, z.B. [19:42]. Deine eigenen "
+                   "Antworten haben keine Uhrzeit. Schreib selbst NIE eine Uhrzeit "
+                   "in eckigen Klammern und kein Rufzeichen vor deine Antwort.")
+        raum_txt = self._raum_hinweis(bot, raum or (anker_key if isinstance(anker_key, str) else ""))
+        if raum_txt:
+            system += "\n\n" + raum_txt
         messages = []
         prev_ts = None
         konf = getattr(self, "_hist_konfidenz", {}) if bot.get("unsicher_markieren", False) else {}
@@ -4347,11 +4374,16 @@ class TXServer:
                 messages.append({"role": "assistant", "content": txt})
             else:
                 k = konf.get(round(ts, 3))
+                # Uhrzeit je Spruch (2026-09-28, User-Idee): FESTE Uhrzeit statt
+                # "vor x Minuten", damit der Verlauf fuer den Prompt-Cache
+                # unveraendert bleibt. Eigene Antworten bewusst ohne -- sonst
+                # ahmt das Modell das Format in seiner Antwort nach.
+                uhr = datetime.fromtimestamp(ts).strftime("%H:%M")
                 if k is not None and k < 0.8:
                     markiert = True
-                    messages.append({"role": "user", "content": f"{who} [schlecht verstanden]: {txt}"})
+                    messages.append({"role": "user", "content": f"[{uhr}] {who} [schlecht verstanden]: {txt}"})
                 else:
-                    messages.append({"role": "user", "content": f"{who}: {txt}"})
+                    messages.append({"role": "user", "content": f"[{uhr}] {who}: {txt}"})
             prev_ts = ts
         if markiert:
             # Erklaerung nur, wenn wirklich eine Zeile markiert ist -- kostet
@@ -4522,6 +4554,7 @@ class TXServer:
             # Verlauf) -- als Sicherheitsnetz zusaetzlich zur Prompt-Regel
             # weg damit, sonst wird der Name-Prefix live vorgelesen.
             name = bot.get("name") or "Robert"
+            cleaned = re.sub(r"^\[?\d{1,2}:\d{2}\]\s*", "", cleaned).strip()   # "[19:42] " imitiert
             cleaned = re.sub(rf"^{re.escape(name)}\s*:\s*", "", cleaned,
                              flags=re.IGNORECASE).strip()
             # Emojis raus (werden vorgelesen, Prompt-Verbot reicht nicht immer)
