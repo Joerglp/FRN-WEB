@@ -4921,42 +4921,96 @@ class TXServer:
             return ""
         return ((data2.get("message") or {}).get("content") or "").strip()
 
+    # Ausweich-Kette fuer Gemini (2026-09-29): Google nimmt alte Modelle ohne
+    # Vorwarnung aus dem Angebot (2.5-flash* liefert 404 "no longer available")
+    # und einzelne Modelle melden zeitweise 503. Dann wird das naechste Modell
+    # versucht. Die "-latest"-Aliase wandern von selbst mit dem Angebot mit.
+    _GEMINI_ALIAS = ("gemini-flash-lite-latest", "gemini-flash-latest")
+    _GEMINI_WEITER = {404, 429, 500, 502, 503, 504}   # Modell/Lastproblem -> naechstes
+    _GEMINI_MAX_VERSUCHE = 4
+    _GEMINI_LISTE_TTL_S = 6 * 3600
+    _GEMINI_TOT_S = 6 * 3600
+    _gemini_liste: tuple = (0.0, [])
+    _gemini_tot: dict = {}
+
+    async def _gemini_modellkette(self, bot: dict, key: str) -> list[str]:
+        """Konfiguriertes Modell, dann die -latest-Aliase, dann die neuesten
+        stabilen flash-lite/flash-Modelle laut ListModels (6 h gemerkt).
+        Modelle, die zuletzt 404 lieferten, werden 6 h lang uebersprungen."""
+        eigenes = bot.get("gemini_model") or "gemini-flash-lite-latest"
+        dyn: list[str] = []
+        zeit, liste = self._gemini_liste
+        if time.time() - zeit > self._GEMINI_LISTE_TTL_S:
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as sess:
+                    async with sess.get(
+                            "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+                            headers={"x-goog-api-key": key}) as resp:
+                        data = await resp.json(content_type=None)
+                liste = [m["name"].replace("models/", "") for m in data.get("models", [])
+                         if "generateContent" in m.get("supportedGenerationMethods", [])]
+            except Exception as e:
+                log.debug("Gemini-Modellliste: %s", e)
+            self._gemini_liste = (time.time(), liste)   # auch bei Fehler, sonst Dauerabfrage
+        def _ver(n: str):
+            m = re.match(r"^gemini-(\d+(?:\.\d+)?)-flash(-lite)?$", n)
+            return (float(m.group(1)), bool(m.group(2))) if m else None
+        stabil = [(n, _ver(n)) for n in liste if _ver(n)]
+        for lite in (True, False):
+            dyn += [n for n, v in sorted((x for x in stabil if x[1][1] == lite),
+                                         key=lambda x: -x[1][0])][:2]
+        jetzt = time.time()
+        kette: list[str] = []
+        for n in (eigenes, *self._GEMINI_ALIAS, *dyn):
+            if n not in kette and jetzt - self._gemini_tot.get(n, 0.0) > self._GEMINI_TOT_S:
+                kette.append(n)
+        return kette[:self._GEMINI_MAX_VERSUCHE] or [eigenes]
+
     async def _llm_gemini(self, bot: dict, system: str, messages: list) -> str:
         """Chat-Aufruf an Google Gemini (generateContent). Liefert rohen
         Antworttext ("" bei Fehler). Websuche/Grounding braucht bezahltes
-        Kontingent und ist daher hier nicht aktiviert."""
+        Kontingent und ist daher hier nicht aktiviert. Faellt das Modell aus
+        (abgekuendigt/ueberlastet), versucht es die Ausweich-Kette."""
         key = (bot.get("gemini_api_key") or "").strip()
         if not key:
             log.warning("KI-Funker: Gemini gewählt, aber kein gemini_api_key gesetzt")
             return ""
-        model = bot.get("gemini_model") or "gemini-flash-lite-latest"
         contents = [{"role": "model" if m["role"] == "assistant" else "user",
                      "parts": [{"text": m["content"]}]} for m in messages]
         body = {"systemInstruction": {"parts": [{"text": system}]},
                 "contents": contents,
                 "generationConfig": {"temperature": float(bot.get("temperature", 0.4)),
                                      "maxOutputTokens": 200}}
-        url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{model}:generateContent")
-        try:
-            timeout = aiohttp.ClientTimeout(total=60)
-            async with aiohttp.ClientSession(timeout=timeout) as sess:
-                async with sess.post(url, json=body,
-                                     headers={"x-goog-api-key": key}) as resp:
-                    data = await resp.json()
-                    if resp.status != 200:
-                        msg = (data.get("error", {}) or {}).get("message", "")
-                        log.warning("KI-Funker Gemini HTTP %d: %s",
-                                    resp.status, str(msg)[:140])
-                        return ""
-        except Exception as e:
-            log.warning("KI-Funker: Gemini nicht erreichbar: %s", e)
-            return ""
-        cands = data.get("candidates") or []
-        if not cands:
-            return ""
-        parts = (cands[0].get("content", {}) or {}).get("parts", []) or []
-        return "".join(p.get("text", "") for p in parts).strip()
+        kette = await self._gemini_modellkette(bot, key)
+        for i, model in enumerate(kette):
+            url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+                   f"{model}:generateContent")
+            try:
+                timeout = aiohttp.ClientTimeout(total=20 if len(kette) > 1 else 60)
+                async with aiohttp.ClientSession(timeout=timeout) as sess:
+                    async with sess.post(url, json=body,
+                                         headers={"x-goog-api-key": key}) as resp:
+                        data = await resp.json(content_type=None)
+                        status = resp.status
+            except Exception as e:
+                log.warning("KI-Funker: Gemini %s nicht erreichbar: %s", model, e)
+                continue
+            if status == 200:
+                if i > 0:
+                    log.warning("KI-Funker: Gemini-Modell %s nicht nutzbar, Ausweichmodell %s antwortet",
+                                kette[0], model)
+                cands = data.get("candidates") or []
+                if not cands:
+                    return ""
+                parts = (cands[0].get("content", {}) or {}).get("parts", []) or []
+                return "".join(p.get("text", "") for p in parts).strip()
+            msg = str((data.get("error", {}) or {}).get("message", ""))
+            log.warning("KI-Funker Gemini %s HTTP %d: %s", model, status, msg[:140])
+            if status == 404:
+                self._gemini_tot[model] = time.time()
+            if status not in self._GEMINI_WEITER:
+                return ""    # Key/Anfrage falsch -- ein anderes Modell hilft nicht
+        return ""
 
     async def handle_voice_auto_reply(self, request):
         """GET: Automatik-Status; POST {enabled}: ein/aus (persistiert)."""
@@ -6582,17 +6636,23 @@ class TXServer:
         """Liefert (text, modell)."""
         bot = (self.cfg.get("voice", {}) or {}).get("bot", {}) or {}
         modelle = [self._GEMINI_TRANSKRIPT_MODELL]
-        eigenes = bot.get("gemini_model") or "gemini-flash-lite-latest"
-        if eigenes not in modelle:
-            modelle.append(eigenes)
+        key = (bot.get("gemini_api_key") or "").strip()
+        if key:
+            for m in await self._gemini_modellkette(bot, key):
+                if m not in modelle:
+                    modelle.append(m)
+        elif (bot.get("gemini_model") or "gemini-flash-lite-latest") not in modelle:
+            modelle.append(bot.get("gemini_model") or "gemini-flash-lite-latest")
         fehler = None
-        for modell in modelle:
+        for modell in modelle[:self._GEMINI_MAX_VERSUCHE + 1]:
             try:
                 return await self._transkribiere_gemini(opus_path, modell), modell
             except Exception as e:
                 fehler = e
                 log.info("Gemini-Transkript %s fehlgeschlagen: %s", modell,
                          str(e) or type(e).__name__)
+                if "HTTP 404" in str(e):
+                    self._gemini_tot[modell] = time.time()
         raise fehler
 
     async def _transkribiere_gemini(self, opus_path: Path, model: str = "") -> str:
