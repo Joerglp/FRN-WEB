@@ -809,6 +809,7 @@ class TXServer:
         self._speaker_enrollments_path = Path(__file__).parent / "speaker_enrollments.json"
         self._speaker_enrollments: dict[str, list[list[float]]] = {}
         self._speaker_quellen: dict[str, list[str]] = {}
+        self._sprecher_details: dict[str, dict] = {}   # wav_path -> Ergebnis der Erkennung
         self._speaker_letzte_pruefung: dict = {}
         self._load_speaker_enrollments()
         self._transcription_cfg: dict = {}   # von main() befuellt (config.ini [transcription])
@@ -2429,6 +2430,20 @@ class TXServer:
         # 22 richtig/0 falsch.
         marge = float(sid_cfg.get("min_margin", 0.01))
         zweiter = treffer[1][0] if len(treffer) > 1 else 0.0
+        # Ergebnis fuers Archiv merken (2026-09-29, siehe sprecher_info)
+        info = {"name": best_name, "sim": round(best_sim, 3),
+                "zweiter": treffer[1][1] if len(treffer) > 1 else None,
+                "sim2": round(zweiter, 3), "schwelle": round(threshold, 3),
+                "marge": marge, "dauer": round(self._wav_duration_s(wav_path), 1)}
+        if best_name and best_sim >= threshold and best_sim - zweiter < marge:
+            info["ergebnis"] = "zu_dicht"
+        elif best_name and best_sim >= threshold:
+            info["ergebnis"] = "treffer"
+        else:
+            info["ergebnis"] = "unter_schwelle"
+        self._sprecher_details[wav_path] = info
+        while len(self._sprecher_details) > 200:
+            self._sprecher_details.pop(next(iter(self._sprecher_details)))
         if best_name and best_sim >= threshold and best_sim - zweiter < marge:
             log.info("Speaker-ID: verworfen -- %s (%.3f) und %s (%.3f) liegen "
                      "zu dicht beieinander (Mindestabstand %.3f)",
@@ -2441,6 +2456,70 @@ class TXServer:
         log.info("Speaker-ID: kein Treffer (bester Kandidat %s mit %.2f, "
                 "unter Schwelle %.2f)", best_name or "-", best_sim, threshold)
         return None, best_sim, threshold
+
+    def sprecher_info(self, wav_path: str) -> str:
+        """Hook fuer die Transkription: Ergebnis der Sprecher-Erkennung dieser
+        Aufnahme als JSON fuers Archiv ("" wenn sie nicht gelaufen ist)."""
+        info = self._sprecher_details.pop(wav_path, None)
+        return json.dumps(info, ensure_ascii=False) if info else ""
+
+    def _sprecher_uebersicht(self) -> dict:
+        """Wie gut passen die Stimmproben? Je Probe: Aehnlichkeit zur eigenen
+        Person (ohne diese Probe gerechnet, sonst misst sie sich selbst mit)
+        und zur naechsten fremden Person. Grenzwertig = fremde Person liegt
+        naeher oder weniger als der Mindestabstand dahinter -- solche Proben
+        stammen meist aus Mitschnitten mit zwei Stimmen und verwaschen die
+        Erkennung. Dazu die Personen untereinander (Mittelwerte)."""
+        marge = float(self._speaker_id_cfg().get("min_margin", 0.01))
+        schwelle = float(self._speaker_id_cfg().get("threshold", 0.80))
+        mittel = {n: np.mean(np.array(ps), axis=0) for n, ps in self._speaker_enrollments.items() if ps}
+        personen = []
+        for name, proben in sorted(self._speaker_enrollments.items()):
+            quellen = list(self._speaker_quellen.get(name, []))
+            quellen += [""] * (len(proben) - len(quellen))
+            zeilen = []
+            for i, emb in enumerate(proben):
+                rest = proben[:i] + proben[i + 1:]
+                eigen = (self._cosine_sim(emb, np.mean(np.array(rest), axis=0).tolist())
+                         if rest else None)
+                fremd, fremd_sim = None, -1.0
+                for anderer, m in mittel.items():
+                    if anderer == name:
+                        continue
+                    sim = self._cosine_sim(emb, m.tolist())
+                    if sim > fremd_sim:
+                        fremd, fremd_sim = anderer, sim
+                grenz = bool(fremd and eigen is not None and fremd_sim > eigen - marge)
+                q = quellen[i] or ""
+                m_id = re.match(r"archiv#(\d+)", q)
+                zeilen.append({"index": i, "quelle": q,
+                               "archiv_id": int(m_id.group(1)) if m_id else None,
+                               "eigen": round(eigen, 3) if eigen is not None else None,
+                               "fremd": fremd, "fremd_sim": round(fremd_sim, 3) if fremd else None,
+                               "grenzwertig": grenz,
+                               # passt nicht mal zur eigenen Person ueber die Schwelle
+                               "schwach": bool(not grenz and eigen is not None and eigen < schwelle),
+                               "fp": self._probe_fp(emb)})
+            eigene = [z["eigen"] for z in zeilen if z["eigen"] is not None]
+            personen.append({"name": name, "proben": zeilen,
+                             "eigen_mittel": round(float(np.mean(eigene)), 3) if eigene else None,
+                             "grenzwertig": sum(z["grenzwertig"] for z in zeilen)})
+        namen = sorted(mittel)
+        paare = []
+        for a_i, a in enumerate(namen):
+            for b in namen[a_i + 1:]:
+                paare.append({"a": a, "b": b,
+                              "sim": round(self._cosine_sim(mittel[a].tolist(), mittel[b].tolist()), 3)})
+        paare.sort(key=lambda x: -x["sim"])
+        return {"personen": personen, "paare": paare, "marge": marge, "schwelle": schwelle}
+
+    @staticmethod
+    def _probe_fp(emb) -> str:
+        """Kurzer Fingerabdruck einer Probe -- beim Einzel-Loeschen prueft der
+        Server damit, dass der Index noch auf DIESELBE Probe zeigt (die Liste
+        kann sich zwischen Anzeigen und Loeschen geaendert haben)."""
+        import hashlib
+        return hashlib.sha1(np.round(np.array(emb[:16], dtype=float), 5).tobytes()).hexdigest()[:10]
 
     async def _speaker_enroll(self, name: str, wav_path: str, quelle: str = "") -> bool:
         """Fuegt ein neues Stimm-Beispiel fuer eine Person hinzu (mehrere
@@ -5535,8 +5614,45 @@ class TXServer:
         name = request.match_info.get("name", "")
         if name in self._speaker_enrollments:
             del self._speaker_enrollments[name]
+            self._speaker_quellen.pop(name, None)   # sonst verrutschen Quellen bei Neu-Anlernen
             self._save_speaker_enrollments()
         return web.json_response({"ok": True})
+
+    async def handle_admin_speaker_uebersicht(self, request):
+        """GET /api/admin/speaker-id/uebersicht -- Guete der Stimmproben, siehe
+        _sprecher_uebersicht."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        return web.json_response(self._sprecher_uebersicht())
+
+    async def handle_admin_speaker_probe_delete(self, request):
+        """DELETE /api/admin/speaker-id/enrollments/{name}/{index}?fp=... --
+        eine einzelne Stimmprobe entfernen (grenzwertige Proben, 2026-09-29)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        name = request.match_info.get("name", "")
+        try:
+            idx = int(request.match_info.get("index", ""))
+        except ValueError:
+            return web.json_response({"error": "Index ungueltig"}, status=400)
+        proben = self._speaker_enrollments.get(name)
+        if not proben or not 0 <= idx < len(proben):
+            return web.json_response({"error": "Probe nicht gefunden"}, status=404)
+        if request.rel_url.query.get("fp") != self._probe_fp(proben[idx]):
+            return web.json_response({"error": "Liste hat sich geaendert -- bitte neu laden"},
+                                     status=409)
+        quellen = self._speaker_quellen.setdefault(name, [])
+        quellen += [""] * (len(proben) - len(quellen))
+        del proben[idx]
+        entfernt = quellen.pop(idx)
+        if not proben:
+            del self._speaker_enrollments[name]
+            self._speaker_quellen.pop(name, None)
+        self._save_speaker_enrollments()
+        log.info("Speaker-ID: Probe %d von %s geloescht (Quelle %s)", idx + 1, name, entfernt or "-")
+        return web.json_response({"ok": True, "rest": len(proben)})
 
     async def handle_admin_archive_enroll(self, request):
         """POST /api/admin/archive/{id}/enroll — {name} lernt die Stimme aus
@@ -8352,6 +8468,12 @@ class TXServer:
             None, _archive.query_entries, limit, offset, room, search, date_from, date_to
         )
         rooms = await loop.run_in_executor(None, _archive.get_rooms)
+        # Sprecher-Details (Aehnlichkeiten) nur fuer Admins -- das Archiv ist
+        # oeffentlich, die Werte sind ein Admin-Werkzeug.
+        info = self._validate_token(self._token_from(request))
+        if not (info and info.get("is_admin")):
+            for e in entries:
+                e.pop("sprecher", None)
         # Warteschlange: .meta-Dateien die noch nicht transkribiert wurden
         wav_dir = Path(self.cfg.get("transcription", {}).get("wav_dir", "/opt/FRN/recordings"))
         pending = len(list(wav_dir.glob("*.meta")))
@@ -8549,6 +8671,9 @@ class TXServer:
         app.router.add_get("/api/admin/speaker-id", self.handle_admin_speaker_id)
         app.router.add_post("/api/admin/speaker-id", self.handle_admin_speaker_id)
         app.router.add_post("/api/admin/speaker-id/enroll", self.handle_admin_speaker_enroll)
+        app.router.add_get("/api/admin/speaker-id/uebersicht", self.handle_admin_speaker_uebersicht)
+        app.router.add_delete("/api/admin/speaker-id/enrollments/{name}/{index}",
+                              self.handle_admin_speaker_probe_delete)
         app.router.add_delete("/api/admin/speaker-id/enrollments/{name}",
                               self.handle_admin_speaker_delete)
         app.router.add_post("/api/admin/archive/{id}/enroll", self.handle_admin_archive_enroll)
@@ -8640,6 +8765,7 @@ def main():
             # Auto-Antwort-Hook: Namensnennung → Ollama-Vorschlag an Web-Clients
             pipeline.on_transcript = server.on_transcript
             pipeline.resolve_callsign = server.bot_archive_callsign
+            pipeline.sprecher_info = server.sprecher_info
             pipeline.resolve_known_text = server.resolve_known_text
             pipeline.ist_angesprochen = server.bot_angesprochen
             pipeline.debug_trace = server.debug_trace_step

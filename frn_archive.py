@@ -76,6 +76,12 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_entry ON comments(entry_id)")
+        # Sprecher-Erkennung je Eintrag (2026-09-29): JSON mit bestem und
+        # zweitem Kandidaten, Aehnlichkeit, Schwelle und Ergebnis -- vorher
+        # stand nur der vergebene Name im Rufzeichen, nicht wie sicher er war.
+        spalten = {r[1] for r in conn.execute("PRAGMA table_info(transmissions)")}
+        if "sprecher" not in spalten:
+            conn.execute("ALTER TABLE transmissions ADD COLUMN sprecher TEXT NOT NULL DEFAULT ''")
     log.info("FRN Archive DB bereit: %s", DB_PATH)
 
 
@@ -165,9 +171,11 @@ async def add_entry(
     timestamp: float,
     text: str,
     confidence: float | None = None,
+    sprecher: str = "",
 ) -> int | None:
     """
     Konvertiert WAV → Opus und speichert Eintrag in DB.
+    sprecher: JSON der Sprecher-Erkennung (siehe init_db), leer = nicht gelaufen.
     Gibt die neue ID zurück, oder None bei Fehler.
     """
     dt        = datetime.fromtimestamp(timestamp)
@@ -203,9 +211,10 @@ async def add_entry(
             cur = conn.execute(
                 """INSERT INTO transmissions
                    (timestamp, room, callsign, text, audio_file, duration_s, wav_source,
-                    confidence)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (timestamp, room, callsign, text, filename, duration, wav_path, confidence)
+                    confidence, sprecher)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (timestamp, room, callsign, text, filename, duration, wav_path, confidence,
+                 sprecher or "")
             )
             entry_id = cur.lastrowid
         log.debug("Archiv-Eintrag #%d: [%s] %s → %s", entry_id, room, callsign, filename)
@@ -306,7 +315,7 @@ def query_entries(
     with _get_conn() as conn:
         rows = conn.execute(
             f"""SELECT id, timestamp, room, callsign, text, audio_file,
-                       duration_s, confidence
+                       duration_s, confidence, sprecher
                 FROM transmissions
                 {where}
                 ORDER BY timestamp DESC
@@ -335,6 +344,7 @@ def query_entries(
             # 0 = Whisper hat geraten statt verstanden; die Oberflaeche
             # markiert solche Eintraege, statt sie zu verschweigen.
             "confidence": r["confidence"],
+            "sprecher":   r["sprecher"] or "",   # JSON, nur fuer Admins ausgeliefert
         })
     return result, total
 

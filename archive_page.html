@@ -810,6 +810,7 @@ function renderMsg(e, mergeWithId) {
     ? `<span class="msg-room" style="color:#c05050;border-color:#c0505040"
              title="Whisper konnte das nicht verstehen -- Text unbrauchbar, Robert antwortet darauf nicht">unverständlich</span>`
     : "";
+  const sprecher = sprecherChip(e);
   html += `
   <div class="msg">
     <div class="msg-header">
@@ -817,6 +818,7 @@ function renderMsg(e, mergeWithId) {
       <span class="msg-room" style="color:${rc};border-color:${rc}40">${esc(e.room || '?')}</span>
       <span class="msg-time">${esc(timeOnly)}</span>
       ${unbrauchbar}
+      ${sprecher}
     </div>
     <div class="msg-text"${unbrauchbar ? ' style="opacity:.55;font-style:italic"' : ''}>${
       esc(e.text) || (unbrauchbar ? "— nicht verstanden, nur Aufnahme —" : "")}</div>
@@ -866,6 +868,31 @@ function combineDateTime(dateId, timeId) {
   const t = document.getElementById(timeId).value;
   if (!d) return '';
   return t ? `${d}T${t}` : d;
+}
+
+// Sprecher-Erkennung je Eintrag (2026-09-29): wie sicher war die Stimme?
+// Nur fuer Admins vorhanden (Server liefert "sprecher" sonst nicht aus).
+function sprecherChip(e) {
+  if (!e.sprecher) return '';
+  let d; try { d = JSON.parse(e.sprecher); } catch (_) { return ''; }
+  if (!d || !d.name) return '';
+  const f = x => (x ?? 0).toFixed(2);
+  const zweit = d.zweiter ? ` · 2. ${esc(d.zweiter)} ${f(d.sim2)}` : '';
+  let txt, farbe, tip;
+  if (d.ergebnis === 'treffer') {
+    txt = `Stimme ${esc(d.name)} ${f(d.sim)}${zweit}`;
+    farbe = '#6fbf8a';
+    tip = `Erkannt über die Stimme (Schwelle ${f(d.schwelle)}, Abstand zum Zweiten ${f(d.sim - d.sim2)})`;
+  } else if (d.ergebnis === 'zu_dicht') {
+    txt = `Stimme unsicher: ${esc(d.name)} ${f(d.sim)} / ${esc(d.zweiter)} ${f(d.sim2)}`;
+    farbe = '#d0a030';
+    tip = `Beide über der Schwelle, aber weniger als ${f(d.marge)} auseinander -- kein Name vergeben`;
+  } else {
+    txt = `Stimme: kein Treffer (${esc(d.name)} ${f(d.sim)} &lt; ${f(d.schwelle)})`;
+    farbe = '#8a9a8a';
+    tip = `Bester Kandidat unter der Schwelle${d.dauer ? ` (Clip ${d.dauer} s, kurze Clips haben strengere Schwellen)` : ''}`;
+  }
+  return `<span class="msg-room" style="color:${farbe};border-color:${farbe}60" title="${esc(tip)}">${txt}</span>`;
 }
 
 async function loadEntries(append = false) {
@@ -945,7 +972,9 @@ async function loadEntries(append = false) {
         ...(dfrom  ? {from: dfrom} : {}),
         ...(dto    ? {to: dto}     : {}),
       });
-      const resp = await fetch('/api/archive?' + params);
+      // Mit Token: dann liefert der Server auch die Sprecher-Werte (nur Admins)
+      const tok = localStorage.getItem('frn_token');
+      const resp = await fetch('/api/archive?' + params, tok ? { headers: { 'X-Token': tok } } : {});
       if (!resp.ok) throw new Error(resp.status);
       data = await resp.json();
 

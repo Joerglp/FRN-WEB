@@ -888,6 +888,31 @@ audio {
 @media (max-width: 480px) {
   .form-grid { grid-template-columns: 1fr; }
 }
+/* Übersicht Stimmproben (Sprecher-Erkennung) */
+.sid-block { background: var(--inset); border: 1px solid var(--border); border-radius: 8px;
+             padding: 8px 12px; margin-bottom: 10px; }
+.sid-unter { font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+.sid-paar { display: flex; justify-content: space-between; gap: 10px; font-size: .84rem; padding: 2px 0; }
+.sid-paar-krit { color: var(--orange); }
+.sid-hinweis { font-size: .74rem; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+.sid-zahl { font-family: 'Share Tech Mono', monospace; font-variant-numeric: tabular-nums; }
+.sid-person { background: var(--inset); border: 1px solid var(--border); border-radius: 8px;
+              padding: 6px 12px; margin-bottom: 8px; }
+.sid-person summary { cursor: pointer; font-size: .88rem; padding: 2px 0; }
+.sid-kopf { color: var(--muted); font-size: .8rem; }
+.sid-tabelle { width: 100%; border-collapse: collapse; font-size: .8rem; margin-top: 6px; }
+.sid-tabelle th { text-align: left; font-weight: 500; color: var(--muted); font-size: .72rem;
+                  border-bottom: 1px solid var(--dim); padding: 3px 6px; white-space: nowrap; }
+.sid-tabelle td { padding: 4px 6px; border-bottom: 1px solid var(--dim); vertical-align: middle; }
+.sid-zeile-grenz td { background: rgba(255,167,38,.07); }
+.sid-quelle { font-family: 'Share Tech Mono', monospace; font-size: .76rem; color: var(--muted); overflow-wrap: anywhere; }
+.sid-tag { display: inline-block; font-size: .7rem; padding: 0 6px; border-radius: 4px; border: 1px solid; white-space: nowrap; }
+.sid-grenz { color: var(--orange); border-color: rgba(255,167,38,.5); }
+.sid-schwach { color: var(--muted); border-color: var(--dim); }
+.sid-knopf { background: none; border: 1px solid var(--dim); color: var(--muted); border-radius: 6px;
+             padding: 2px 8px; cursor: pointer; font-size: .76rem; }
+.sid-knopf:hover { border-color: var(--accent); color: var(--text); }
+.sid-loeschen:hover, .sid-sicher { border-color: var(--red) !important; color: var(--red) !important; }
 </style>
 </head>
 <body>
@@ -1931,6 +1956,18 @@ audio {
         <button class="btn-save" onclick="saveSpeakerIdSettings()" style="margin-bottom:14px">SPEICHERN</button>
         <div class="admin-section-title" style="font-size:.85em">Eingelernte Sprecher</div>
         <div id="sid-enrollments"></div>
+        <div class="admin-section-title" style="font-size:.85em;margin-top:18px">Wie gut passen die Stimmproben?</div>
+        <div style="font-size:.76rem;color:var(--muted);margin-bottom:8px;line-height:1.5">
+          Jede Probe wird mit ihrer eigenen Person (ohne sich selbst) und mit der
+          nächsten fremden Person verglichen.
+          <span class="sid-tag sid-grenz">grenzwertig</span> = liegt an einer anderen Person
+          genauso nah oder näher — meist ein Mitschnitt mit zwei Stimmen, besser löschen.
+          <span class="sid-tag sid-schwach">schwach</span> = passt nur knapp zur eigenen Person
+          (unter der Schwelle), eher anhören als löschen.
+        </div>
+        <button type="button" class="btn-save" onclick="loadSprecherUebersicht()"
+                style="margin-bottom:10px;padding:6px 14px;font-size:.85em">Übersicht neu laden</button>
+        <div id="sid-uebersicht"></div>
       </div>
     </div>
 
@@ -4990,11 +5027,12 @@ async function loadSpeakerIdSettings() {
       list.innerHTML = d.enrollments.map(e => `
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.82rem">
           <span style="flex:1">${esc(e.name)} <span style="color:var(--muted)">(${e.samples} Beispiel${e.samples === 1 ? "" : "e"})</span></span>
-          <button type="button" onclick="deleteSpeakerEnrollment('${esc(e.name)}')"
+          <button type="button" onclick="deleteSpeakerEnrollment('${esc(e.name)}', this)"
                   style="background:none;border:1px solid var(--dim);color:var(--muted);
                          border-radius:6px;padding:3px 8px;cursor:pointer;font-size:.78rem">✕ löschen</button>
         </div>`).join("");
     }
+    loadSprecherUebersicht();
   } catch(e) { /* still */ }
 }
 async function saveSpeakerIdSettings() {
@@ -5015,7 +5053,122 @@ async function saveSpeakerIdSettings() {
     showMsg("msg-debug", "Fehler: " + e, "error");
   }
 }
-async function deleteSpeakerEnrollment(name) {
+// ── Übersicht der Stimmproben (2026-09-29) ─────────────────────────────
+let sidDaten = null;
+async function loadSprecherUebersicht() {
+  const box = document.getElementById("sid-uebersicht");
+  if (!box) return;
+  box.innerHTML = '<div style="color:var(--muted);font-size:.8rem">Rechne …</div>';
+  try {
+    const r = await adminFetch("/api/admin/speaker-id/uebersicht");
+    const d = await r.json();
+    if (!r.ok || d.error) {
+      box.innerHTML = `<div style="color:var(--red);font-size:.8rem">Nicht geladen: ${esc(d.error || r.status)}</div>`;
+      return;
+    }
+    sidDaten = d;
+    renderSprecherUebersicht();
+  } catch (e) {
+    box.innerHTML = `<div style="color:var(--red);font-size:.8rem">Nicht geladen: ${esc(e.message)}</div>`;
+  }
+}
+function sidZahl(x) { return x == null ? "–" : x.toFixed(2); }
+function renderSprecherUebersicht() {
+  const d = sidDaten, box = document.getElementById("sid-uebersicht");
+  if (!d.personen.length) { box.innerHTML = ""; return; }
+  const kritisch = d.paare.filter(p => p.sim >= d.schwelle);
+  const paare = d.paare.slice(0, Math.max(5, kritisch.length)).map(p => `
+    <div class="sid-paar ${p.sim >= d.schwelle ? "sid-paar-krit" : ""}">
+      <span>${esc(p.a)} ↔ ${esc(p.b)}</span><span class="sid-zahl">${sidZahl(p.sim)}</span>
+    </div>`).join("");
+  let html = `<div class="sid-block">
+      <div class="sid-unter">Ähnlichste Personen (Mittelwert gegen Mittelwert)</div>
+      ${paare}
+      <div class="sid-hinweis">${kritisch.length
+        ? `${kritisch.length} Paar${kritisch.length === 1 ? "" : "e"} über der Schwelle ${sidZahl(d.schwelle)}: da drohen Verwechslungen. Hilft: mehr saubere, längere Proben der beiden.`
+        : `Kein Paar über der Schwelle ${sidZahl(d.schwelle)}.`}</div>
+    </div>`;
+  for (const p of d.personen) {
+    const probl = p.proben.filter(z => z.grenzwertig).length;
+    const schwach = p.proben.filter(z => z.schwach).length;
+    const kopf = [`${p.proben.length} Probe${p.proben.length === 1 ? "" : "n"}`,
+                  p.eigen_mittel != null ? `passt im Schnitt ${sidZahl(p.eigen_mittel)}` : "nur eine Probe",
+                  probl ? `<span class="sid-tag sid-grenz">${probl} grenzwertig</span>` : "",
+                  schwach ? `<span class="sid-tag sid-schwach">${schwach} schwach</span>` : ""].filter(Boolean).join(" · ");
+    const zeilen = p.proben.map(z => {
+      const tag = z.grenzwertig ? '<span class="sid-tag sid-grenz">grenzwertig</span>'
+                : z.schwach ? '<span class="sid-tag sid-schwach">schwach</span>' : "";
+      const datei = (z.quelle.match(/\S+\.opus$/) || [])[0];
+      const play = datei ? `<button type="button" class="sid-knopf" title="Aufnahme anhören"
+                    onclick="sidAnhoeren(this, '${esc(datei)}')">▶</button>` : "";
+      const quelle = z.archiv_id ? `Archiv #${z.archiv_id}` : (z.quelle ? esc(z.quelle) : "unbekannt");
+      return `<tr class="${z.grenzwertig ? "sid-zeile-grenz" : ""}">
+        <td class="sid-zahl">#${z.index + 1}</td>
+        <td>${play} <span class="sid-quelle">${quelle}</span></td>
+        <td class="sid-zahl">${sidZahl(z.eigen)}</td>
+        <td>${z.fremd ? `${esc(z.fremd)} <span class="sid-zahl">${sidZahl(z.fremd_sim)}</span>` : "–"}</td>
+        <td>${tag}</td>
+        <td style="text-align:right"><button type="button" class="sid-knopf sid-loeschen"
+            onclick="sidProbeLoeschen(this, '${esc(p.name)}', ${z.index}, '${z.fp}')">löschen</button></td>
+      </tr>`;
+    }).join("");
+    const alleKnopf = probl ? `<button type="button" class="sid-knopf sid-loeschen" style="margin-top:6px"
+        onclick="sidGrenzLoeschen(this, '${esc(p.name)}')">Alle ${probl} grenzwertigen löschen</button>` : "";
+    html += `<details class="sid-person" ${probl ? "open" : ""}>
+      <summary><b>${esc(p.name)}</b> <span class="sid-kopf">${kopf}</span></summary>
+      <div style="overflow-x:auto"><table class="sid-tabelle">
+        <thead><tr><th></th><th>Quelle</th><th>zur Person</th><th>nächste fremde</th><th></th><th></th></tr></thead>
+        <tbody>${zeilen}</tbody></table></div>
+      ${alleKnopf}
+    </details>`;
+  }
+  box.innerHTML = html;
+}
+let sidAudio = null;
+function sidAnhoeren(btn, datei) {
+  if (sidAudio) { sidAudio.pause(); }
+  sidAudio = new Audio("/api/archive/audio/" + encodeURIComponent(datei));
+  sidAudio.play().catch(() => { btn.textContent = "✕"; });
+}
+// Zweistufig statt confirm(): erster Klick fragt nach, zweiter löscht.
+function sidErstNachfragen(btn, text) {
+  if (btn.dataset.sicher === "1") return true;
+  btn.dataset.sicher = "1";
+  const alt = btn.textContent;
+  btn.textContent = text;
+  btn.classList.add("sid-sicher");
+  setTimeout(() => { btn.dataset.sicher = ""; btn.textContent = alt; btn.classList.remove("sid-sicher"); }, 4000);
+  return false;
+}
+async function sidProbeLoeschen(btn, name, index, fp) {
+  if (!sidErstNachfragen(btn, "wirklich?")) return;
+  btn.disabled = true;
+  const r = await adminFetch(`/api/admin/speaker-id/enrollments/${encodeURIComponent(name)}/${index}?fp=${encodeURIComponent(fp)}`,
+                             { method: "DELETE" });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) showMsg("msg-debug", "Probe nicht gelöscht: " + (d.error || r.status), "error");
+  else showMsg("msg-debug", `Probe #${index + 1} von ${name} gelöscht.`, "ok");
+  await loadSpeakerIdSettings();
+}
+async function sidGrenzLoeschen(btn, name) {
+  if (!sidErstNachfragen(btn, "Wirklich alle grenzwertigen löschen?")) return;
+  btn.disabled = true;
+  const p = (sidDaten.personen || []).find(x => x.name === name);
+  // von hinten nach vorn, damit die Indizes der übrigen gültig bleiben
+  const weg = p.proben.filter(z => z.grenzwertig).sort((a, b) => b.index - a.index);
+  let ok = 0;
+  for (const z of weg) {
+    const r = await adminFetch(`/api/admin/speaker-id/enrollments/${encodeURIComponent(name)}/${z.index}?fp=${encodeURIComponent(z.fp)}`,
+                               { method: "DELETE" });
+    if (r.ok) ok++;
+  }
+  showMsg("msg-debug", `${ok} von ${weg.length} grenzwertigen Proben von ${name} gelöscht.`, ok === weg.length ? "ok" : "error");
+  await loadSpeakerIdSettings();
+}
+
+async function deleteSpeakerEnrollment(name, btn) {
+  // Ganze Person weg -- erst nachfragen (vorher ein Klick = alle Proben weg)
+  if (btn && !sidErstNachfragen(btn, `Alle Proben von ${name} löschen?`)) return;
   try {
     await adminFetch(`/api/admin/speaker-id/enrollments/${encodeURIComponent(name)}`,
       { method: "DELETE" });

@@ -1088,9 +1088,19 @@ class TranscriptionPipeline:
             except Exception as e:
                 log.debug("on_transcript-Hook: %s", e)
 
+        # Sprecher-Erkennung dieser Aufnahme (Name, Aehnlichkeit, Zweiter) fuers
+        # Archiv -- frn_tx_server setzt pipeline.sprecher_info (2026-09-29).
+        sprecher = ""
+        si = getattr(self, "sprecher_info", None)
+        if si:
+            try:
+                sprecher = si(wav_path) or ""
+            except Exception as e:
+                log.debug("sprecher_info-Hook: %s", e)
+
         try:
             from frn_archive import add_entry
-            if await add_entry(wav_path, room, callsign, ts, text, confidence):
+            if await add_entry(wav_path, room, callsign, ts, text, confidence, sprecher=sprecher):
                 _mark_archived(wav_path)
         except Exception as e:
             log.warning("[%s] Archiv-Fehler: %s", room, e)
