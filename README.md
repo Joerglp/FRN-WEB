@@ -315,12 +315,14 @@ Zwei getrennte, unabhängig schaltbare Funktionen greifen darauf zu:
 ```
 Browser
   │  WebSocket (PCM audio)              HTTP (Audio-Stream)
-  │  HTTP (Archiv, Admin-API)                  ▲
+  │  HTTP (Archiv, Admin-API, /status)         ▲
   ▼                                            │
 frn_tx_server.py ──── TX0/TX1 ────► FRN_Server.jar :10024
   │  (HTTP + WS, :8765)                        │
-  │                                   (Audio-Routing)
-  │  ┌─────────────────────────────────────────┘
+  │        ▲                          (Audio-Routing)
+  │        │ POST /api/intern/sprechbeginn (nur localhost)
+  │        │ → LLM vorwärmen, sobald jemand zu sprechen beginnt
+  │  ┌─────┴───────────────────────────────────┘
   │  │
   │  └── frn_stream.py (pro Raum)
   │            │ PCM pipe
@@ -330,14 +332,25 @@ frn_tx_server.py ──── TX0/TX1 ────► FRN_Server.jar :10024
   │            ▼
   │       Icecast2 :8000
   │
-  ├── frn_transcription.py (faster-whisper, CPU oder remote GPU)
+  ├── frn_transcription.py
+  │      │  Whisper large-v3 (remote GPU :9001, sonst faster-whisper CPU)
+  │      │  Sprecher-Erkennung: ECAPA (:9005) gegen angelernte Proben
   │      ▼
-  │   frn_archive.py (SQLite + Opus)
+  │   frn_archive.py (SQLite + Opus, inkl. Sprecher + Treffer-Wert)
   │      ▼
   │   /archive  (Chat-Verlauf Web-UI)
   │
+  ├── KI-Funker (optional, Bot im frn_tx_server.py)
+  │      │  Verlauf + Uhrzeit je Spruch + Raum-Hinweis → Prompt
+  │      │  LLM: llama.cpp / Ollama-API (z. B. :11439)
+  │      │  TTS: XTTS (:9002, gestreamt) oder Piper (:9003)
+  │      ▼
+  │   Antwort als Funkspruch (TX) zurück in den Raum
+  │
   └── (Docker) frn_stream_runner.py — startet alle Streams, Watchdog
 ```
+
+Die GPU-Dienste (Whisper, XTTS, Piper, ECAPA, LLM) laufen optional auf einer separaten Box, siehe [`gpubox/README.md`](gpubox/README.md). Die Seite `/status` (Admin-Login) zeigt, welche Dienste laufen und wie die GPUs ausgelastet sind.
 
 ## Systemd (ohne Docker)
 
