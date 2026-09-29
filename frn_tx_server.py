@@ -775,6 +775,7 @@ class TXServer:
         self._room_hist: dict[str, list] = {}       # Raum → [(ts, wer, text), …]
         self._bot_last_reply: dict[str, float] = {} # Raum → Zeit letzter Bot-Sendung
         self._bot_own_tx: dict[str, list] = {}      # Raum → [(t0, t1, text), …]
+        self._kurzruf_zuletzt: dict[str, float] = {}  # Raum → Zeit des letzten beantworteten Kurzrufs
         self._bot_protokoll_pfad = Path(__file__).parent / "bot_replies.jsonl"
         self._prompt_anker: dict = {}   # Raumname (sonst id(Verlauf)) -> ts des ersten Spruchs
         # Stiller Mitschreiber (2026-09-24): Vorschlaege, die erst nach
@@ -2204,6 +2205,40 @@ class TXServer:
                 return (t0, t1, sent)
         return None
 
+    # Spassvogel-Schutz (2026-09-29): Einer ruft immer wieder nur "Robert."
+    # und buegelt dabei auch ueber andere -- dann klebt ein "Robert" am Ende
+    # fremder Sprueche ("... ob du schon bei der Vor- Robert."). Robert hat
+    # jedes Mal geantwortet, und jede Antwort oeffnete das Anschlussfenster,
+    # in dem er dann ins Gespraech von Ingo und Joerg quatschte (07:36-07:41).
+    # Als echte Ansprache zaehlt der Name nur, wenn der Spruch eine Frage ist,
+    # ein Gruss direkt davor steht ("Hallo Robert") oder danach noch was kommt
+    # ("Robert, bist du da"). Kurzrufe ("Robert?", "Moin Robert") hoechstens
+    # einmal je voice.bot.kurzruf_sperre_s (Standard 10 min) und Raum.
+    _GRUSS_VOR_NAME = re.compile(r"\b(hallo|moin|morgen|tag|abend|servus|hey|hi|na|hei)\W*$")
+
+    def _namensruf(self, low: str, triggers: list) -> str | None:
+        """None = Name faellt nicht; "echt" = richtige Ansprache; "kurz" = nur
+        Name (+Gruss/Frage), max. 3 Woerter; "angehaengt" = Name ohne Frage,
+        ohne Gruss und ohne etwas danach -- zaehlt nicht als Ansprache."""
+        treffer = []
+        for t in triggers:
+            treffer += list(re.finditer(re.escape(t), low))
+        if not treffer:
+            return None
+        frage = "?" in low
+        worte = len(re.findall(r"\w+", low))
+        echt = frage
+        for m in treffer:
+            danach = len(re.findall(r"\w+", low[m.end():]))
+            # Schon 1 Wort danach reicht ("Robert, sprech") -- ist das alles,
+            # greift unten die Kurzruf-Sperre. Name als LETZTES Wort ohne
+            # Frage/Gruss ist das Muster des Spassvogels.
+            if danach >= 1 or self._GRUSS_VOR_NAME.search(low[:m.start()]):
+                echt = True
+        if not echt:
+            return "angehaengt"
+        return "kurz" if worte <= 3 else "echt"
+
     def bot_angesprochen(self, text: str, room: str = "") -> bool:
         """Faellt Roberts Name (oder ein Trigger-Wort) im Text? Gleiche Pruefung
         wie name_hit in _bot_observe -- fuer die Transkription, die damit den
@@ -2214,8 +2249,11 @@ class TXServer:
         low = (text or "").lower()
         triggers = [t.lower() for t in bot.get("trigger", []) if t.strip()]
         triggers.append((bot.get("name") or "Robert").lower())
-        if any(t in low for t in triggers):
+        ruf = self._namensruf(low, list(dict.fromkeys(triggers)))
+        if ruf in ("echt", "kurz"):
             return True
+        if ruf == "angehaengt":
+            return False     # Kontroll-Lauf NICHT sparen, auch nicht im Anschlussfenster
         # Im Fenster fuer Anschlussfragen gilt der Spruch ebenfalls als an ihn
         # gerichtet (2026-09-25): sonst lief dort der Kontroll-Lauf und
         # kostete je Anschlussfrage rund 1 s (Filter+Sprecher-ID 1,2 statt 0,5 s).
@@ -2958,7 +2996,23 @@ class TXServer:
         in_conv  = (now - last) < float(bot.get("conversation_window_s", 180))
         triggers = [t.lower() for t in bot.get("trigger", []) if t.strip()]
         triggers.append(name.lower())
-        name_hit     = any(t in low for t in triggers)
+        ruf          = self._namensruf(low, list(dict.fromkeys(triggers)))
+        if ruf == "angehaengt":
+            # Name ohne Frage/Gruss/Inhalt -- auch nicht als Anschlussfrage
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                  detail="Name nur angehaengt/ohne Frage (Spassvogel-Schutz)",
+                                  final=True)
+            return
+        if ruf == "kurz":
+            sperre = float(bot.get("kurzruf_sperre_s", 600))
+            zuletzt = self._kurzruf_zuletzt.get(room_name, 0.0)
+            if sperre > 0 and now - zuletzt < sperre:
+                self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                      detail=f"Kurzruf-Sperre ({now - zuletzt:.0f}s seit letztem "
+                                             f"Kurzruf, Sperre {sperre:.0f}s)", final=True)
+                return
+            self._kurzruf_zuletzt[room_name] = now
+        name_hit     = ruf in ("echt", "kurz")
         name_or_call = name_hit or bool(self._BOT_CALL_RE.search(low))
         # Schalter "nur auf Ansprache" (User-Wunsch 2026-09-16): dann meldet
         # sich Robert AUSSCHLIESSLICH, wenn sein Name faellt -- kein
