@@ -980,13 +980,13 @@ class TranscriptionPipeline:
                                              room, "auch leer" if not kontrolle.strip() else "Text erkannt")
                             confidence = difflib.SequenceMatcher(
                                 None, text.lower(), kontrolle.lower(), autojunk=False).ratio()
-                            log.info("[%s] Kontroll-Lauf: %.1fs, Uebereinstimmung %.0f%%%s",
+                            log.info("[%s] Kontroll-Lauf: %.1fs, Übereinstimmung %.0f%%%s",
                                      room, time.time() - _t1, 100 * confidence,
-                                     "" if confidence >= 0.8 else "  -- unsicher, Whisper raet")
+                                     "" if confidence >= 0.8 else "  -- unsicher, Whisper rät")
                             if dbg:
                                 dbg(room, ts, "Kontrolle",
                                     "ok" if confidence >= 0.8 else "warn", time.time() - _t1,
-                                    f"Uebereinstimmung {100 * confidence:.0f}%: {kontrolle[:150]}")
+                                    f"Übereinstimmung {100 * confidence:.0f}%: {kontrolle[:150]}")
                         except Exception as e:
                             log.debug("[%s] Kontroll-Lauf fehlgeschlagen: %s", room, e)
                         finally:

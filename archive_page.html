@@ -1248,7 +1248,7 @@ async function suggestSplit(entryId, btn) {
     out.textContent = !d.gaps || !d.gaps.length
       ? 'Keine Stelle gefunden — Zeit von Hand eintragen (beim Anhoeren notieren):'
       : (d.method === 'silence'
-          ? `${d.gaps.length} moegliche Stelle(n) gefunden — anklicken zum Zerlegen:`
+          ? `${d.gaps.length} mögliche Stelle(n) gefunden — anklicken zum Zerlegen:`
           : 'Keine echte Pause gefunden, unsichere Vermutung:');
 
     panel.style.display = 'flex';
@@ -1333,7 +1333,7 @@ async function doSplit(entryId, cutS, wrap) {
 }
 
 async function mergeWithNext(entryId, withId, btn) {
-  if (!confirm('Diesen Eintrag mit dem direkt darunter (zeitlich davor liegenden) zusammenkleben? Beide Original-Eintraege werden durch einen neuen ersetzt.')) return;
+  if (!confirm('Diesen Eintrag mit dem direkt darunter (zeitlich davor liegenden) zusammenkleben? Beide Original-Einträge werden durch einen neuen ersetzt.')) return;
   const out = btn.nextElementSibling;
   btn.disabled = true;
   out.textContent = '⏳ klebe zusammen …';

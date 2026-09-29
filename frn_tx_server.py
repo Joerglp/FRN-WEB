@@ -1362,10 +1362,10 @@ class TXServer:
             # Original -- immer noch besser als gar keine Durchsage.
             if not vcfg.get("tts_fallback_local", True):
                 raise
-            log.warning("TTS ueber %s fehlgeschlagen (%s) -- weiche auf lokales Piper aus", url, e)
+            log.warning("TTS über %s fehlgeschlagen (%s) -- weiche auf lokales Piper aus", url, e)
             loop = asyncio.get_running_loop()
             wav_bytes = await loop.run_in_executor(None, self._piper_local_wav, text, speaker)
-            log.info("Sprachausgabe kam aus dem lokalen Piper (Rueckfallebene)")
+            log.info("Sprachausgabe kam aus dem lokalen Piper (Rückfallebene)")
         ffm = await asyncio.create_subprocess_exec(
             "ffmpeg", "-i", "pipe:0",
             # Lautheits-Normalisierung (EBU R128) -- verschiedene TTS-Engines/
@@ -1416,7 +1416,7 @@ class TXServer:
             if confidence is not None and _minconf > 0 and confidence < _minconf:
                 self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
                                       detail=f"Transkript unsicher ({100 * confidence:.0f}% "
-                                             "Uebereinstimmung) -- keine Antwort", final=True)
+                                             "Übereinstimmung) -- keine Antwort", final=True)
                 return
             if confidence is not None:
                 kz = self._hist_konfidenz
@@ -1626,9 +1626,9 @@ class TXServer:
             status["fehler"] = status["fehler"] or RuntimeError("kein Ton nach 15 s")
         if not puffer:
             task.cancel()
-            log.warning("[%s] XTTS stueckweise fehlgeschlagen (%s) -- Ganz-Weg", room.name, status["fehler"])
+            log.warning("[%s] XTTS stückweise fehlgeschlagen (%s) -- Ganz-Weg", room.name, status["fehler"])
             return None
-        log.info("[%s] XTTS stueckweise: %.2fs Vorlauf nach %.2fs", room.name,
+        log.info("[%s] XTTS stückweise: %.2fs Vorlauf nach %.2fs", room.name,
                  len(puffer) / 16000, time.time() - t0)
         luecken = 0
         luecke_seit = None     # Beginn der aktuellen Liefer-Luecke (Wanduhr)
@@ -1681,14 +1681,14 @@ class TXServer:
             if abgebrochen:
                 # Teil ist schon raus -- True, damit der Echo-Schutz die eigene
                 # Sendung kennt; kein zweiter Versuch (sonst doppelt gesprochen).
-                log.warning("[%s] XTTS stueckweise ABGEBROCHEN nach %.1fs Ton (%s) -- Satz unvollstaendig",
+                log.warning("[%s] XTTS stückweise ABGEBROCHEN nach %.1fs Ton (%s) -- Satz unvollständig",
                             room.name, pos / 16000, abgebrochen)
                 return True
-            log.info("[%s] XTTS stueckweise gesendet: %.1fs Ton%s", room.name,
+            log.info("[%s] XTTS stückweise gesendet: %.1fs Ton%s", room.name,
                      len(puffer) / 16000, f", {luecken} Luecke(n) mit Stille gefuellt" if luecken else "")
             return True
         except Exception as e:
-            log.warning("[%s] XTTS stueckweise: Senden fehlgeschlagen: %s", room.name, e)
+            log.warning("[%s] XTTS stückweise: Senden fehlgeschlagen: %s", room.name, e)
             return False
         finally:
             if not task.done():
@@ -2103,11 +2103,11 @@ class TXServer:
             # (antwortete "hab ich mir eingepraegt" und notierte nichts). Die
             # Abgrenzung gegen Smalltalk steht jetzt positiv formuliert drin.
             "description": ("Schreibt einen Satz dauerhaft in dein Notizbuch, damit du "
-                            "es in spaeteren Gespraechen noch weisst. Fuer Dinge ueber "
+                            "es in späteren Gesprächen noch weisst. Für Dinge über "
                             "die Leute auf dem Kanal, die in Tagen oder Wochen noch "
                             "stimmen: Urlaub, Geburtstag, Krankheit, Termine, neue "
                             "Antenne oder Station, Umzug -- und IMMER, wenn jemand "
-                            "'merk dir' sagt. Nicht fuer Wetter oder Smalltalk."),
+                            "'merk dir' sagt. Nicht für Wetter oder Smalltalk."),
             "parameters": {
                 "type": "object",
                 "properties": {"text": {"type": "string",
@@ -2450,7 +2450,7 @@ class TXServer:
                      best_name, best_sim, treffer[1][1], zweiter, marge)
             return None, best_sim, threshold
         if best_name and best_sim >= threshold:
-            log.info("Speaker-ID: %s erkannt (Aehnlichkeit %.2f, Schwelle %.2f)",
+            log.info("Speaker-ID: %s erkannt (Ähnlichkeit %.2f, Schwelle %.2f)",
                      best_name, best_sim, threshold)
             return best_name, best_sim, threshold
         log.info("Speaker-ID: kein Treffer (bester Kandidat %s mit %.2f, "
@@ -2547,7 +2547,7 @@ class TXServer:
                 naechster, abstand = anderer, sim
         eigen = (self._cosine_sim(emb, np.mean(np.array(proben[:-1]), axis=0).tolist())
                  if len(proben) > 1 else None)
-        log.info("Speaker-ID: Probe %d fuer %s angelernt aus %s (eigene %s, naechste fremde %s %.2f)",
+        log.info("Speaker-ID: Probe %d für %s angelernt aus %s (eigene %s, nächste fremde %s %.2f)",
                  len(proben), name, quelle or Path(wav_path).name,
                  f"{eigen:.2f}" if eigen is not None else "-", naechster or "-", abstand)
         self._speaker_letzte_pruefung = {
@@ -2722,7 +2722,7 @@ class TXServer:
                 if e is None:
                     nearest = min(ok_idx, key=lambda j: abs(j - i))
                     embeddings[i] = embeddings[nearest]
-            log.info("Sprecherwechsel-Analyse: %d/%d Fenster fehlgeschlagen, mit Nachbarn aufgefuellt",
+            log.info("Sprecherwechsel-Analyse: %d/%d Fenster fehlgeschlagen, mit Nachbarn aufgefüllt",
                       n_failed, len(embeddings))
         embs = np.array(embeddings)
 
@@ -2766,11 +2766,11 @@ class TXServer:
             _sdt = time.time() - _t0
             if identified:
                 self.debug_trace_step(room, ts, "Sprecher-ID", "ok", _sdt,
-                                      f"{identified} (Aehnlichkeit {sim:.2f}, Schwelle {threshold:.2f})")
+                                      f"{identified} (Ähnlichkeit {sim:.2f}, Schwelle {threshold:.2f})")
                 return identified
             self.debug_trace_step(room, ts, "Sprecher-ID", "skip", _sdt,
-                                  f"kein Treffer (beste Aehnlichkeit {sim:.2f}, Schwelle {threshold:.2f})"
-                                  if sim else "kein Enrollment/Embedding verfuegbar")
+                                  f"kein Treffer (beste Ähnlichkeit {sim:.2f}, Schwelle {threshold:.2f})"
+                                  if sim else "kein Enrollment/Embedding verfügbar")
         return callsign
 
     # Kurze, alltagssprachlich mehrdeutige Kommandowörter brauchen ein enges
@@ -2917,7 +2917,7 @@ class TXServer:
         except FileNotFoundError:
             return
         except Exception as e:
-            log.warning("KI-Funker-Gedaechtnis nicht geladen: %s", e)
+            log.warning("KI-Funker-Gedächtnis nicht geladen: %s", e)
             return
         grenze = time.time() - self._BOT_STATE_MAX_AGE_S
         for room, eintraege in (d.get("hist") or {}).items():
@@ -2935,7 +2935,7 @@ class TXServer:
                 self._bot_last_reply[room] = float(t)
         n = sum(len(v) for v in self._room_hist.values())
         if n:
-            log.info("KI-Funker-Gedaechtnis geladen: %d Durchsagen in %d Raeumen",
+            log.info("KI-Funker-Gedächtnis geladen: %d Durchsagen in %d Räumen",
                      n, len(self._room_hist))
 
     def _bot_state_save(self) -> None:
@@ -2954,7 +2954,7 @@ class TXServer:
                 json.dump(daten, f, ensure_ascii=False)
             os.replace(tmp, pfad)
         except Exception as e:
-            log.warning("KI-Funker-Gedaechtnis nicht gespeichert: %s", e)
+            log.warning("KI-Funker-Gedächtnis nicht gespeichert: %s", e)
 
     def _bot_state_merken(self) -> None:
         """Speichern mit 2 s Verzoegerung buendeln, statt bei jeder Durchsage
@@ -3079,7 +3079,7 @@ class TXServer:
         if ruf == "angehaengt":
             # Name ohne Frage/Gruss/Inhalt -- auch nicht als Anschlussfrage
             self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
-                                  detail="Name nur angehaengt/ohne Frage (Spassvogel-Schutz)",
+                                  detail="Name nur angehängt/ohne Frage (Spaßvogel-Schutz)",
                                   final=True)
             return
         if ruf == "kurz":
@@ -3248,7 +3248,7 @@ class TXServer:
                 p.kill()
             except Exception:
                 pass
-            return -1, "Zeitueberschreitung"
+            return -1, "Zeitüberschreitung"
         except Exception as e:
             return -1, str(e)
 
@@ -3348,7 +3348,7 @@ class TXServer:
             teile = out.split("===")
             if rc == -1 or len(teile) < 4:
                 return {"units": [{"name": n, "id": u, "status": "fehler",
-                                   "detail": "ssh nicht moeglich: " + out[:80]}
+                                   "detail": "ssh nicht möglich: " + out[:80]}
                                   for u, n, _ in self._STATUS_BOX_UNITS], "gpus": [], "ram": None}
             zust = teile[0].split()
             units = []
@@ -3438,9 +3438,9 @@ class TXServer:
             if not messages:
                 return
             await self._llm_ollama(dict(bot, ollama_num_predict=1), system, messages)
-            log.info("[%s] KI-Funker vorgewaermt: %.1fs", room_name, time.time() - t0)
+            log.info("[%s] KI-Funker vorgewärmt: %.1fs", room_name, time.time() - t0)
         except Exception as e:
-            log.debug("[%s] Vorwaermen fehlgeschlagen: %s", room_name, e)
+            log.debug("[%s] Vorwärmen fehlgeschlagen: %s", room_name, e)
         finally:
             self._vorwaerm_laeuft = False
 
@@ -3495,10 +3495,10 @@ class TXServer:
                             and w != f"{name} (du)"), "")
             aehnl = self._nachgeplappert(answer, gehoert)
             if aehnl > 0.75:
-                log.warning("[%s] KI-Funker: Antwort plappert das Gehoerte nach (%.2f) -- "
-                            "unterdrueckt: %.80s", room_name, aehnl, answer)
+                log.warning("[%s] KI-Funker: Antwort plappert das Gehörte nach (%.2f) -- "
+                            "unterdrückt: %.80s", room_name, aehnl, answer)
                 self.debug_trace_step(room_name, heard_ts, "Ergebnis", "skip",
-                                      detail=f"Nachgeplappert (Aehnlichkeit {aehnl:.2f}) -- nicht gesendet",
+                                      detail=f"Nachgeplappert (Ähnlichkeit {aehnl:.2f}) -- nicht gesendet",
                                       final=True)
                 return
             letzte = max((t1 for _t0, t1, _x in self._bot_own_tx.get(room_name, [])), default=0.0)
@@ -3506,10 +3506,10 @@ class TXServer:
                 gekuerzt = self._ohne_vorstellung(answer, name)
                 if gekuerzt != answer.strip():
                     if not gekuerzt:
-                        log.info("[%s] KI-Funker: erneute Vorstellung mitten im Gespraech "
-                                 "unterdrueckt: %.80s", room_name, answer)
+                        log.info("[%s] KI-Funker: erneute Vorstellung mitten im Gespräch "
+                                 "unterdrückt: %.80s", room_name, answer)
                         self.debug_trace_step(room_name, heard_ts, "Ergebnis", "skip",
-                                              detail="Erneute Vorstellung im laufenden Gespraech -- nicht gesendet",
+                                              detail="Erneute Vorstellung im laufenden Gespräch -- nicht gesendet",
                                               final=True)
                         return
                     answer = gekuerzt[0].upper() + gekuerzt[1:]
@@ -3538,11 +3538,11 @@ class TXServer:
                     None, answer.lower(), own_prev[-1][2].lower(),
                     autojunk=False).ratio()
                 if sim > 0.7:
-                    log.warning("[%s] KI-Funker: Antwort zu aehnlich zur letzten eigenen "
-                               "(%.2f) -- unterdrueckt gegen Wiederhol-Schleife: %.80s",
+                    log.warning("[%s] KI-Funker: Antwort zu ähnlich zur letzten eigenen "
+                               "(%.2f) -- unterdrückt gegen Wiederhol-Schleife: %.80s",
                                room_name, sim, answer)
                     self.debug_trace_step(room_name, heard_ts, "Ergebnis", "skip",
-                                          detail=f"Wiederholung unterdrueckt (Aehnlichkeit {sim:.2f})",
+                                          detail=f"Wiederholung unterdrückt (Ähnlichkeit {sim:.2f})",
                                           final=True)
                     return
             log.info("[%s] KI-Funker antwortet: %.80s", room_name, answer)
@@ -3623,14 +3623,14 @@ class TXServer:
     # Standort, der mit Abstand haeufigste Fall auf dem Kanal).
     _WEATHER_LAT, _WEATHER_LON, _WEATHER_PLACE = 51.674, 8.345, "Lippstadt"
     _WMO_TEXT = {
-        0: "klar", 1: "ueberwiegend klar", 2: "teils bewoelkt", 3: "bedeckt",
+        0: "klar", 1: "überwiegend klar", 2: "teils bewölkt", 3: "bedeckt",
         45: "Nebel", 48: "Nebel mit Reif", 51: "leichter Nieselregen",
-        53: "Nieselregen", 55: "kraeftiger Nieselregen", 56: "gefrierender Nieselregen",
+        53: "Nieselregen", 55: "kräftiger Nieselregen", 56: "gefrierender Nieselregen",
         57: "gefrierender Nieselregen", 61: "leichter Regen", 63: "Regen",
-        65: "kraeftiger Regen", 66: "gefrierender Regen", 67: "gefrierender Regen",
-        71: "leichter Schneefall", 73: "Schneefall", 75: "kraeftiger Schneefall",
+        65: "kräftiger Regen", 66: "gefrierender Regen", 67: "gefrierender Regen",
+        71: "leichter Schneefall", 73: "Schneefall", 75: "kräftiger Schneefall",
         77: "Schneegriesel", 80: "leichte Regenschauer", 81: "Regenschauer",
-        82: "heftige Regenschauer", 85: "Schneeschauer", 86: "kraeftige Schneeschauer",
+        82: "heftige Regenschauer", 85: "Schneeschauer", 86: "kräftige Schneeschauer",
         95: "Gewitter", 96: "Gewitter mit Hagel", 99: "schweres Gewitter mit Hagel",
     }
 
@@ -3659,7 +3659,7 @@ class TXServer:
                  f"{cur.get('temperature_2m')} Grad, "
                  f"{self._WMO_TEXT.get(cur.get('weather_code'), 'unbekannt')}, "
                  f"Wind {cur.get('wind_speed_10m')} km/h."]
-        for i, label in enumerate(("Heute", "Morgen", "Uebermorgen")):
+        for i, label in enumerate(("Heute", "Morgen", "Übermorgen")):
             try:
                 lines.append(
                     f"{label}: {self._WMO_TEXT.get(day['weather_code'][i], 'unbekannt')}, "
@@ -3926,7 +3926,7 @@ class TXServer:
                       warte_s=60 * random.uniform(float(bot.get("begruessung_warte_min", 3)),
                                                   max(float(bot.get("begruessung_warte_min", 3)),
                                                       float(bot.get("begruessung_warte_max", 10)))))
-            log.info("[%s] Begruessung: neue Sitzung nach %.1f h Ruhe -- fruehestens in %.0f min",
+            log.info("[%s] Begrüßung: neue Sitzung nach %.1f h Ruhe -- frühestens in %.0f min",
                      room_name, (ts - st["letzte"]) / 3600 if st["letzte"] else 99, st["warte_s"] / 60)
         st["letzte"] = max(st["letzte"], ts)
         st["eingang"] = jetzt
@@ -3957,7 +3957,7 @@ class TXServer:
                         and room_name not in self._bot_busy):
                     break
             else:
-                log.info("[%s] Begruessung: keine Funkpause gefunden -- spaeter erneut", room_name)
+                log.info("[%s] Begrüßung: keine Funkpause gefunden -- später erneut", room_name)
                 return
             basis = self._bot_cfg()
             if not basis.get("enabled"):
@@ -3972,7 +3972,7 @@ class TXServer:
                 "[Hinweis, kein Funkspruch] Auf dem Kanal ist seit einer Weile wieder "
                 "Betrieb, und du hast dich noch nicht gemeldet. Meld dich jetzt EINMAL "
                 "kurz in der Runde: dass du auch da und QRV bist. Ein Satz, locker und "
-                "passend zur Tageszeit; greif gern kurz auf, worueber gerade geredet "
+                "passend zur Tageszeit; greif gern kurz auf, worüber gerade geredet "
                 "wird, aber stell niemandem eine direkte Frage. Antworte NICHT mit SKIP.")})
             if (bot.get("provider") or "ollama").strip().lower() == "gemini":
                 roh = await self._llm_gemini(bot, system, messages)
@@ -3982,24 +3982,24 @@ class TXServer:
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip().strip('"')
             text = re.sub(r"^\[?\d{1,2}:\d{2}\]\s*", "", text).strip()
             if not text or text.upper().startswith("SKIP") or len(text) > 300:
-                log.info("[%s] Begruessung: keine brauchbare Antwort (%.60r)", room_name, roh)
+                log.info("[%s] Begrüßung: keine brauchbare Antwort (%.60r)", room_name, roh)
                 return
             if not stimmung and bot.get("emotion_auto"):
                 stimmung = self._emotion_liste(bot)[0]
-            log.info("[%s] Begruessung: %s", room_name, text)
+            log.info("[%s] Begrüßung: %s", room_name, text)
             t0 = time.time()
             gesendet = await self._auto_send_voice(room, text,
                                                    stimmung or bot.get("speaker") or "default")
             t1 = time.time()
             if not gesendet:
-                log.info("[%s] Begruessung: Senden nicht moeglich (Kanal belegt?) -- spaeter erneut",
+                log.info("[%s] Begrüßung: Senden nicht möglich (Kanal belegt?) -- später erneut",
                          room_name)
                 return
             st["gegruesst"] = True
             # Buchfuehrung wie bei einer normalen Antwort: Anschlussfragen,
             # Wiederhol-Bremse, Echo-Schutz und Analyse-Seite kennen sie so.
             self._bot_last_reply[room_name] = t1
-            self._bot_protokoll(room_name, t0, t1, text, "(Begruessung)", t0)
+            self._bot_protokoll(room_name, t0, t1, text, "(Begrüßung)", t0)
             own = self._bot_own_tx.setdefault(room_name, [])
             own.append((t0, t1, text))
             del own[:-6]
@@ -4009,7 +4009,7 @@ class TXServer:
                               max(4, int(bot.get("history_len", 10))) + 2 * self._PROMPT_BLOCK)
             self._bot_state_merken()
         except Exception as e:
-            log.warning("[%s] Begruessung fehlgeschlagen: %s", room_name, e)
+            log.warning("[%s] Begrüßung fehlgeschlagen: %s", room_name, e)
         finally:
             if belegt:
                 self._bot_busy.discard(room_name)
@@ -4021,7 +4021,7 @@ class TXServer:
                 st["naechster"] = time.time() + self._BEGRUESSUNG_NEU_S
                 if st["versuche"] >= self._BEGRUESSUNG_MAX_VERSUCHE:
                     st["gegruesst"] = True
-                    log.info("[%s] Begruessung: nach %d Versuchen aufgegeben", room_name, st["versuche"])
+                    log.info("[%s] Begrüßung: nach %d Versuchen aufgegeben", room_name, st["versuche"])
                 st["geplant"] = False
 
     # ---- Stiller Mitschreiber (2026-09-24) --------------------------------
@@ -4038,16 +4038,16 @@ class TXServer:
     _MITSCHREIBER_MAX_STUNDE = 12
     _VORSCHLAEGE_MAX = 200
     _MITSCHREIBER_PROMPT = (
-        "Du liest mitgehoerte CB-Funksprueche einer Stammrunde (per Whisper "
-        "verschriftet, kann Hoerfehler enthalten). Format je Zeile 'Rufname: Text', "
+        "Du liest mitgehörte CB-Funksprüche einer Stammrunde (per Whisper "
+        "verschriftet, kann Hörfehler enthalten). Format je Zeile 'Rufname: Text', "
         "'Funker' heisst: Sprecher unbekannt.\n"
-        "Finde NUR Dinge ueber konkrete Personen der Runde, die in Tagen oder Wochen "
+        "Finde NUR Dinge über konkrete Personen der Runde, die in Tagen oder Wochen "
         "noch wichtig sind: Geburtstag, Urlaub, Krankheit/Krankenhaus/Operation, "
-        "Todesfall, Umzug, Hochzeit, neuer Mast/Antenne/Funkgeraet, feste Termine.\n"
+        "Todesfall, Umzug, Hochzeit, neuer Mast/Antenne/Funkgerät, feste Termine.\n"
         "Gib je Fakt eine Zeile aus, die mit '- ' beginnt: ein Satz, mit Namen, "
         "Zeitangaben WOERTLICH wie gesagt ('am Samstag'), kein selbst errechnetes "
         "Datum. Ist der Sprecher unbekannt, schreib 'jemand aus der Runde'.\n"
-        "Nur was eindeutig gesagt wurde -- bei verstuemmeltem oder unklarem Text, "
+        "Nur was eindeutig gesagt wurde -- bei verstümmeltem oder unklarem Text, "
         "allgemeinem Gerede oder Scherzen: nichts. Findest du nichts, antworte "
         "NUR mit dem Wort NICHTS.")
 
@@ -4092,7 +4092,7 @@ class TXServer:
                 roh = await self._llm_ollama(bot, system, messages)
             notizen = [z.strip()[2:].strip() for z in (roh or "").splitlines()
                        if z.strip().startswith("- ") and len(z.strip()) > 8]
-            log.info("Mitschreiber [%s]: %.1fs, %d Vorschlag/Vorschlaege aus %d Zeilen",
+            log.info("Mitschreiber [%s]: %.1fs, %d Vorschlag/Vorschläge aus %d Zeilen",
                      room_name, time.time() - _t0, len(notizen), len(ausschnitt))
             if notizen:
                 liste = self._vorschlaege_laden()
@@ -4111,7 +4111,7 @@ class TXServer:
                 vorher = len(notizen)
                 notizen = [n for n in notizen if not _schon_da(n)]
                 if len(notizen) < vorher:
-                    log.info("Mitschreiber [%s]: %d doppelte Vorschlaege verworfen",
+                    log.info("Mitschreiber [%s]: %d doppelte Vorschläge verworfen",
                              room_name, vorher - len(notizen))
                 for n in notizen:
                     vergleich.append(n)
@@ -4130,7 +4130,7 @@ class TXServer:
         except FileNotFoundError:
             return []
         except (OSError, ValueError) as e:
-            log.warning("Notiz-Vorschlaege nicht lesbar: %s", e)
+            log.warning("Notiz-Vorschläge nicht lesbar: %s", e)
             return []
 
     def _vorschlaege_speichern(self, liste: list) -> None:
@@ -4310,7 +4310,7 @@ class TXServer:
 
     _WOCHENTAGE = ("Montag", "Dienstag", "Mittwoch", "Donnerstag",
                    "Freitag", "Samstag", "Sonntag")
-    _MONATE = ("Januar", "Februar", "Maerz", "April", "Mai", "Juni", "Juli",
+    _MONATE = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
                "August", "September", "Oktober", "November", "Dezember")
 
     @classmethod
@@ -4335,11 +4335,11 @@ class TXServer:
             return str(eigene[raum]).strip()
         low = raum.lower()
         if "freenet" in low:
-            return ("Dieser Verlauf laeuft gerade auf FREENET (149 MHz, Jedermannfunk), "
-                    "nicht auf CB-Kanal 74. Die Leute hier hoeren dich ueber Freenet; "
-                    "sag also nicht, du waerst auf Kanal 74.")
+            return ("Dieser Verlauf läuft gerade auf FREENET (149 MHz, Jedermannfunk), "
+                    "nicht auf CB-Kanal 74. Die Leute hier hören dich über Freenet; "
+                    "sag also nicht, du wärst auf Kanal 74.")
         if "ch74" in low or "kanal74" in low or low.endswith("74"):
-            return "Dieser Verlauf laeuft auf CB-Kanal 74."
+            return "Dieser Verlauf läuft auf CB-Kanal 74."
         return ""
 
     def _bot_build_prompt(self, bot: dict, hist: list,
@@ -4362,9 +4362,9 @@ class TXServer:
         # wuerde er den Zwischenspeicher fuer den ganzen Rest zerstoeren).
         system += ("\n\nDatum und Uhrzeit stehen in einem [Hinweis] direkt vor dem "
                    "letzten Funkspruch. Verlass dich darauf statt auf dein eigenes "
-                   "Gefuehl fuer das Datum, und schreib in Suchanfragen kein Datum, "
+                   "Gefühl für das Datum, und schreib in Suchanfragen kein Datum, "
                    "das du nicht sicher weisst. Solche [Hinweise] sind keine "
-                   "Funksprueche, antworte nicht darauf.")
+                   "Funksprüche, antworte nicht darauf.")
         spaet = [self._jetzt_satz()]   # Teile des Hinweises vor dem letzten Spruch
         # Stimmungsregel nur, solange eine Stimme mit Stimmungen spricht
         # (2026-09-27): XTTS spricht fest mit dem xtts_speaker, die gewaehlte
@@ -4430,14 +4430,14 @@ class TXServer:
                        "eine Frage, und kommt danach (ohne dass zwischendurch "
                        "jemand anderes was Eigenes sagt) eine Antwort, ist das "
                        "trotz der Pause meist die Antwort auf genau diese Frage "
-                       "-- geh darauf ein, tu nicht so als waere nichts gefragt "
+                       "-- geh darauf ein, tu nicht so als wäre nichts gefragt "
                        "worden.\nIst eine Durchsage inhaltlich nicht zu "
-                       "verstehen (zusammenhangloser Wortsalat, Bruchstuecke, "
-                       "fremdsprachiger Murks -- typisch fuer Whisper auf "
+                       "verstehen (zusammenhangloser Wortsalat, Bruchstücke, "
+                       "fremdsprachiger Murks -- typisch für Whisper auf "
                        "Rauschen), dann antworte GAR NICHT und sag auch nicht "
                        "sowas wie \"ist da wer?\" oder \"hab dich nicht "
                        "verstanden\": einfach schweigen (SKIP). Ausnahme: dein "
-                       "Name faellt oder es ist ein klarer Anruf (\"ist da wer\", "
+                       "Name fällt oder es ist ein klarer Anruf (\"ist da wer\", "
                        "\"QRV\", \"CQ\") -- dann melde dich kurz.")
         # Personen-Gedaechtnis: manuell gepflegte Notizen pro Name (Admin-
         # Panel), da es hier KEIN verlaessliches Rufzeichen pro Aufnahme gibt
@@ -4522,9 +4522,9 @@ class TXServer:
             # Erklaerung nur, wenn wirklich eine Zeile markiert ist -- kostet
             # sonst in jeder Anfrage Tokens fuer nichts.
             system += ("\n\nZeilen mit [schlecht verstanden] hat die Spracherkennung "
-                       "wahrscheinlich falsch verschriftet: nimm einzelne Woerter daraus "
-                       "nicht woertlich, wiederhole sie nicht und geh nicht auf "
-                       "Einzelheiten daraus ein, als waeren sie sicher gesagt.")
+                       "wahrscheinlich falsch verschriftet: nimm einzelne Wörter daraus "
+                       "nicht wörtlich, wiederhole sie nicht und geh nicht auf "
+                       "Einzelheiten daraus ein, als wären sie sicher gesagt.")
         hinweis = {"role": "user", "content": "[Hinweis, kein Funkspruch] " + "\n\n".join(spaet)}
         if messages:
             messages.insert(len(messages) - 1, hinweis)
@@ -4587,11 +4587,11 @@ class TXServer:
             # bisschen auf dem Band rumduempeln"). Echte Wortgleich-Wiederholung
             # faengt spaeter die Wiederhol-Bremse in _bot_reply (Aehnlichkeit > 0.7).
             if before and not before.rstrip().endswith((".", "!", "?")):
-                log.info("[%s] KI-Funker: Wendung aus frueherer Antwort mitten im Satz "
+                log.info("[%s] KI-Funker: Wendung aus früherer Antwort mitten im Satz "
                          "-- nicht gekappt: %.60s", room_name, text)
                 continue
             if before:
-                log.warning("[%s] KI-Funker: fruehere eigene Antwort in neuer Antwort "
+                log.warning("[%s] KI-Funker: frühere eigene Antwort in neuer Antwort "
                            "wiedererkannt -- ab Position %d gekappt: %.60s",
                            room_name, match.a, prev_text)
                 text = before
@@ -4900,7 +4900,7 @@ class TXServer:
             # Rechner, Robert machte daraus trotzdem "15. bis 17. November".
             {"role": "tool", "content": (
                 "Suchergebnisse -- nenne NUR Daten, Termine, Zahlen und Fakten, "
-                "die woertlich hier drinstehen. Passt nichts zur Frage, sag "
+                "die wörtlich hier drinstehen. Passt nichts zur Frage, sag "
                 "ehrlich, dass du nichts gefunden hast, und erfinde nichts:\n"
                 + (result or "keine Treffer gefunden"))},
         ]
@@ -5636,12 +5636,12 @@ class TXServer:
         try:
             idx = int(request.match_info.get("index", ""))
         except ValueError:
-            return web.json_response({"error": "Index ungueltig"}, status=400)
+            return web.json_response({"error": "Index ungültig"}, status=400)
         proben = self._speaker_enrollments.get(name)
         if not proben or not 0 <= idx < len(proben):
             return web.json_response({"error": "Probe nicht gefunden"}, status=404)
         if request.rel_url.query.get("fp") != self._probe_fp(proben[idx]):
-            return web.json_response({"error": "Liste hat sich geaendert -- bitte neu laden"},
+            return web.json_response({"error": "Liste hat sich geändert -- bitte neu laden"},
                                      status=409)
         quellen = self._speaker_quellen.setdefault(name, [])
         quellen += [""] * (len(proben) - len(quellen))
@@ -5651,7 +5651,7 @@ class TXServer:
             del self._speaker_enrollments[name]
             self._speaker_quellen.pop(name, None)
         self._save_speaker_enrollments()
-        log.info("Speaker-ID: Probe %d von %s geloescht (Quelle %s)", idx + 1, name, entfernt or "-")
+        log.info("Speaker-ID: Probe %d von %s gelöscht (Quelle %s)", idx + 1, name, entfernt or "-")
         return web.json_response({"ok": True, "rest": len(proben)})
 
     async def handle_admin_archive_enroll(self, request):
@@ -5675,7 +5675,7 @@ class TXServer:
         try:
             entry_id = int(request.match_info.get("id", ""))
         except ValueError:
-            return web.json_response({"error": "ungueltige id"}, status=400)
+            return web.json_response({"error": "ungültige id"}, status=400)
         # War frueher eine eigene Kopie der Opus->WAV-Konvertierung (leicht
         # abweichend von _archive_entry_wav: kein -ar 8000 -ac 1) -- beide
         # Stellen waeren bei einer kuenftigen Aenderung (Fehlerbehandlung,
@@ -5720,7 +5720,7 @@ class TXServer:
         try:
             entry_id = int(request.match_info.get("id", ""))
         except ValueError:
-            return web.json_response({"error": "ungueltige id"}, status=400)
+            return web.json_response({"error": "ungültige id"}, status=400)
         loop = asyncio.get_running_loop()
         ok = await loop.run_in_executor(None, _archive.update_callsign, entry_id, callsign)
         if not ok:
@@ -5770,7 +5770,7 @@ class TXServer:
         try:
             entry_id = int(request.match_info.get("id", ""))
         except ValueError:
-            return web.json_response({"error": "ungueltige id"}, status=400)
+            return web.json_response({"error": "ungültige id"}, status=400)
         entry, wav_path, err = await self._archive_entry_wav(entry_id)
         if err:
             return err
@@ -5819,7 +5819,7 @@ class TXServer:
         try:
             entry_id = int(request.match_info.get("id", ""))
         except ValueError:
-            return web.json_response({"error": "ungueltige id"}, status=400)
+            return web.json_response({"error": "ungültige id"}, status=400)
         try:
             body = await request.json()
         except Exception:
@@ -5828,16 +5828,16 @@ class TXServer:
         try:
             cuts = [float(c) for c in raw_cuts] if isinstance(raw_cuts, list) else [float(raw_cuts)]
         except (TypeError, ValueError):
-            return web.json_response({"error": "cut_s (Sekunden) fehlt/ungueltig"}, status=400)
+            return web.json_response({"error": "cut_s (Sekunden) fehlt/ungültig"}, status=400)
         if not cuts:
-            return web.json_response({"error": "cut_s (Sekunden) fehlt/ungueltig"}, status=400)
+            return web.json_response({"error": "cut_s (Sekunden) fehlt/ungültig"}, status=400)
 
         # Schutz gegen Doppel-Klick/zwei Admin-Tabs: ohne das wuerden zwei
         # gleichzeitige Requests fuer denselben Eintrag beide durchlaufen
         # und den Original-Eintrag doppelt in je zwei neue Teile zerlegen
         # (4 Eintraege statt 2, zweites delete_entry laeuft ins Leere).
         if entry_id in self._archive_busy_entries:
-            return web.json_response({"error": "Zerlegen fuer diesen Eintrag laeuft bereits"}, status=409)
+            return web.json_response({"error": "Zerlegen für diesen Eintrag läuft bereits"}, status=409)
         self._archive_busy_entries.add(entry_id)
         try:
             return await self._do_archive_split(entry_id, cuts)
@@ -5958,7 +5958,7 @@ class TXServer:
                     if new_entry and new_entry.get("audio_file"):
                         new_ids.append(new_id)
                     else:
-                        log.warning("Zerlegen: Teil '%s' ohne Audio angelegt (#%d) -- zaehlt als Fehler", label, new_id)
+                        log.warning("Zerlegen: Teil '%s' ohne Audio angelegt (#%d) -- zählt als Fehler", label, new_id)
 
             if len(new_ids) != n_parts:
                 # Teilweise fehlgeschlagen -- Original NICHT loeschen, damit nichts verloren geht.
@@ -6005,7 +6005,7 @@ class TXServer:
         try:
             entry_id = int(request.match_info.get("id", ""))
         except ValueError:
-            return web.json_response({"error": "ungueltige id"}, status=400)
+            return web.json_response({"error": "ungültige id"}, status=400)
         try:
             body = await request.json()
         except Exception:
@@ -6013,13 +6013,13 @@ class TXServer:
         try:
             other_id = int(body.get("with_id"))
         except (TypeError, ValueError):
-            return web.json_response({"error": "with_id fehlt/ungueltig"}, status=400)
+            return web.json_response({"error": "with_id fehlt/ungültig"}, status=400)
         if other_id == entry_id:
             return web.json_response({"error": "with_id muss ein anderer Eintrag sein"}, status=400)
 
         ids = (entry_id, other_id)
         if any(i in self._archive_busy_entries for i in ids):
-            return web.json_response({"error": "Einer der Eintraege wird gerade schon bearbeitet"}, status=409)
+            return web.json_response({"error": "Einer der Einträge wird gerade schon bearbeitet"}, status=409)
         self._archive_busy_entries.update(ids)
         try:
             return await self._do_archive_merge(entry_id, other_id)
@@ -6031,9 +6031,9 @@ class TXServer:
         entry_a = await loop.run_in_executor(None, _archive.get_entry, id_a)
         entry_b = await loop.run_in_executor(None, _archive.get_entry, id_b)
         if not entry_a or not entry_b:
-            return web.json_response({"error": "Eintrag/Eintraege nicht gefunden"}, status=404)
+            return web.json_response({"error": "Eintrag/Einträge nicht gefunden"}, status=404)
         if entry_a["room"] != entry_b["room"]:
-            return web.json_response({"error": "Eintraege sind aus unterschiedlichen Raeumen"}, status=400)
+            return web.json_response({"error": "Einträge sind aus unterschiedlichen Räumen"}, status=400)
 
         first, second = ((entry_a, entry_b) if entry_a["timestamp"] <= entry_b["timestamp"]
                          else (entry_b, entry_a))
@@ -6041,7 +6041,7 @@ class TXServer:
             None, _archive.count_entries_between, first["room"], first["timestamp"], second["timestamp"])
         if between > 0:
             return web.json_response(
-                {"error": "Dazwischen liegt noch ein anderer Eintrag — der muesste erst mit dazu"},
+                {"error": "Dazwischen liegt noch ein anderer Eintrag — der müsste erst mit dazu"},
                 status=400)
 
         entry_a_full, wav_a, err = await self._archive_entry_wav(first["id"])
@@ -6467,7 +6467,7 @@ class TXServer:
         try:
             chats = await loop.run_in_executor(None, _laden)
         except Exception as e:
-            log.warning("Robert-Gespraeche nicht geladen: %s", e)
+            log.warning("Robert-Gespräche nicht geladen: %s", e)
             return web.json_response({"error": str(e)[:200]}, status=500)
         return web.json_response({"name": name, "chats": chats})
 
@@ -6487,7 +6487,7 @@ class TXServer:
         try:
             entry_id = int(body.get("entry_id"))
         except (TypeError, ValueError):
-            return web.json_response({"error": "entry_id fehlt/ungueltig"}, status=400)
+            return web.json_response({"error": "entry_id fehlt/ungültig"}, status=400)
         model    = (body.get("model") or "").strip()
         provider = (body.get("provider") or "").strip().lower()
         loop  = asyncio.get_running_loop()
@@ -6508,7 +6508,7 @@ class TXServer:
 
         rows = await loop.run_in_executor(None, _verlauf)
         if not rows:
-            return web.json_response({"error": "kein Gespraechskontext im Archiv"}, status=404)
+            return web.json_response({"error": "kein Gesprächskontext im Archiv"}, status=404)
         name = self._bot_cfg().get("name") or "Robert"
         hist = [(r["timestamp"], f"{name} (du)" if r["callsign"] == name else (r["callsign"] or "Funker"),
                  r["text"]) for r in rows]
@@ -6639,11 +6639,11 @@ class TXServer:
         try:
             entry_id = int(body.get("entry_id"))
         except (TypeError, ValueError):
-            return web.json_response({"error": "entry_id fehlt/ungueltig"}, status=400)
+            return web.json_response({"error": "entry_id fehlt/ungültig"}, status=400)
         quellen = [q for q in (body.get("sources") or ["remote", "base"])
                    if q in self._WHISPER_QUELLEN]
         if not quellen:
-            return web.json_response({"error": "keine gueltige Quelle"}, status=400)
+            return web.json_response({"error": "keine gültige Quelle"}, status=400)
         loop = asyncio.get_running_loop()
         eintrag = await loop.run_in_executor(None, _archive.get_entry, entry_id)
         if not eintrag or not eintrag.get("audio_file"):
@@ -6675,7 +6675,7 @@ class TXServer:
                 try:
                     if quelle == "remote":
                         if not _TRANSCRIPTION_AVAILABLE:
-                            raise RuntimeError("Transkription nicht verfuegbar")
+                            raise RuntimeError("Transkription nicht verfügbar")
                         text = await transcribe_wav(wav_path, "medium", "de")
                     elif quelle == "gemini":
                         text, modell = await self._transkribiere_gemini_mit_ausweich(opus)
@@ -6709,9 +6709,9 @@ class TXServer:
         elif uebereinstimmung >= 80:
             urteil = "verlaesslich"
         elif uebereinstimmung >= 50:
-            urteil = "teilweise verlaesslich"
+            urteil = "teilweise verlässlich"
         else:
-            urteil = "unverlaesslich -- Quellen widersprechen sich"
+            urteil = "unverlässlich -- Quellen widersprechen sich"
         return web.json_response({
             "entry_id": entry_id, "gespeichert": eintrag.get("text", ""),
             "dauer_s": eintrag.get("duration_s"), "ergebnisse": ergebnisse,
@@ -7283,7 +7283,7 @@ class TXServer:
             # gegenueber dem Upstream-Server). Diese Zeichen ergeben in
             # E-Mail/Passwort/Rufzeichen ohnehin nie einen legitimen Sinn.
             if any(c in v for v in (username, password, callsign) for c in "\r\n<>"):
-                log.warning("FRN-Login abgelehnt: unzulaessiges Zeichen in Feld (ip=%s)", ip)
+                log.warning("FRN-Login abgelehnt: unzulässiges Zeichen in Feld (ip=%s)", ip)
                 return web.json_response({"error": "Ungültige Zeichen in Zugangsdaten"}, status=400)
             ok = await self._try_frn_auth(username, password, callsign)
             if ok:
@@ -8826,7 +8826,7 @@ def main():
         loop = asyncio.get_event_loop()
 
         def _on_alarm(signum, frame):
-            log.warning("Shutdown haengt (>15s, vermutlich laufender "
+            log.warning("Shutdown hängt (>15s, vermutlich laufender "
                         "Whisper-Request) -- erzwinge Beendigung.")
             server._bot_state_save()
             os._exit(1)
