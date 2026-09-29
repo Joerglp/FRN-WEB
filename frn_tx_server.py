@@ -3267,6 +3267,20 @@ class TXServer:
         except Exception as e:
             return False, time.time() - t0, (str(e) or type(e).__name__)[:120]
 
+    def _gemini_status(self, bot: dict) -> dict | None:
+        """Fuer die Statusseite: abgekuendigte Modelle (404, letzte 6 h) und ob
+        der Chat zuletzt auf ein Ausweichmodell ausweichen musste."""
+        if not (bot.get("gemini_api_key") or "").strip():
+            return None
+        jetzt = time.time()
+        tot = sorted(n for n, t in self._gemini_tot.items() if jetzt - t < self._GEMINI_TOT_S)
+        aw = self._gemini_ausweich
+        return {"modell": bot.get("gemini_model") or "gemini-flash-lite-latest",
+                "aktiv": (bot.get("provider") or "ollama").strip().lower() == "gemini",
+                "tot": tot,
+                "ausweich": ({"ts": aw[0], "gewuenscht": aw[1], "genutzt": aw[2]}
+                             if aw and jetzt - aw[0] < self._GEMINI_TOT_S else None)}
+
     async def handle_admin_dienste(self, request):
         _, err = await self._require_admin(request)
         if err:
@@ -3395,6 +3409,7 @@ class TXServer:
                     "tts": (self.cfg.get("voice", {}).get("tts_engine") or ""),
                     "xtts_speaker": self.cfg.get("voice", {}).get("xtts_speaker") or "",
                     "vorwaermen": bool(bot.get("vorwaermen", True)),
+                    "gemini": self._gemini_status(bot),
                     "letzte_antwort": letzte, "warteschlange": wartend,
                     "llm_letzte": {"ts": llm[0], "s": round(llm[1], 2)} if llm else None,
                     "frn_raeume": [{"name": r.name, "verbunden": bool(getattr(r, "_connected", False))}
@@ -4932,6 +4947,7 @@ class TXServer:
     _GEMINI_TOT_S = 6 * 3600
     _gemini_liste: tuple = (0.0, [])
     _gemini_tot: dict = {}
+    _gemini_ausweich: tuple | None = None   # (Zeit, gewuenschtes, genutztes Modell)
 
     async def _gemini_modellkette(self, bot: dict, key: str) -> list[str]:
         """Konfiguriertes Modell, dann die -latest-Aliase, dann die neuesten
@@ -4999,6 +5015,7 @@ class TXServer:
                 if i > 0:
                     log.warning("KI-Funker: Gemini-Modell %s nicht nutzbar, Ausweichmodell %s antwortet",
                                 kette[0], model)
+                    self._gemini_ausweich = (time.time(), kette[0], model)
                 cands = data.get("candidates") or []
                 if not cands:
                     return ""

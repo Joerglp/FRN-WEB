@@ -309,6 +309,11 @@ function darstellen(d) {
   const fehler = alle.filter(e => e.status === "fehler");
   const warn = alle.filter(e => e.status === "warn");
   if (!r.enabled) warn.push({ name: "Robert ist ausgeschaltet", ort: "Pi", detail: "" });
+  const gm = r.gemini;
+  if (gm && gm.tot && gm.tot.length) warn.push({ name: "Gemini-Modell nicht mehr verfügbar (404): " + gm.tot.join(", "),
+    ort: "Cloud", detail: gm.tot.includes(gm.modell) ? "Konfiguriertes Modell ersetzen, Ausweichkette springt ein" : "" });
+  if (gm && gm.ausweich) warn.push({ name: `Gemini weicht aus: ${gm.ausweich.gewuenscht} → ${gm.ausweich.genutzt}`,
+    ort: "Cloud", detail: "seit " + new Date(gm.ausweich.ts * 1000).toLocaleTimeString("de-DE") });
   if (r.warteschlange > 5) warn.push({ name: `${r.warteschlange} Aufnahmen warten auf Whisper`, ort: "Pi", detail: "" });
 
   const g = document.getElementById("gesamt");
