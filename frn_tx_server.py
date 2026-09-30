@@ -4570,7 +4570,9 @@ class TXServer:
                        "einbringen, aber nur, wenn es zum Gespräch passt oder eine "
                        "Pause ist: nicht aufzählen, in einem lockeren Satz, nichts "
                        "wiederholen, was du schon erzählt hast. Nenne nur, was dort "
-                       "WÖRTLICH steht.")
+                       "WÖRTLICH steht. Fragt dich jemand nach Neuigkeiten (\"was gibt's "
+                       "Neues\", \"was ist los\", \"was hörst du so\"), antworte mit "
+                       "einem Thema daraus, in ein bis zwei Sätzen, statt nur zu grüßen.")
         spaet = [self._jetzt_satz(datetime.fromtimestamp(jetzt_ts) if jetzt_ts else None)]   # Teile des Hinweises vor dem letzten Spruch
         # Stimmungsregel nur, solange eine Stimme mit Stimmungen spricht
         # (2026-09-27): XTTS spricht fest mit dem xtts_speaker, die gewaehlte
