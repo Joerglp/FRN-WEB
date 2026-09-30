@@ -26,6 +26,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import secrets
 import signal
@@ -791,6 +792,9 @@ class TXServer:
         # Vorstellungen seit 13.08. kamen direkt nach einem Dienst-Neustart,
         # weil diese drei Speicher nur im Arbeitsspeicher lagen.
         self._bot_state_path = Path(__file__).parent / "bot_state.json"
+        self._tagesprogramm_pfad = Path(__file__).parent / "tagesprogramm.json"
+        self._tagesprogramm: dict = {}
+        self._tagesprogramm_laden()
         self._bot_state_pending = False
         self._bot_state_load()
         self._bot_busy: set[str] = set()
@@ -1893,6 +1897,13 @@ class TXServer:
         "begruessung_min_sprueche": 6,    # erst wenn das Gespraech laeuft
         "begruessung_warte_min": 3,       # danach zufaellig 3..10 Minuten
         "begruessung_warte_max": 10,
+        # Tagesprogramm (2026-09-30): einmal taeglich frisch aus echten Quellen
+        # (Wetter, Nachrichten, Fussball, Lippstadt), Robert darf daraus von
+        # sich aus ein Thema einbringen -- damit er nicht immer dasselbe erzaehlt.
+        "tagesprogramm_enabled": True,
+        "tagesprogramm_zeit": "05:30",
+        "tagesprogramm_themen": ["wetter", "nachrichten", "fussball", "lippstadt"],
+        "tagesprogramm_pro_antwort": 2,   # so viele Themen je Anfrage im Hinweis
         "name":     "Robert",
         "trigger":  ["robert", "roboter", "funk-roboter"],
         "speaker":  "damien_black",
@@ -3829,7 +3840,7 @@ class TXServer:
         return (f"Fussball-Daten (OpenLigaDB, heute ist {self._WOTAG[heute.weekday()]} "
                 f"{heute:%d.%m.%Y}):\n" + "\n".join(zeilen))
 
-    async def _bot_nachrichten(self) -> str:
+    async def _bot_nachrichten(self, nur_titel: bool = False) -> str:
         """Top-Schlagzeilen der tagesschau (RSS). "" bei Fehler."""
         import xml.etree.ElementTree as ET
         try:
@@ -3850,10 +3861,186 @@ class TXServer:
             text = re.sub(r"<[^>]+>", "", it.findtext("description") or "").strip()
             if not titel or "livestream" in titel.lower():
                 continue
-            zeilen.append(f"- {titel}: {text[:160]}" if text and text != titel else f"- {titel}")
+            if nur_titel:
+                zeilen.append(f"- {titel}")
+            else:
+                zeilen.append(f"- {titel}: {text[:160]}" if text and text != titel else f"- {titel}")
             if len(zeilen) >= 6:
                 break
         return ("Aktuelle Schlagzeilen (tagesschau.de):\n" + "\n".join(zeilen)) if zeilen else ""
+
+    # --- Tagesprogramm ------------------------------------------------------
+    _TP_ORTE_RE = re.compile(r"lippstadt|eickelborn|bad waldliesborn|lipperode|"
+                             r"rixbeck|benninghausen|cappel|hellinghausen|"
+                             r"geseke|erwitte|soest|wadersloh|rietberg", re.IGNORECASE)
+    _TP_DATUM_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
+
+    @staticmethod
+    def _kuerzen(text: str, n: int) -> str:
+        if len(text) <= n:
+            return text
+        return text[:n].rsplit(" ", 1)[0].rstrip(",;:-") + " ..."
+
+    async def _tp_lippstadt(self, bot: dict) -> str:
+        """Drei frische Meldungen aus der Region (SearXNG-News). Nur Treffer,
+        die einen Ort der Gegend nennen; Titel mit altem Datum fliegen raus
+        (publishedDate fehlt fast immer)."""
+        ws  = bot.get("websearch") or {}
+        url = (ws.get("searxng_url") or "http://127.0.0.1:8075/search").strip()
+        heute = datetime.now()
+        gesehen, zeilen = [], []
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as sess:
+                for q in ("Lippstadt", "Lippstadt Polizei"):
+                    async with sess.get(url, params={
+                            "q": q, "format": "json", "categories": "news",
+                            "language": "de", "time_range": "week"}) as resp:
+                        if resp.status != 200:
+                            continue
+                        res = (await resp.json()).get("results") or []
+                    for r in res:
+                        titel = re.sub(r"\s+", " ", r.get("title") or "").strip()
+                        text = re.sub(r"\s+", " ", r.get("content") or "").strip()
+                        if not titel or not self._TP_ORTE_RE.search(titel + " " + text):
+                            continue
+                        if re.search(r"blitzer|radarfalle|horoskop", titel, re.I):
+                            continue
+                        alt = False
+                        for d, m, j in self._TP_DATUM_RE.findall(titel):
+                            try:
+                                jj = int(j) + (2000 if int(j) < 100 else 0)
+                                if (heute - datetime(jj, int(m), int(d))).days > 7:
+                                    alt = True
+                            except ValueError:
+                                pass
+                        if alt:
+                            continue
+                        w = {x for x in re.findall(r"\w{5,}", titel.lower())}
+                        if any(len(w & g) >= max(2, len(w) // 2) for g in gesehen):
+                            continue        # dieselbe Meldung von anderer Zeitung
+                        gesehen.append(w)
+                        zeilen.append(f"- {titel[:110]}" + (f": {self._kuerzen(text, 80)}" if text and len(titel) < 50 else ""))
+                        if len(zeilen) >= 3:
+                            break
+                    if len(zeilen) >= 3:
+                        break
+        except Exception as e:
+            log.warning("Tagesprogramm: Lippstadt-Nachrichten nicht erreichbar: %s", e)
+            return ""
+        return "\n".join(zeilen)
+
+    async def _tagesprogramm_bauen(self, bot: dict) -> dict:
+        """Holt alle gewaehlten Themen und gibt {thema: kurzer Text} zurueck;
+        Themen, deren Quelle gerade nicht antwortet, fehlen."""
+        themen = bot.get("tagesprogramm_themen") or []
+        out = {}
+        if "wetter" in themen:
+            w = await self._bot_weather()
+            zl = [l for l in w.splitlines() if l.startswith(("Heute", "Morgen"))]
+            if zl:
+                out["wetter"] = "Wetter Lippstadt:\n" + "\n".join(zl)
+        if "nachrichten" in themen:
+            n = await self._bot_nachrichten(nur_titel=True)
+            zl, gesehen = [], []
+            for l in n.splitlines():
+                w = set(re.findall(r"\w{5,}", l.lower()))
+                if l.startswith("- ") and not any(len(w & g) >= 2 for g in gesehen):
+                    gesehen.append(w)
+                    zl.append(l[:120])
+            zl = zl[:4]
+            if zl:
+                out["nachrichten"] = "Schlagzeilen (tagesschau):\n" + "\n".join(zl)
+        if "fussball" in themen:
+            f = await self._bot_fussball("Bundesliga")
+            zl = []
+            for l in f.splitlines():
+                l = l.replace(" (noch nicht gespielt)", "").rstrip()
+                if l.startswith("1. Bundesliga") or l.startswith("Tabellenspitze") \
+                        or re.search(r"Paderborn|Dortmund|Bayern|Schalke", l):
+                    if l.startswith("Tabellenspitze"):
+                        l = ", ".join(l.split(", ")[:3])
+                    zl.append(l.strip())
+            if zl:
+                out["fussball"] = "Bundesliga:\n" + "\n".join(zl[:6])
+        if "lippstadt" in themen:
+            l = await self._tp_lippstadt(bot)
+            if l:
+                out["lippstadt"] = "Aus Lippstadt und Umgebung (Zeitungsmeldungen):\n" + l
+        return out
+
+    def _tagesprogramm_laden(self):
+        try:
+            d = json.loads(self._tagesprogramm_pfad.read_text(encoding="utf-8"))
+            if isinstance(d.get("themen"), dict):
+                self._tagesprogramm = d
+        except Exception:
+            pass
+
+    async def _tagesprogramm_refresh(self, erzwingen: bool = False) -> bool:
+        bot = self._bot_cfg()
+        heute = datetime.now().strftime("%Y-%m-%d")
+        if not erzwingen and self._tagesprogramm.get("datum") == heute \
+                and self._tagesprogramm.get("themen"):
+            return False
+        themen = await self._tagesprogramm_bauen(bot)
+        if not themen:
+            log.warning("Tagesprogramm: keine Quelle erreichbar, behalte das alte")
+            return False
+        self._tagesprogramm = {"datum": heute, "gebaut": time.time(), "themen": themen}
+        try:
+            tmp = self._tagesprogramm_pfad.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._tagesprogramm, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            tmp.replace(self._tagesprogramm_pfad)
+        except Exception as e:
+            log.warning("Tagesprogramm nicht gespeichert: %s", e)
+        log.info("Tagesprogramm %s gebaut: %s", heute, ", ".join(themen))
+        return True
+
+    async def _tagesprogramm_loop(self):
+        """Baut das Programm beim Start (falls von gestern) und danach jeden
+        Tag zur eingestellten Uhrzeit neu; bei Fehlschlag alle 15 Min. erneut."""
+        await asyncio.sleep(20)
+        while True:
+            try:
+                bot = self._bot_cfg()
+                if bot.get("tagesprogramm_enabled"):
+                    zeit = str(bot.get("tagesprogramm_zeit") or "05:30")
+                    try:
+                        hh, mm = (int(x) for x in zeit.split(":")[:2])
+                    except ValueError:
+                        hh, mm = 5, 30
+                    jetzt = datetime.now()
+                    faellig = (jetzt.hour, jetzt.minute) >= (hh, mm)
+                    if faellig or not self._tagesprogramm.get("themen"):
+                        await self._tagesprogramm_refresh()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Tagesprogramm-Schleife")
+            await asyncio.sleep(900)
+
+    def _tagesprogramm_hinweis(self, bot: dict) -> str:
+        """Hinweistext fuers Prompt ("" wenn aus oder nichts da). Je Anfrage
+        nur ein paar zufaellige Themen, damit der Hinweis klein bleibt und
+        Robert nicht immer dasselbe aufgreift."""
+        if not bot.get("tagesprogramm_enabled"):
+            return ""
+        tp = getattr(self, "_tagesprogramm", None) or {}
+        themen = tp.get("themen") or {}
+        if not themen:
+            return ""
+        n = max(1, int(bot.get("tagesprogramm_pro_antwort", 2) or 2))
+        namen = list(themen)
+        if len(namen) > n:
+            namen = sorted(random.sample(namen, n), key=list(themen).index)
+        return ("Dein Tagesprogramm von heute (echte Meldungen, nur zur Auswahl): "
+                "Du darfst daraus von dir aus EIN Thema einbringen, aber nur, "
+                "wenn es gerade zum Gespräch passt oder eine Pause ist -- nicht "
+                "aufzählen, nicht vorlesen, in einem lockeren Satz. Hast du es "
+                "schon erzählt (siehe Verlauf), nimm etwas anderes oder lass es. "
+                "Nenne nur, was hier WÖRTLICH steht, erfinde nichts dazu:\n"
+                + "\n".join(themen[k] for k in namen))
 
     async def _bot_websearch(self, bot: dict, query: str) -> str:
         """Fragt die lokale SearXNG-Instanz ab (JSON-API) und liefert eine
@@ -4394,6 +4581,10 @@ class TXServer:
                        ". Danach folgt normal dein Funkspruch, ohne die Klammern "
                        "vorzulesen. Im Zweifel " + f"[{stimmungen[0]}]" + ". "
                        "Antwortest du mit SKIP, lass die Klammer weg.")
+        if not search_context:
+            tp = self._tagesprogramm_hinweis(bot)
+            if tp:
+                spaet.append(tp)
         if search_context:
             spaet.append("Aktuelle Websuche-Ergebnisse (nutze sie nur, "
                        "wenn sie zur Frage passen, fass sie kurz und locker "
@@ -8686,6 +8877,7 @@ class TXServer:
 
     async def _on_startup(self, _app):
         await self._discover_rooms()
+        self._tagesprogramm_task = asyncio.create_task(self._tagesprogramm_loop())
 
     def build_app(self) -> web.Application:
         app = web.Application(middlewares=[self.cors_middleware])
