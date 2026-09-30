@@ -4034,13 +4034,7 @@ class TXServer:
         namen = list(themen)
         if len(namen) > n:
             namen = sorted(random.sample(namen, n), key=list(themen).index)
-        return ("Dein Tagesprogramm von heute (echte Meldungen, nur zur Auswahl): "
-                "Du darfst daraus von dir aus EIN Thema einbringen, aber nur, "
-                "wenn es gerade zum Gespräch passt oder eine Pause ist -- nicht "
-                "aufzählen, nicht vorlesen, in einem lockeren Satz. Hast du es "
-                "schon erzählt (siehe Verlauf), nimm etwas anderes oder lass es. "
-                "Nenne nur, was hier WÖRTLICH steht, erfinde nichts dazu:\n"
-                + "\n".join(themen[k] for k in namen))
+        return "Tagesprogramm heute:\n" + "\n".join(themen[k] for k in namen)
 
     async def _bot_websearch(self, bot: dict, query: str) -> str:
         """Fragt die lokale SearXNG-Instanz ab (JSON-API) und liefert eine
@@ -4568,6 +4562,15 @@ class TXServer:
                    "Gefühl für das Datum, und schreib in Suchanfragen kein Datum, "
                    "das du nicht sicher weisst. Solche [Hinweise] sind keine "
                    "Funksprüche, antworte nicht darauf.")
+        # Regel zum Tagesprogramm steht im statischen Teil (zwischengespeichert),
+        # im Hinweis stehen nur die Daten.
+        if bot.get("tagesprogramm_enabled"):
+            system += ("\n\nIm [Hinweis] steht manchmal ein \"Tagesprogramm heute\" "
+                       "mit echten Meldungen. Du darfst daraus von dir aus EIN Thema "
+                       "einbringen, aber nur, wenn es zum Gespräch passt oder eine "
+                       "Pause ist: nicht aufzählen, in einem lockeren Satz, nichts "
+                       "wiederholen, was du schon erzählt hast. Nenne nur, was dort "
+                       "WÖRTLICH steht.")
         spaet = [self._jetzt_satz(datetime.fromtimestamp(jetzt_ts) if jetzt_ts else None)]   # Teile des Hinweises vor dem letzten Spruch
         # Stimmungsregel nur, solange eine Stimme mit Stimmungen spricht
         # (2026-09-27): XTTS spricht fest mit dem xtts_speaker, die gewaehlte
