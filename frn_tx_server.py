@@ -4329,13 +4329,13 @@ class TXServer:
                "August", "September", "Oktober", "November", "Dezember")
 
     @classmethod
-    def _jetzt_satz(cls) -> str:
+    def _jetzt_satz(cls, n: "datetime | None" = None) -> str:
         """Datum/Uhrzeit fuer den Prompt. Ohne das kennt das Modell nur seinen
         Trainingsstand -- am 24.09.2026 suchte es deshalb nach "Fussball heute
         Abend 24. Mai 2024" (User-Frage: "hat Robert keine aktuelle Zeit?").
         Bewusst ohne Sekunden: der Wert landet sonst bei jedem Aufruf anders im
         Prompt, was das Zwischenspeichern auf der Ollama-Seite stoert."""
-        n = datetime.now()
+        n = n or datetime.now()
         return (f"Jetzt ist {cls._WOCHENTAGE[n.weekday()]}, der {n.day}. "
                 f"{cls._MONATE[n.month - 1]} {n.year}, {n.hour}:{n.minute:02d} Uhr.")
 
@@ -4360,7 +4360,8 @@ class TXServer:
     def _bot_build_prompt(self, bot: dict, hist: list,
                           search_context: str = "",
                           anker_key: str | None = None,
-                          raum: str = "") -> tuple[str, list]:
+                          raum: str = "",
+                          jetzt_ts: float | None = None) -> tuple[str, list]:
         """Baut System-Anweisung + Nachrichtenverlauf (provider-neutral).
         Nachrichten: role 'user' (fremde Funksprüche) / 'assistant' (eigene).
         search_context: optionale Websuche-Treffer, werden dem System-Prompt
@@ -4380,7 +4381,7 @@ class TXServer:
                    "Gefühl für das Datum, und schreib in Suchanfragen kein Datum, "
                    "das du nicht sicher weisst. Solche [Hinweise] sind keine "
                    "Funksprüche, antworte nicht darauf.")
-        spaet = [self._jetzt_satz()]   # Teile des Hinweises vor dem letzten Spruch
+        spaet = [self._jetzt_satz(datetime.fromtimestamp(jetzt_ts) if jetzt_ts else None)]   # Teile des Hinweises vor dem letzten Spruch
         # Stimmungsregel nur, solange eine Stimme mit Stimmungen spricht
         # (2026-09-27): XTTS spricht fest mit dem xtts_speaker, die gewaehlte
         # Stimmung wuerde verworfen -- die Regel kostete dann ~90 Tokens je
@@ -4416,7 +4417,7 @@ class TXServer:
         GAP_NOTE_S   = 300    # ab 5 Min. Pause einen Hinweis einfuegen (war 3 --
                                # zu kurz auf einem belebten Kanal, wo Antworten
                                # oft ein paar Minuten brauchen)
-        now = time.time()
+        now = jetzt_ts or time.time()   # Replays rechnen mit der Zeit des Originals
         n_ziel = int(bot.get("history_len", 10))
         kandidaten = [(ts, who, txt) for ts, who, txt in hist if now - ts <= STALE_DROP_S]
         # Blockweise: das Fenster beginnt am gemerkten Anker und waechst, bis es
@@ -4631,7 +4632,8 @@ class TXServer:
     async def _bot_ollama(self, bot: dict, hist: list, with_raw: bool = False,
                           search_query: str = "", room_name: str = "",
                           trace_ts: float | None = None,
-                          force_model: bool = False):
+                          force_model: bool = False,
+                          jetzt_ts: float | None = None):
         """Entscheidung + Antwort des KI-Funkers. Provider laut voice.bot.provider
         (ollama = lokal/eigener Server, gemini = Google-Cloud). Das Modell darf mit
         SKIP schweigen. Liefert "" wenn der Bot nicht antworten soll.
@@ -4660,7 +4662,8 @@ class TXServer:
             # (2026-09-14: erfundener Wetterbericht nach 0 Treffern).
             search_context = "(SUCHE FEHLGESCHLAGEN: kein Ergebnis, die Suchdienste sind gerade nicht erreichbar. Du hast also KEINE aktuellen Infos dazu. Sag ehrlich und kurz, dass du das gerade nicht nachschauen kannst. Erfinde auf KEINEN Fall Wetter, Nachrichten oder Ergebnisse.)"
         system, messages = self._bot_build_prompt(bot, hist, search_context,
-                                                  anker_key=room_name or None)
+                                                  anker_key=room_name or None,
+                                                  jetzt_ts=jetzt_ts)
         provider = (bot.get("provider") or "ollama").strip().lower()
         _t0 = time.time()
         if provider == "gemini":
@@ -5578,7 +5581,8 @@ class TXServer:
         t0 = time.time()
         answer, raw = await self._bot_ollama(
             bot, tr["hist"], with_raw=True,
-            force_model=bool(model) and (bot.get("provider") or "ollama") != "gemini")
+            force_model=bool(model) and (bot.get("provider") or "ollama") != "gemini",
+            jetzt_ts=float(tr.get("started") or ts))
         return web.json_response({
             "would_reply": bool(answer),
             "answer": answer or "SKIP",
@@ -6583,14 +6587,6 @@ class TXServer:
         name = self._bot_cfg().get("name") or "Robert"
         hist = [(r["timestamp"], f"{name} (du)" if r["callsign"] == name else (r["callsign"] or "Funker"),
                  r["text"]) for r in rows]
-        # Zeitstempel auf "jetzt" schieben, Abstaende bleiben erhalten:
-        # _bot_build_prompt verwirft alles aelter als eine Stunde (STALE_DROP_S).
-        # Bei Archiv-Gespraechen blieb der Verlauf dadurch LEER -- Gemini
-        # antwortete mit HTTP 400 ("contents is not specified"), Ollama
-        # kontextlos mit "Hallo, hier ist Robert" (2026-09-17 gefunden).
-        if hist:
-            versatz = time.time() - hist[-1][0]
-            hist = [(ts + versatz, wer, txt) for ts, wer, txt in hist]
         bot = dict(self._bot_cfg())
         # Anbieter waehlbar (2026-09-17): vorher konnte nur das Ollama-Modell
         # getauscht werden, obwohl Gemini konfiguriert ist und antwortet.
@@ -6604,7 +6600,8 @@ class TXServer:
         t0 = time.time()
         answer, raw = await self._bot_ollama(
             bot, hist, with_raw=True,
-            force_model=bool(model) and (bot.get("provider") or "ollama") != "gemini")
+            force_model=bool(model) and (bot.get("provider") or "ollama") != "gemini",
+            jetzt_ts=float(eintrag["timestamp"]) + 3)   # Uhrzeit von damals, nicht von jetzt
         # Stimmungs-Markierung wie im Funkbetrieb abtrennen (2026-09-25: die
         # Analyse-Seite zeigte "[neutral] Stimmt, ..." roh an).
         answer, stimmung = self._emotion_abtrennen(answer or "", bot)
