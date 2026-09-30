@@ -3929,6 +3929,54 @@ class TXServer:
             return ""
         return "\n".join(zeilen)
 
+    _TP_LSPIEL_RE = re.compile(
+        r"(\d{1,2})\.(\d{1,2})\.(\d{4}),?\s*(?:um\s*)?(\d{1,2})[.:](\d{2})(?:\s*Uhr)?[,:.]?\s*"
+        r"([A-ZÄÖÜ][\wäöüß]+)\s*(?:gegen|vs\.?|[-–])\s*([A-ZÄÖÜ][\wäöüß]+)([^\n]{0,25})")
+
+    async def _tp_laenderspiel(self, bot: dict) -> str:
+        """Naechstes Spiel der deutschen Nationalmannschaft. OpenLigaDB kennt
+        keine Laenderspiele, deshalb aus den Suchtreffern: fruehester Termin
+        ab heute im Muster "TT.MM.JJJJ, HH.MM Uhr, A gegen B", der
+        Deutschland nennt. "" wenn nichts Eindeutiges gefunden wird."""
+        ws  = bot.get("websearch") or {}
+        url = (ws.get("searxng_url") or "http://127.0.0.1:8075/search").strip()
+        heute = datetime.now().date()
+        treffer = set()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as sess:
+                for q in ("Deutschland Länderspiel morgen Anstoß",
+                          "DFB-Team Länderspiel Spielplan Oktober 2026",
+                          "Nationalmannschaft Deutschland nächstes Spiel"):
+                    async with sess.get(url, params={"q": q, "format": "json",
+                                                     "language": "de",
+                                                     "time_range": "week"}) as resp:
+                        if resp.status != 200:
+                            continue
+                        res = (await resp.json()).get("results") or []
+                    for r in res:
+                        txt = (r.get("title") or "") + " " + (r.get("content") or "")
+                        for d, m, j, hh, mi, t1, t2, rest in self._TP_LSPIEL_RE.findall(txt):
+                            if "Deutschland" not in (t1, t2) or re.search(
+                                    r"frauen|damen|\bU\s?\d\d\b", rest, re.I):
+                                continue
+                            paar = f"{t1} gegen {t2}"
+                            try:
+                                tag = datetime(int(j), int(m), int(d)).date()
+                            except ValueError:
+                                continue
+                            if tag >= heute:
+                                treffer.add((tag, int(hh), int(mi), paar.strip()))
+        except Exception as e:
+            log.warning("Tagesprogramm: Länderspiel-Suche fehlgeschlagen: %s", e)
+            return ""
+        if not treffer:
+            return ""
+        tag, hh, mi, paar = min(treffer)
+        diff = (tag - heute).days
+        wann = {0: "HEUTE", 1: "MORGEN"}.get(diff, f"am {self._WOTAG[tag.weekday()]} {tag:%d.%m.%Y}")
+        return f"Länderspiel: {paar}, {wann} um {hh}:{mi:02d} Uhr" \
+            if diff <= 1 else f"Nächstes Länderspiel: {paar}, {wann} um {hh}:{mi:02d} Uhr"
+
     async def _tagesprogramm_bauen(self, bot: dict) -> dict:
         """Holt alle gewaehlten Themen und gibt {thema: kurzer Text} zurueck;
         Themen, deren Quelle gerade nicht antwortet, fehlen."""
@@ -3960,8 +4008,11 @@ class TXServer:
                     if l.startswith("Tabellenspitze"):
                         l = ", ".join(l.split(", ")[:3])
                     zl.append(l.strip())
-            if zl:
-                out["fussball"] = "Bundesliga:\n" + "\n".join(zl[:6])
+            ls = await self._tp_laenderspiel(bot)
+            if zl or ls:
+                out["fussball"] = "Fußball:\n" + ("\n".join([ls] if ls else [])
+                                                 + ("\n" if ls and zl else "")
+                                                 + "\n".join(zl[:6]))
         if "lippstadt" in themen:
             l = await self._tp_lippstadt(bot)
             if l:
@@ -4033,7 +4084,12 @@ class TXServer:
         n = max(1, int(bot.get("tagesprogramm_pro_antwort", 2) or 2))
         namen = list(themen)
         if len(namen) > n:
-            namen = sorted(random.sample(namen, n), key=list(themen).index)
+            # Spielt Deutschland heute/morgen, ist das Fussball-Thema gesetzt
+            fest = [k for k in namen if k == "fussball"
+                    and re.search(r"Länderspiel: .*\b(HEUTE|MORGEN)\b", themen[k])]
+            rest = [k for k in namen if k not in fest]
+            namen = fest + random.sample(rest, max(0, n - len(fest)))
+            namen = sorted(namen, key=list(themen).index)
         return "Tagesprogramm heute:\n" + "\n".join(themen[k] for k in namen)
 
     async def _bot_websearch(self, bot: dict, query: str) -> str:
