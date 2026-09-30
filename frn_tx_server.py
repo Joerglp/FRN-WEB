@@ -4906,6 +4906,10 @@ class TXServer:
                              flags=re.IGNORECASE).strip()
             # Emojis raus (werden vorgelesen, Prompt-Verbot reicht nicht immer)
             cleaned = self._EMOJI_RE.sub("", cleaned)
+            # "am Start" ist per Persona verboten, das Modell setzt es aber
+            # trotzdem gern (2026-09-30: bei "wer ist noch QRV" jedes Mal) --
+            # "bin am Start" -> "bin dabei" passt grammatisch immer.
+            cleaned = re.sub(r"\bam Start\b", "dabei", cleaned, flags=re.IGNORECASE)
             cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
             # Modell wiederholt manchmal die KOMPLETTE Antwort ein zweites Mal
             # (leicht umformuliert, live beobachtet 2026-08-15 bei qwen3.5 nach
