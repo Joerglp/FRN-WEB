@@ -526,6 +526,20 @@ def count_entries_between(room: str, ts_start: float, ts_end: float) -> int:
     return row[0]
 
 
+def get_previous_entry(room: str, timestamp: float, exclude_id: int) -> dict | None:
+    """Letzter Eintrag im Raum VOR timestamp (fuer das automatische Kleben)."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, timestamp, room, callsign, duration_s FROM transmissions "
+            "WHERE room = ? AND timestamp < ? AND id != ? "
+            "ORDER BY timestamp DESC LIMIT 1", (room, timestamp, exclude_id)
+        ).fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "timestamp": row["timestamp"], "room": row["room"],
+            "callsign": row["callsign"], "duration_s": row["duration_s"]}
+
+
 def update_callsign(entry_id: int, callsign: str) -> bool:
     with _get_conn() as conn:
         cur = conn.execute(

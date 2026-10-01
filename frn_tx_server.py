@@ -6357,6 +6357,57 @@ class TXServer:
         finally:
             self._archive_busy_entries.difference_update(ids)
 
+    async def archive_auto_kleben(self, room: str, new_id: int) -> None:
+        """Klebt einen neuen Archiv-Eintrag automatisch an den vorigen, wenn es
+        offensichtlich derselbe Sprecher in einem Zug war: gleiches, bekanntes
+        Rufzeichen, gleicher Raum, Luecke <= max_gap_s, nichts dazwischen.
+        Bei jedem Zweifel oder Fehler bleiben beide Originale unveraendert."""
+        cfg = (self.cfg.get("voice", {}) or {}).get("archive_auto_kleben", {}) or {}
+        if not cfg.get("enabled", True):
+            return
+        max_gap = float(cfg.get("max_gap_s", 2.0))
+        max_total = float(cfg.get("max_total_s", 90.0))
+        ids = ()
+        try:
+            loop = asyncio.get_running_loop()
+            new = await loop.run_in_executor(None, _archive.get_entry, new_id)
+            if not new or not new.get("audio_file") or not (new.get("callsign") or "").strip():
+                return
+            prev = await loop.run_in_executor(
+                None, _archive.get_previous_entry, room, new["timestamp"], new_id)
+            if not prev:
+                return
+            call = new["callsign"].strip()
+            if (prev["callsign"] or "").strip() != call:
+                return
+            if call.lower() == (self._bot_cfg().get("name") or "Robert").lower():
+                return
+            gap = new["timestamp"] - (prev["timestamp"] + (prev["duration_s"] or 0.0))
+            if gap > max_gap:
+                return
+            if (prev["duration_s"] or 0.0) + (new["duration_s"] or 0.0) + max(gap, 0.0) > max_total:
+                return
+            ids = (prev["id"], new_id)
+            if any(i in self._archive_busy_entries for i in ids):
+                ids = ()
+                return
+            self._archive_busy_entries.update(ids)
+            resp = await self._do_archive_merge(prev["id"], new_id)
+            if getattr(resp, "status", 200) == 200:
+                try:
+                    merged_id = json.loads(resp.text).get("new_id")
+                except Exception:
+                    merged_id = None
+                log.info("[%s] Archiv: #%d + #%d automatisch geklebt (%s, Luecke %.1fs) -> #%s",
+                         room, prev["id"], new_id, call, max(gap, 0.0), merged_id)
+            else:
+                log.info("[%s] Archiv: automatisches Kleben #%d + #%d nicht moeglich (HTTP %s)",
+                         room, prev["id"], new_id, resp.status)
+        except Exception as e:
+            log.warning("Archiv: automatisches Kleben fehlgeschlagen: %s", e)
+        finally:
+            self._archive_busy_entries.difference_update(ids)
+
     async def _do_archive_merge(self, id_a: int, id_b: int):
         loop = asyncio.get_running_loop()
         entry_a = await loop.run_in_executor(None, _archive.get_entry, id_a)
@@ -9097,6 +9148,7 @@ def main():
             pipeline.on_transcript = server.on_transcript
             pipeline.resolve_callsign = server.bot_archive_callsign
             pipeline.sprecher_info = server.sprecher_info
+            pipeline.on_archived = server.archive_auto_kleben
             pipeline.resolve_known_text = server.resolve_known_text
             pipeline.ist_angesprochen = server.bot_angesprochen
             pipeline.debug_trace = server.debug_trace_step

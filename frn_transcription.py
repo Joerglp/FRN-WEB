@@ -1100,8 +1100,15 @@ class TranscriptionPipeline:
 
         try:
             from frn_archive import add_entry
-            if await add_entry(wav_path, room, callsign, ts, text, confidence, sprecher=sprecher):
+            new_id = await add_entry(wav_path, room, callsign, ts, text, confidence, sprecher=sprecher)
+            if new_id:
                 _mark_archived(wav_path)
+                oa = getattr(self, "on_archived", None)
+                if oa:
+                    try:
+                        asyncio.create_task(oa(room, new_id))
+                    except Exception as e:
+                        log.debug("on_archived-Hook: %s", e)
         except Exception as e:
             log.warning("[%s] Archiv-Fehler: %s", room, e)
 
