@@ -5654,6 +5654,49 @@ class TXServer:
                     bot["ollama_token"] = tok
             if "trigger" in body:
                 bot["trigger"] = _strlist(body["trigger"])
+            if "tagesprogramm_enabled" in body:
+                bot["tagesprogramm_enabled"] = bool(body["tagesprogramm_enabled"])
+            if isinstance(body.get("tagesprogramm_zeit"), str):
+                m_z = re.fullmatch(r"\s*([01]?\d|2[0-3]):([0-5]\d)\s*", body["tagesprogramm_zeit"])
+                if m_z:
+                    bot["tagesprogramm_zeit"] = f"{int(m_z.group(1)):02d}:{m_z.group(2)}"
+            if "tagesprogramm_themen" in body:
+                erlaubt = ("wetter", "nachrichten", "fussball", "lippstadt")
+                bot["tagesprogramm_themen"] = [t for t in _strlist(body["tagesprogramm_themen"])
+                                               if t in erlaubt]
+            if "tagesprogramm_pro_antwort" in body:
+                try:
+                    bot["tagesprogramm_pro_antwort"] = max(1, min(4, int(body["tagesprogramm_pro_antwort"])))
+                except (TypeError, ValueError):
+                    pass
+            if isinstance(body.get("websearch"), dict):
+                w_in = body["websearch"]
+                w = dict(self._BOT_DEFAULTS["websearch"], **(bot.get("websearch") or {}))
+                if "enabled" in w_in:
+                    w["enabled"] = bool(w_in["enabled"])
+                if isinstance(w_in.get("searxng_url"), str) and w_in["searxng_url"].strip():
+                    w["searxng_url"] = w_in["searxng_url"].strip()
+                if "max_results" in w_in:
+                    try:
+                        w["max_results"] = max(1, min(10, int(w_in["max_results"])))
+                    except (TypeError, ValueError):
+                        pass
+                bot["websearch"] = w
+            if isinstance(body.get("control"), dict):
+                c_in = body["control"]
+                c = dict(self._BOT_DEFAULTS["control"], **(bot.get("control") or {}))
+                for bk in ("enabled", "confirm"):
+                    if bk in c_in:
+                        c[bk] = bool(c_in[bk])
+                for lk in ("off", "on"):
+                    if lk in c_in:
+                        liste = _strlist(c_in[lk])
+                        if liste:          # leere Liste wuerde die Steuerung unbrauchbar machen
+                            c[lk] = liste
+                for tk in ("reply_off", "reply_on"):
+                    if isinstance(c_in.get(tk), str):
+                        c[tk] = c_in[tk].strip()[:300]
+                bot["control"] = c
             if "rooms" in body:
                 bot["rooms"] = _strlist(body["rooms"])
             if "memory" in body and isinstance(body["memory"], list):
@@ -5714,6 +5757,8 @@ class TXServer:
         out = dict(self._BOT_DEFAULTS)
         out.update({k: v for k, v in bot.items() if not k.startswith("_")})
         # Geheimnisse nie im Klartext ausliefern — nur "gesetzt/nicht gesetzt"
+        out["websearch"] = dict(self._BOT_DEFAULTS["websearch"], **(bot.get("websearch") or {}))
+        out["control"]   = dict(self._BOT_DEFAULTS["control"], **(bot.get("control") or {}))
         out["ollama_token"]   = self._TOKEN_MASK if bot.get("ollama_token") else ""
         out["gemini_api_key"] = self._TOKEN_MASK if bot.get("gemini_api_key") else ""
         # Leere System-Anweisung → Standardvorlage anzeigen (zum Anpassen)
@@ -5721,6 +5766,90 @@ class TXServer:
             out["system_prompt"] = self._BOT_SYSTEM_DEFAULT
         out["_grenzen"] = self._GRENZEN
         return web.json_response(out)
+
+    def _cfg_auf_platte(self, aendern) -> None:
+        """config.json neu lesen, aendern(disk) anwenden, zurueckschreiben."""
+        if not self.args.config:
+            raise RuntimeError("kein --config Pfad")
+        cfg_path = Path(self.args.config)
+        disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+        aendern(disk)
+        cfg_path.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                            encoding="utf-8")
+
+    async def handle_admin_settings(self, request):
+        """GET/POST /api/admin/settings -- Transkription (Whisper), Archiv-Kleben
+        und Seitentitel. Whisper-Prompt/-Hotwords/-Server liest die Pipeline bei
+        jedem Aufruf aus config.json (wirkt sofort), die Kleben-Werte bei jeder
+        neuen Aufnahme, der Seitentitel beim naechsten Laden der Seite."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+            wh = self.cfg.setdefault("whisper", {})
+            vo = self.cfg.setdefault("voice", {})
+            kl = vo.setdefault("archive_auto_kleben", {})
+            ui = self.cfg.setdefault("ui", {})
+            w_in = body.get("whisper") if isinstance(body.get("whisper"), dict) else {}
+            for k, lim in (("remote_url", 300), ("initial_prompt", 1500), ("hotwords", 1500)):
+                if isinstance(w_in.get(k), str):
+                    wh[k] = w_in[k].strip()[:lim]
+            k_in = body.get("archive_auto_kleben") if isinstance(body.get("archive_auto_kleben"), dict) else {}
+            if "enabled" in k_in:
+                kl["enabled"] = bool(k_in["enabled"])
+            for k, lo, hi in (("max_gap_s", 0.0, 10.0), ("max_total_s", 10.0, 600.0)):
+                if k in k_in:
+                    try:
+                        kl[k] = max(lo, min(hi, float(k_in[k])))
+                    except (TypeError, ValueError):
+                        pass
+            u_in = body.get("ui") if isinstance(body.get("ui"), dict) else {}
+            for k in ("title", "subtitle"):
+                if isinstance(u_in.get(k), str) and u_in[k].strip():
+                    ui[k] = u_in[k].strip()[:80]
+            try:
+                def _schreiben(disk):
+                    disk.setdefault("whisper", {}).update(wh)
+                    disk.setdefault("voice", {}).setdefault("archive_auto_kleben", {}).update(kl)
+                    disk.setdefault("ui", {}).update(ui)
+                self._cfg_auf_platte(_schreiben)
+            except Exception as e:
+                log.warning("Einstellungen nicht gespeichert: %s", e)
+                return web.json_response({"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
+            log.info("Einstellungen (Whisper/Archiv-Kleben/UI) gespeichert")
+        wh = self.cfg.get("whisper") or {}
+        kl = (self.cfg.get("voice") or {}).get("archive_auto_kleben") or {}
+        ui = self.cfg.get("ui") or {}
+        tc = getattr(self, "_transcription_cfg", None) or {}
+        return web.json_response({
+            "whisper": {"remote_url": wh.get("remote_url", ""),
+                        "initial_prompt": wh.get("initial_prompt", ""),
+                        "hotwords": wh.get("hotwords", ""),
+                        "model": wh.get("model", ""), "language": wh.get("language", "de"),
+                        "lokal_modell": tc.get("whisper_model", "medium")},
+            "archive_auto_kleben": {"enabled": kl.get("enabled", True),
+                                    "max_gap_s": kl.get("max_gap_s", 2.0),
+                                    "max_total_s": kl.get("max_total_s", 90.0)},
+            "ui": {"title": ui.get("title", "FRN Webstreams"),
+                   "subtitle": ui.get("subtitle", "Free Radio Network")},
+        })
+
+    async def handle_admin_tagesprogramm(self, request):
+        """GET: aktuelles Tagesprogramm; POST: jetzt neu bauen."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        neu = None
+        if request.method == "POST":
+            neu = await self._tagesprogramm_refresh(erzwingen=True)
+        tp = getattr(self, "_tagesprogramm", None) or {}
+        return web.json_response({
+            "datum": tp.get("datum"), "gebaut": tp.get("gebaut"),
+            "themen": tp.get("themen") or {}, "neu_gebaut": neu})
 
     async def handle_admin_bot_probe(self, request):
         """POST /api/admin/bot/probe {room, text, wer?} -- tut so, als haette
@@ -7999,6 +8128,17 @@ class TXServer:
                 ("Gesprächsfenster", f"{int(bot.get('conversation_window_s', 0))} s", None),
                 ("Räume",            ", ".join(bot.get("rooms")) or "alle", None),
              ]},
+            {"title": "Roberts Quellen", "tab": "bot", "icon": "📰",
+             "items": [
+                ("Tagesprogramm",   "AN" if bot.get("tagesprogramm_enabled") else "AUS",
+                                    bool(bot.get("tagesprogramm_enabled"))),
+                ("Neu um",          str(bot.get("tagesprogramm_zeit")) + " Uhr", None),
+                ("Themen",          ", ".join(bot.get("tagesprogramm_themen") or []) or "—", None),
+                ("Websuche",        "AN" if (bot.get("websearch") or {}).get("enabled") else "AUS",
+                                    bool((bot.get("websearch") or {}).get("enabled"))),
+                ("Sprachsteuerung", "AN" if (bot.get("control") or {}).get("enabled", True) else "AUS",
+                                    bool((bot.get("control") or {}).get("enabled", True))),
+             ]},
             {"title": "Automatik (Namens-Antwort)", "tab": "autoreply", "icon": "💬",
              "items": [
                 ("Aktiv",       "AN" if ar.get("enabled") else "AUS",
@@ -8015,13 +8155,18 @@ class TXServer:
                 ("Sprache", voice.get("language", "de"), None),
                 ("TTS-Server", _host(voice.get("remote_url")), None),
              ]},
-            {"title": "Transkription (Whisper)", "tab": None, "icon": "📝",
+            {"title": "Transkription & Archiv", "tab": "audio", "icon": "📝",
              "items": [
                 ("Modell",  wh.get("model", "—"), None),
                 ("Sprache", wh.get("language", "de"), None),
                 ("Whisper-Server", _host(wh.get("remote_url")) + " (leer = lokal auf dem Pi)"
                                    if not wh.get("remote_url") else _host(wh.get("remote_url")),
                                    None),
+                ("Archiv: Kleben", "AN" if ((voice.get("archive_auto_kleben") or {}).get("enabled", True))
+                                   else "AUS",
+                                   bool((voice.get("archive_auto_kleben") or {}).get("enabled", True))),
+                ("Sprecher-Erkennung", "AN" if (voice.get("speaker_id") or {}).get("enabled") else "AUS",
+                                   bool((voice.get("speaker_id") or {}).get("enabled"))),
              ]},
             {"title": "FRN-Server & Räume", "tab": "server", "icon": "📡",
              "items": [
@@ -9075,6 +9220,10 @@ class TXServer:
         app.router.add_get ("/api/admin/auto-reply/models", self.handle_admin_auto_reply_models)
         app.router.add_post("/api/admin/auto-reply/test",   self.handle_admin_auto_reply_test)
         app.router.add_get ("/api/admin/bot",       self.handle_admin_bot)
+        app.router.add_get ("/api/admin/settings",  self.handle_admin_settings)
+        app.router.add_post("/api/admin/settings",  self.handle_admin_settings)
+        app.router.add_get ("/api/admin/tagesprogramm", self.handle_admin_tagesprogramm)
+        app.router.add_post("/api/admin/tagesprogramm", self.handle_admin_tagesprogramm)
         app.router.add_post("/api/admin/bot",       self.handle_admin_bot)
         app.router.add_post("/api/admin/bot/test",  self.handle_admin_bot_test)
         app.router.add_post("/api/admin/bot/probe", self.handle_admin_bot_probe)

@@ -506,6 +506,115 @@ audio {
 .bot-subtab-content { display: none; }
 .bot-subtab-content.active { display: block; }
 
+
+/* ── Admin-Navigation und Karten (2026-10-01) ── */
+:root { --text-muted: var(--muted); }
+.admin-nav { background: var(--inset); border-bottom: 1px solid var(--border); }
+.admin-groups {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px 0;
+}
+.admin-group {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 14px; background: none; cursor: pointer;
+  border: 1px solid transparent; border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  font-family: 'Rajdhani', sans-serif; font-size: .95rem; font-weight: 600;
+  letter-spacing: .04em; color: var(--muted);
+  transition: color .15s, background .15s;
+}
+.admin-group:hover:not(.active) { color: var(--text); background: rgba(79,195,247,0.05); }
+.admin-group.active {
+  color: var(--accent); background: var(--panel);
+  border-color: var(--border); position: relative; top: 1px;
+}
+.admin-group .ag-icon { font-size: 1.05em; }
+.admin-nav .admin-tabs {
+  background: var(--panel); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  padding: 0 8px;
+}
+.admin-nav .admin-tabs:empty { display: none; }
+.admin-nav .admin-tab { flex: 0 0 auto; min-width: 0; padding: 9px 14px; }
+
+.adm-card {
+  background: rgba(20,32,50,0.45); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
+}
+.adm-card-title {
+  display: flex; align-items: center; gap: 8px;
+  font-family: 'Share Tech Mono', monospace; font-size: .72rem;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--accent);
+  margin: 0 0 4px;
+}
+.adm-card-sub { font-size: .76rem; color: var(--muted); line-height: 1.5; margin: 0 0 12px; }
+.adm-card-sub:empty { display: none; }
+.adm-hint { font-size: .72rem; color: var(--muted); line-height: 1.45; margin-top: 6px; }
+.adm-fields {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px; margin-top: 10px;
+}
+.adm-fields.wide { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.adm-fields .form-field label { text-transform: none; letter-spacing: 0; font-size: .74rem; }
+.adm-fields .form-field label small { display: block; color: var(--muted); opacity: .8; font-size: .92em; }
+.adm-fields textarea, .adm-card textarea {
+  width: 100%; resize: vertical; background: var(--inset); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+  font-family: inherit; font-size: .85em; box-sizing: border-box;
+}
+.adm-fields textarea:focus, .adm-card textarea:focus { border-color: var(--accent); outline: none; }
+
+/* Schalter statt Häkchen */
+.adm-sw {
+  display: flex; align-items: flex-start; gap: 12px; cursor: pointer;
+  padding: 8px 0; font-size: .9rem; line-height: 1.35;
+}
+.adm-sw + .adm-sw { border-top: 1px solid rgba(42,63,95,0.5); }
+.adm-sw input[type=checkbox] {
+  appearance: none; -webkit-appearance: none; flex: 0 0 38px; width: 38px; height: 21px;
+  border-radius: 11px; background: var(--dim); position: relative; cursor: pointer;
+  border: 1px solid var(--border); margin: 1px 0 0; transition: background .15s;
+}
+.adm-sw input[type=checkbox]::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px;
+  border-radius: 50%; background: var(--muted); transition: transform .15s, background .15s;
+}
+.adm-sw input[type=checkbox]:checked { background: rgba(79,195,247,0.28); border-color: var(--accent); }
+.adm-sw input[type=checkbox]:checked::after { transform: translateX(17px); background: var(--accent); }
+.adm-sw .adm-sw-text small { display: block; color: var(--muted); font-size: .78rem; margin-top: 2px; }
+.adm-sw.warn input[type=checkbox]:checked { background: rgba(240,180,41,0.25); border-color: #f0b429; }
+.adm-sw.warn input[type=checkbox]:checked::after { background: #f0b429; }
+
+.adm-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: .82rem; color: var(--muted); }
+.adm-inline input[type=number], .adm-inline input[type=text], .adm-inline input[type=time] {
+  background: var(--inset); border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+  font-family: 'Share Tech Mono', monospace; font-size: .88em; padding: 5px 8px;
+}
+.adm-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.adm-chip {
+  display: flex; align-items: center; gap: 6px; padding: 5px 12px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 16px; font-size: .84rem; color: var(--muted);
+}
+.adm-chip:has(input:checked) { border-color: var(--accent); color: var(--accent); background: rgba(79,195,247,0.08); }
+.adm-chip input { accent-color: var(--accent); }
+.adm-savebar {
+  position: sticky; bottom: 0; margin: 18px -20px -20px; padding: 12px 20px;
+  background: linear-gradient(0deg, var(--panel) 70%, rgba(20,28,43,0)); display: flex;
+  align-items: center; gap: 14px; z-index: 2;
+}
+.adm-savebar .admin-msg { margin: 0; }
+.adm-pill {
+  display: inline-block; font-family: 'Share Tech Mono', monospace; font-size: .62rem;
+  letter-spacing: .08em; padding: 2px 7px; border-radius: 10px; text-transform: uppercase;
+  background: rgba(79,195,247,0.12); color: var(--accent);
+}
+.adm-pill.live { background: rgba(76,175,80,0.15); color: var(--green2); }
+.adm-pill.save { background: rgba(240,180,41,0.15); color: #f0b429; }
+@media (max-width: 600px) {
+  .admin-group { padding: 6px 10px; font-size: .85rem; }
+  .admin-group .ag-label { display: none; }
+  .admin-group.active .ag-label { display: inline; }
+  .adm-savebar { margin: 18px -14px -14px; padding: 10px 14px; }
+}
+
 /* Admin tables */
 .admin-table {
   width: 100%; border-collapse: collapse; margin-bottom: 20px;
@@ -1160,17 +1269,9 @@ audio {
       <button class="admin-close" onclick="closeAdmin()">✕</button>
     </div>
 
-    <div class="admin-tabs">
-      <button class="admin-tab active" data-tab="overview" onclick="showAdminTab('overview')">ÜBERSICHT</button>
-      <button class="admin-tab" data-tab="users"     onclick="showAdminTab('users')">BENUTZER</button>
-      <button class="admin-tab" data-tab="rooms"     onclick="showAdminTab('rooms')">RÄUME</button>
-      <button class="admin-tab" data-tab="status"    onclick="showAdminTab('status')">STATUS</button>
-      <button class="admin-tab" data-tab="server"    onclick="showAdminTab('server')">SERVER</button>
-      <button class="admin-tab" data-tab="autoreply" onclick="showAdminTab('autoreply')">AUTOMATIK</button>
-      <button class="admin-tab" data-tab="bot"       onclick="showAdminTab('bot')">KI-FUNKER</button>
-      <button class="admin-tab" data-tab="robert"    onclick="showAdminTab('robert')">ROBERT-ANALYSE</button>
-      <button class="admin-tab" data-tab="crosslink" onclick="showAdminTab('crosslink')">CROSSLINK</button>
-      <button class="admin-tab" data-tab="debug"     onclick="showAdminTab('debug')">DEBUG</button>
+    <div class="admin-nav">
+      <div class="admin-groups" id="admin-groups"></div>
+      <div class="admin-tabs" id="admin-tabs"></div>
     </div>
 
     <!-- ── Übersicht tab ── -->
@@ -1469,106 +1570,212 @@ audio {
       </div>
       <div class="bot-subtabs">
         <button class="bot-subtab active" data-bsub="verhalten" onclick="showBotSubTab('verhalten')">VERHALTEN</button>
-        <button class="bot-subtab" data-bsub="sprache" onclick="showBotSubTab('sprache')">SPRACHE</button>
+        <button class="bot-subtab" data-bsub="sprache" onclick="showBotSubTab('sprache')">PERSONA</button>
+        <button class="bot-subtab" data-bsub="quellen" onclick="showBotSubTab('quellen')">QUELLEN</button>
         <button class="bot-subtab" data-bsub="stimme" onclick="showBotSubTab('stimme')">SPRACHAUSGABE</button>
         <button class="bot-subtab" data-bsub="modell" onclick="showBotSubTab('modell')">MODELL</button>
         <button class="bot-subtab" data-bsub="memory" onclick="showBotSubTab('memory')">GEDÄCHTNIS</button>
         <button class="bot-subtab" data-bsub="test" onclick="showBotSubTab('test')">TROCKENTEST</button>
       </div>
       <div id="bot-sub-verhalten" class="bot-subtab-content active">
-        <div class="form-grid">
-      <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer">
-        <input type="checkbox" id="bot-enabled" style="accent-color:#f0b429" autocomplete="off">
-        ⚠ KI-Funker aktiv — antwortet <b>ohne Freigabe</b> über Funk
-      </label>
-      <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer">
-        <input type="checkbox" id="bot-only-addressed" style="accent-color:#f0b429" autocomplete="off">
-        Nur auf Ansprache — meldet sich <b>ausschließlich</b>, wenn sein Name fällt
-      </label>
-      <div style="font-size:.72rem;color:var(--text-muted);margin:0 0 6px 24px;line-height:1.4">
-        Cooldown und Selbst-Erkennung (eigenes Echo) laufen automatisch mit.
-      </div>
-      <div style="margin:0 0 14px 24px">
-        <label style="font-size:.72rem;color:var(--text-muted);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          Anschlussfragen: nach eigener Sendung noch
-          <input type="number" id="bot-followup" min="0" max="3600" step="10" style="width:80px" autocomplete="off">
-          Sekunden ohne Namen ansprechbar
-        </label>
-        <div style="font-size:.72rem;color:var(--text-muted);margin-top:4px;line-height:1.4">
-          Damit kannst du im Gespräch einfach weiterreden („Geht deine Suche nicht?"), ohne ihn
-          jedes Mal neu zu rufen. Der Zeitraum beginnt mit jeder seiner Sendungen neu.
-          <b>0 = aus</b>, dann muss sein Name wirklich in jedem Spruch stehen.
-          Gilt nur zusammen mit dem Schalter darüber.
+
+        <div class="adm-card">
+          <div class="adm-card-title">Ansprache</div>
+          <div class="adm-card-sub">Wann sich Robert überhaupt meldet.</div>
+          <label class="adm-sw warn">
+            <input type="checkbox" id="bot-enabled" autocomplete="off">
+            <span class="adm-sw-text">KI-Funker aktiv
+              <small>⚠ Antwortet <b>ohne Freigabe</b> über Funk.</small></span>
+          </label>
+          <label class="adm-sw warn">
+            <input type="checkbox" id="bot-only-addressed" autocomplete="off">
+            <span class="adm-sw-text">Nur auf Ansprache
+              <small>Meldet sich <b>ausschließlich</b>, wenn sein Name fällt. Cooldown und Selbst-Erkennung (eigenes Echo) laufen automatisch mit.</small></span>
+          </label>
+          <div class="adm-fields wide">
+            <div class="form-field">
+              <label>Name</label>
+              <input type="text" id="bot-name" placeholder="Robert" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Zusätzliche Trigger-Wörter <small>Komma-getrennt</small></label>
+              <input type="text" id="bot-trigger" placeholder="roboter, funk-roboter" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Nur diese Räume <small>Komma-getrennt, leer = alle</small></label>
+              <input type="text" id="bot-rooms" placeholder="quasel" autocomplete="off">
+            </div>
+          </div>
+          <div class="adm-fields">
+            <div class="form-field">
+              <label>Anschlussfragen (Sek.) <small>0 = aus</small></label>
+              <input type="number" id="bot-followup" min="0" max="3600" step="10" autocomplete="off">
+            </div>
+          </div>
+          <div class="adm-hint">
+            Anschlussfragen: Nach seiner Sendung bleibt er so lange ohne Namensnennung ansprechbar
+            („Geht deine Suche nicht?"). Der Zeitraum beginnt mit jeder seiner Sendungen neu und
+            gilt nur zusammen mit „Nur auf Ansprache".
+          </div>
         </div>
-      </div>
-      <label style="display:flex;align-items:center;gap:8px;margin:4px 0 6px;cursor:pointer">
-        <input type="checkbox" id="bot-begruessung" style="accent-color:#f0b429" autocomplete="off">
-        Begrüßung — meldet sich einmal, wenn nach längerer Ruhe wieder Betrieb ist
-      </label>
-      <div style="margin:0 0 14px 24px;font-size:.72rem;color:var(--text-muted);line-height:1.5">
-        <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          nach mindestens <input type="number" id="bot-begr-ruhe" min="0.5" max="48" step="0.5" style="width:60px" autocomplete="off"> h Ruhe,
-          wenn <input type="number" id="bot-begr-sprueche" min="1" max="200" style="width:55px" autocomplete="off"> Sprüche gefallen sind,
-          dann zufällig nach <input type="number" id="bot-begr-min" min="0" max="180" style="width:50px" autocomplete="off">
-          bis <input type="number" id="bot-begr-max" min="0" max="180" style="width:50px" autocomplete="off"> Minuten
-        </span>
-        Gesendet wird erst in einer Funkpause. Hat Robert vorher schon auf jemanden geantwortet, entfällt die Begrüßung.
-        Nebeneffekt: Sprachmodell und Sprachausgabe sind danach warm.
-      </div>
-      <div class="form-grid">
-        <div class="form-field" style="flex:1">
-          <label>Name</label>
-          <input type="text" id="bot-name" placeholder="Robert" autocomplete="off">
+
+        <div class="adm-card">
+          <div class="adm-card-title">Antwort-Rhythmus</div>
+          <div class="adm-card-sub">Wie oft und wie schnell er antwortet.</div>
+          <div class="adm-fields">
+            <div class="form-field">
+              <label>Cooldown (Sek.) <small>Pause zwischen zwei Antworten</small></label>
+              <input type="number" id="bot-cooldown" placeholder="20" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Gesprächsfenster (Sek.) <small>so lange gilt er als „im Gespräch"</small></label>
+              <input type="number" id="bot-convwin" placeholder="180" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Rückstau-Bremse (Sek.) <small>ältere Durchsagen nicht beantworten</small></label>
+              <input type="number" id="bot-maxage" placeholder="120" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Wiederholungssperre (Sek.) <small>gleiche Antwort erst danach wieder</small></label>
+              <input type="number" id="bot-repeatblock" placeholder="3600" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Anruf nach Funkstille (Sek.) <small>0 = aus</small></label>
+              <input type="number" id="bot-silencecall" placeholder="300" autocomplete="off">
+            </div>
+          </div>
         </div>
-        <div class="form-field" style="flex:2">
-          <label>Zusätzliche Trigger-Wörter (Komma-getrennt)</label>
-          <input type="text" id="bot-trigger" placeholder="roboter, funk-roboter" autocomplete="off">
+
+        <div class="adm-card">
+          <div class="adm-card-title">Begrüßung</div>
+          <div class="adm-card-sub"></div>
+          <label class="adm-sw">
+            <input type="checkbox" id="bot-begruessung" autocomplete="off">
+            <span class="adm-sw-text">Meldet sich einmal, wenn nach längerer Ruhe wieder Betrieb ist
+              <small>Gesendet wird erst in einer Funkpause. Hat Robert vorher schon auf jemanden
+              geantwortet, entfällt sie. Nebeneffekt: Sprachmodell und Sprachausgabe sind danach warm.</small></span>
+          </label>
+          <div class="adm-inline" style="margin-top:6px">
+            nach mindestens <input type="number" id="bot-begr-ruhe" min="0.5" max="48" step="0.5" style="width:64px" autocomplete="off"> h Ruhe,
+            wenn <input type="number" id="bot-begr-sprueche" min="1" max="200" style="width:58px" autocomplete="off"> Sprüche gefallen sind,
+            dann zufällig nach <input type="number" id="bot-begr-min" min="0" max="180" style="width:54px" autocomplete="off">
+            bis <input type="number" id="bot-begr-max" min="0" max="180" style="width:54px" autocomplete="off"> Minuten
+          </div>
         </div>
-      </div>
-        <div class="form-field" style="flex:0 0 110px">
-          <label>Cooldown (Sek.)</label>
-          <input type="number" id="bot-cooldown" placeholder="20" autocomplete="off">
-        </div>
-        <div class="form-field" style="flex:0 0 160px">
-          <label>Gesprächsfenster (Sek.)</label>
-          <input type="number" id="bot-convwin" placeholder="180" autocomplete="off">
-        </div>
-        <div class="form-field" style="flex:0 0 150px">
-          <label>Rückstau-Bremse (Sek.) <span style="color:var(--muted)">— ältere Durchsagen nicht beantworten</span></label>
-          <input type="number" id="bot-maxage" placeholder="120" autocomplete="off">
-        </div>
-        <div class="form-field" style="flex:0 0 150px">
-          <label>Wiederholungssperre (Sek.) <span style="color:var(--muted)">— gleiche Antwort erst danach wieder</span></label>
-          <input type="number" id="bot-repeatblock" placeholder="3600" autocomplete="off">
-        </div>
-        <div class="form-field" style="flex:0 0 170px">
-          <label>Anruf nach Funkstille (Sek.) <span style="color:var(--muted)">— 0 = aus</span></label>
-          <input type="number" id="bot-silencecall" placeholder="300" autocomplete="off">
-        </div>
-        <div class="form-field" style="flex:0 0 190px">
-          <label>Mindest-Verständlichkeit (%) <span style="color:var(--muted)">— 0 = Prüfung aus</span></label>
-          <input type="number" id="bot-minconf" step="5" placeholder="65" autocomplete="off">
-          <label style="display:flex;align-items:center;gap:6px;margin-top:4px;font-size:.72rem;cursor:pointer"
-                 title="Sprüche zwischen dieser Schwelle und 80 % kommen mit dem Vermerk [schlecht verstanden] in Roberts Verlauf, damit er verhörte Wörter nicht wörtlich nimmt. Darunter kommen sie gar nicht in den Verlauf.">
-            <input type="checkbox" id="bot-unsicher" style="accent-color:#f0b429" autocomplete="off">
-            unsichere Zeilen kennzeichnen
+
+        <div class="adm-card">
+          <div class="adm-card-title">Verlauf &amp; Verständlichkeit</div>
+          <div class="adm-card-sub">Was Robert vom Funkverkehr sieht.</div>
+          <div class="adm-fields">
+            <div class="form-field">
+              <label>Verlaufslänge <small>Durchgänge</small></label>
+              <input type="number" id="bot-historylen" placeholder="30" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label title="Die Anzahl begrenzt die Verlaufslänge. Diese Grenze greift nur, wenn auf dem Kanal wenig los war: Sprüche, die älter sind, sieht Robert nicht mehr.">
+                Verlauf höchstens (Min.) <small>nur in ruhigen Phasen wirksam</small></label>
+              <input type="number" id="bot-historymaxage" min="10" max="1440" placeholder="180" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Mindest-Verständlichkeit (%) <small>0 = Prüfung aus</small></label>
+              <input type="number" id="bot-minconf" step="5" placeholder="65" autocomplete="off">
+            </div>
+          </div>
+          <label class="adm-sw" style="margin-top:6px"
+                 title="Sprüche zwischen dieser Schwelle und 80 % kommen mit dem Vermerk [schlecht verstanden] in Roberts Verlauf. Darunter kommen sie gar nicht in den Verlauf.">
+            <input type="checkbox" id="bot-unsicher" autocomplete="off">
+            <span class="adm-sw-text">Unsichere Zeilen kennzeichnen
+              <small>Zwischen Schwelle und 80 % mit „[schlecht verstanden]" im Verlauf.</small></span>
           </label>
         </div>
-        <div class="form-field" style="flex:0 0 130px">
-          <label>Verlaufslänge <span style="color:var(--muted)">— Durchgänge</span></label>
-          <input type="number" id="bot-historylen" placeholder="30" autocomplete="off">
-        </div>
-        <div class="form-field">
-          <label title="Die Anzahl begrenzt die Verlaufslänge. Diese Grenze greift nur, wenn auf dem Kanal wenig los war: Sprüche, die älter sind, sieht Robert nicht mehr. War bis 25.09. fest 60 Minuten.">
-            Verlauf höchstens (Min.)</label>
-          <input type="number" id="bot-historymaxage" min="10" max="1440" placeholder="180" autocomplete="off">
-        </div>
-        <div class="form-field" style="flex:2">
-          <label>Nur diese Räume (Komma-getrennt, leer = alle)</label>
-          <input type="text" id="bot-rooms" placeholder="quasel" autocomplete="off">
-        </div>
+
+        <div class="adm-card">
+          <div class="adm-card-title">Sprachsteuerung per Funk</div>
+          <div class="adm-card-sub">„Robert, Sendepause" macht ihn stumm, „Robert, aufwachen" weckt ihn wieder.
+            Greift auch bei ausgeschaltetem KI-Funker, sonst gäbe es kein Wecken.</div>
+          <label class="adm-sw">
+            <input type="checkbox" id="ctl-enabled" autocomplete="off">
+            <span class="adm-sw-text">Sprachsteuerung aktiv</span>
+          </label>
+          <label class="adm-sw">
+            <input type="checkbox" id="ctl-confirm" autocomplete="off">
+            <span class="adm-sw-text">Mit Durchsage bestätigen</span>
+          </label>
+          <div class="adm-fields wide">
+            <div class="form-field">
+              <label>Stumm-Wörter <small>Komma-getrennt</small></label>
+              <input type="text" id="ctl-off" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Wach-Wörter <small>Komma-getrennt</small></label>
+              <input type="text" id="ctl-on" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Antwort beim Stummschalten</label>
+              <input type="text" id="ctl-reply-off" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Antwort beim Aufwecken</label>
+              <input type="text" id="ctl-reply-on" autocomplete="off">
+            </div>
+          </div>
         </div>
       </div>
+
+      <div id="bot-sub-quellen" class="bot-subtab-content">
+        <div class="adm-card">
+          <div class="adm-card-title">📰 Tagesprogramm</div>
+          <div class="adm-card-sub">Einmal täglich frisch aus echten Quellen gebaut. Robert darf daraus von sich aus
+            ein Thema einbringen, etwa auf „Was gibt's Neues?" — damit er nicht immer dasselbe erzählt.</div>
+          <label class="adm-sw">
+            <input type="checkbox" id="tp-enabled" autocomplete="off">
+            <span class="adm-sw-text">Tagesprogramm aktiv</span>
+          </label>
+          <div class="adm-fields">
+            <div class="form-field">
+              <label>Neu bauen um <small>Uhrzeit, danach alle 15 Min. Wiederholung bei Fehlschlag</small></label>
+              <input type="time" id="tp-zeit" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Themen je Anfrage <small>zufällige Auswahl, 1–4</small></label>
+              <input type="number" id="tp-pro" min="1" max="4" autocomplete="off">
+            </div>
+          </div>
+          <div class="adm-chips" id="tp-themen">
+            <label class="adm-chip"><input type="checkbox" value="wetter">Wetter</label>
+            <label class="adm-chip"><input type="checkbox" value="nachrichten">Nachrichten</label>
+            <label class="adm-chip"><input type="checkbox" value="fussball">Fußball</label>
+            <label class="adm-chip"><input type="checkbox" value="lippstadt">Lippstadt</label>
+          </div>
+          <div class="adm-hint">Wetter: Open-Meteo · Nachrichten: tagesschau · Fußball: Bundesliga (OpenLigaDB) und Länderspiele · Lippstadt: Websuche.</div>
+          <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button type="button" class="btn-save" style="padding:6px 14px" onclick="tagesprogrammNeu()" id="tp-neu-btn">Jetzt neu bauen</button>
+            <span id="tp-stand" class="adm-hint" style="margin:0"></span>
+          </div>
+          <div id="tp-inhalt" style="margin-top:10px;font-size:.8rem;line-height:1.5"></div>
+        </div>
+
+        <div class="adm-card">
+          <div class="adm-card-title">🔎 Websuche</div>
+          <div class="adm-card-sub">„Robert, such mal nach …" fragt die selbst gehostete SearXNG-Instanz ab, die Treffer
+            landen als Zusatz im Prompt. Kostenlos, kein Cloud-Suchdienst.</div>
+          <label class="adm-sw">
+            <input type="checkbox" id="ws-enabled" autocomplete="off">
+            <span class="adm-sw-text">Websuche aktiv</span>
+          </label>
+          <div class="adm-fields wide">
+            <div class="form-field">
+              <label>SearXNG-URL</label>
+              <input type="text" id="ws-url" placeholder="http://127.0.0.1:8075/search" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Treffer im Prompt <small>1–10</small></label>
+              <input type="number" id="ws-max" min="1" max="10" autocomplete="off">
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div id="bot-sub-sprache" class="bot-subtab-content">
       <div class="form-field" style="margin-top:8px">
         <label>Persona (wer ist der Bot?)</label>
@@ -1714,10 +1921,19 @@ audio {
           Temperatur steuert, wie frei Robert formuliert, und gilt für Ollama wie für Gemini: niedrig (0.2–0.4) heißt sachlich, aber er wiederholt sich;
           höher (0.6–0.8) klingt lockerer und abwechslungsreicher, er erfindet dann aber eher etwas dazu. 0 = bei gleicher Lage immer dieselbe Antwort.
         </div>
-        <div class="form-field" style="margin-top:8px">
-          <label>Zugangs-Token (falls Server passwortgeschützt)</label>
-          <input type="password" id="bot-ollama-token" autocomplete="new-password"
-                 placeholder="leer = ohne Token">
+        <div class="form-grid" style="margin-top:8px">
+          <div class="form-field">
+            <label>Zugangs-Token (falls Server passwortgeschützt)</label>
+            <input type="password" id="bot-ollama-token" autocomplete="new-password"
+                   placeholder="leer = ohne Token">
+          </div>
+          <div class="form-field">
+            <label>Modell im Speicher halten <span style="color:var(--muted)">(keep_alive)</span></label>
+            <input type="text" id="bot-ollama-keepalive" placeholder="0" autocomplete="off">
+            <div style="font-size:.7rem;color:var(--muted);line-height:1.4">
+              <b>0</b> = nach jeder Antwort entladen (geteilte GPU). <b>2h</b>, <b>30m</b> o. Ä. = im Speicher halten, spart das Neuladen.
+            </div>
+          </div>
         </div>
       </div>
       <!-- Gemini-Felder -->
@@ -1795,10 +2011,10 @@ audio {
       <div id="bot-test-result" style="margin-top:10px;font-size:.85rem;display:none;
            padding:8px 10px;border:1px solid var(--border);border-radius:6px"></div>
       </div>
-      <div style="margin-top:16px">
+      <div class="adm-savebar">
         <button class="btn-save" onclick="saveBotAdmin()">SPEICHERN</button>
+        <div class="admin-msg" id="msg-bot"></div>
       </div>
-      <div class="admin-msg" id="msg-bot"></div>
     </div>
 
     <!-- ── Robert-Analyse tab ── -->
@@ -1875,51 +2091,86 @@ audio {
       <div class="admin-msg" id="msg-crosslink"></div>
     </div>
 
-    <!-- ── Debug tab ── -->
-    <div id="admin-tab-debug" class="admin-tab-content">
-      <div class="admin-section-title">Ablaufverfolgung Funksprüche</div>
-      <div style="font-size:.78rem;color:var(--muted);margin-bottom:14px;line-height:1.5">
-        Jede gehörte Durchsage von Aufnahme bis Senden, Schritt für Schritt:
-        <span class="dbg-dot dbg-ok"></span> ok ·
-        <span class="dbg-dot dbg-warn"></span> Warnung ·
-        <span class="dbg-dot dbg-error"></span> Fehler ·
-        <span class="dbg-dot dbg-skip"></span> übersprungen.
-        Zeit pro Schritt in Klammern. <b>Aufnahme</b>-Schritt anklicken, um die
-        WAV-Datei abzuspielen.
+    <!-- ── Transkription & Archiv tab ── -->
+    <div id="admin-tab-audio" class="admin-tab-content">
+      <div class="adm-card">
+        <div class="adm-card-title">📝 Transkription (Whisper)</div>
+        <div class="adm-card-sub">Wandelt jeden Funkspruch in Text um. Server, Prompt und Namensliste liest die
+          Pipeline bei jeder Aufnahme neu — Änderungen wirken <span class="adm-pill live">sofort</span> nach dem Speichern.</div>
+        <div class="adm-fields wide">
+          <div class="form-field">
+            <label>Whisper-Server <small>leer = lokal auf dem Pi (langsam)</small></label>
+            <input type="text" id="wh-url" placeholder="http://192.0.0.17:9001/transcribe" autocomplete="off">
+          </div>
+        </div>
+        <div class="form-field" style="margin-top:12px">
+          <label style="text-transform:none;letter-spacing:0;font-size:.74rem">Einleitungstext (initial_prompt)
+            <small style="display:block;opacity:.8">Gibt Whisper Thema und Schreibweise vor: Ort, Kanal, Fachwörter.</small></label>
+          <textarea id="wh-prompt" rows="3" autocomplete="off"></textarea>
+        </div>
+        <div class="form-field" style="margin-top:12px">
+          <label style="text-transform:none;letter-spacing:0;font-size:.74rem">Namen &amp; Begriffe (hotwords)
+            <small style="display:block;opacity:.8">Rufnamen der Runde, Komma-getrennt. Die häufigste Fehlerquelle bei der Erkennung.</small></label>
+          <textarea id="wh-hotwords" rows="3" autocomplete="off"></textarea>
+        </div>
+        <div class="adm-hint" id="wh-info"></div>
       </div>
-      <audio id="dbg-audio-player" style="display:none"></audio>
-      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:10px">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="dbg-autorefresh" checked
-                 onchange="this.checked ? startDebugAutoRefresh() : stopDebugAutoRefresh()">
-          automatisch aktualisieren (alle 5s)
-        </label>
-        <label style="display:flex;align-items:center;gap:8px">
-          Raum:
-          <select id="dbg-room-filter" onchange="loadDebugTraces()"
-                  style="background:var(--panel);color:var(--text);border:1px solid var(--border);
-                         border-radius:6px;padding:4px 8px;font-size:.85em">
-            <option value="">alle</option>
-          </select>
-        </label>
-        <span id="dbg-last-refresh" style="font-size:.78em;color:var(--muted)"></span>
-      </div>
-      <div id="debug-traces"></div>
-      <button class="btn-save" onclick="loadDebugTraces()" style="margin-top:10px">AKTUALISIEREN</button>
-      <div class="admin-msg" id="msg-debug"></div>
 
-      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
-      <div id="speaker-id-box">
-        <div class="admin-section-title">Sprecher-Erkennung (experimentell)</div>
+      <div class="adm-card">
+        <div class="adm-card-title">🧷 Archiv: Durchgänge automatisch kleben</div>
+        <div class="adm-card-sub">Reißt ein Funkspruch durch eine kurze Pause in zwei Teile, klebt der Server den
+          neuen an den vorigen — aber nur bei <b>demselben, bekannten Sprecher</b> im selben Raum, ohne anderen Eintrag dazwischen.
+          Danach wird neu transkribiert. Robert hat auf Teil 1 schon geantwortet, geklebt wird nur das Archiv.</div>
+        <label class="adm-sw">
+          <input type="checkbox" id="kl-enabled" autocomplete="off">
+          <span class="adm-sw-text">Automatisch kleben</span>
+        </label>
+        <div class="adm-fields">
+          <div class="form-field">
+            <label>Größte Lücke (Sek.) <small>0–10</small></label>
+            <input type="number" id="kl-gap" min="0" max="10" step="0.5" autocomplete="off">
+          </div>
+          <div class="form-field">
+            <label>Größte Gesamtlänge (Sek.) <small>10–600</small></label>
+            <input type="number" id="kl-total" min="10" max="600" step="10" autocomplete="off">
+          </div>
+        </div>
+      </div>
+
+      <div class="adm-card">
+        <div class="adm-card-title">🏷 Seitentitel</div>
+        <div class="adm-card-sub">Kopfzeile der Stream-Seite. Gilt ab dem nächsten Laden der Seite.</div>
+        <div class="adm-fields wide">
+          <div class="form-field">
+            <label>Titel</label>
+            <input type="text" id="ui-title" maxlength="80" autocomplete="off">
+          </div>
+          <div class="form-field">
+            <label>Untertitel</label>
+            <input type="text" id="ui-subtitle" maxlength="80" autocomplete="off">
+          </div>
+        </div>
+      </div>
+
+      <div class="adm-savebar">
+        <button class="btn-save" onclick="saveAudioSettings()">SPEICHERN</button>
+        <div class="admin-msg" id="msg-audio"></div>
+      </div>
+    </div>
+
+    <!-- ── Sprecher-Erkennung tab ── -->
+    <div id="admin-tab-sprecher" class="admin-tab-content">
+      <div id="speaker-id-box" class="adm-card">
+        <div class="admin-section-title">Sprecher-Erkennung</div>
         <div style="font-size:.78rem;color:var(--muted);margin-bottom:10px;line-height:1.5">
           Erkennt Sprecher anhand der Stimme (Resemblyzer-Embedding), unabhängig
           vom transkribierten Namen. Braucht mindestens ein eingelerntes Beispiel
           pro Person (Knopf "Als Sprecher einlernen" bei einer Aufnahme oben).
           Greift nur, wenn kein Rufzeichen bekannt ist.
         </div>
-        <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer">
+        <label class="adm-sw" style="margin-bottom:10px">
           <input type="checkbox" id="sid-enabled">
-          Sprecher-Erkennung aktiv
+          <span class="adm-sw-text">Sprecher-Erkennung aktiv</span>
         </label>
         <div class="form-field" style="max-width:200px;margin-bottom:12px">
           <label>Schwelle (Ähnlichkeit, 0.5–0.99)</label>
@@ -1969,6 +2220,42 @@ audio {
                 style="margin-bottom:10px;padding:6px 14px;font-size:.85em">Übersicht neu laden</button>
         <div id="sid-uebersicht"></div>
       </div>
+      <div class="admin-msg" id="msg-sprecher"></div>
+    </div>
+
+    <!-- ── Debug tab ── -->
+    <div id="admin-tab-debug" class="admin-tab-content">
+      <div class="admin-section-title">Ablaufverfolgung Funksprüche</div>
+      <div style="font-size:.78rem;color:var(--muted);margin-bottom:14px;line-height:1.5">
+        Jede gehörte Durchsage von Aufnahme bis Senden, Schritt für Schritt:
+        <span class="dbg-dot dbg-ok"></span> ok ·
+        <span class="dbg-dot dbg-warn"></span> Warnung ·
+        <span class="dbg-dot dbg-error"></span> Fehler ·
+        <span class="dbg-dot dbg-skip"></span> übersprungen.
+        Zeit pro Schritt in Klammern. <b>Aufnahme</b>-Schritt anklicken, um die
+        WAV-Datei abzuspielen.
+      </div>
+      <audio id="dbg-audio-player" style="display:none"></audio>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:10px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="dbg-autorefresh" checked
+                 onchange="this.checked ? startDebugAutoRefresh() : stopDebugAutoRefresh()">
+          automatisch aktualisieren (alle 5s)
+        </label>
+        <label style="display:flex;align-items:center;gap:8px">
+          Raum:
+          <select id="dbg-room-filter" onchange="loadDebugTraces()"
+                  style="background:var(--panel);color:var(--text);border:1px solid var(--border);
+                         border-radius:6px;padding:4px 8px;font-size:.85em">
+            <option value="">alle</option>
+          </select>
+        </label>
+        <span id="dbg-last-refresh" style="font-size:.78em;color:var(--muted)"></span>
+      </div>
+      <div id="debug-traces"></div>
+      <button class="btn-save" onclick="loadDebugTraces()" style="margin-top:10px">AKTUALISIEREN</button>
+      <div class="admin-msg" id="msg-debug"></div>
+
     </div>
 
   </div>
@@ -3787,9 +4074,33 @@ function showBotSubTab(name) {
     d.classList.toggle("active", d.id === "bot-sub-" + name));
 }
 
+// Zweistufige Navigation: Gruppe -> Reiter. Die Reiter-IDs (admin-tab-<id>) bleiben
+// unveraendert, nur die Leiste oben ist neu geordnet.
+const ADMIN_GROUPS = [
+  {id: "start",  icon: "🏠", label: "Übersicht", tabs: [["overview", "Übersicht"]]},
+  {id: "zugang", icon: "👥", label: "Zugang",    tabs: [["users", "Benutzer"], ["rooms", "Räume"], ["server", "FRN-Server"]]},
+  {id: "robert", icon: "🤖", label: "Robert",    tabs: [["bot", "KI-Funker"], ["robert", "Gespräche analysieren"], ["autoreply", "Namens-Antwort"]]},
+  {id: "audio",  icon: "🎙", label: "Funk & Audio", tabs: [["audio", "Transkription & Archiv"], ["sprecher", "Sprecher-Erkennung"], ["crosslink", "Crosslink"]]},
+  {id: "system", icon: "🛠", label: "System",    tabs: [["status", "Status"], ["debug", "Ablaufverfolgung"]]},
+];
+
+function adminNavBauen() {
+  const gbox = document.getElementById("admin-groups");
+  if (!gbox || gbox.childElementCount) return;
+  gbox.innerHTML = ADMIN_GROUPS.map(g =>
+    `<button class="admin-group" data-group="${g.id}" onclick="showAdminTab('${g.tabs[0][0]}')">` +
+    `<span class="ag-icon">${g.icon}</span><span class="ag-label">${esc(g.label)}</span></button>`).join("");
+}
+
 function showAdminTab(name) {
-  document.querySelectorAll(".admin-tab").forEach(b =>
-    b.classList.toggle("active", b.dataset.tab === name));
+  adminNavBauen();
+  const grp = ADMIN_GROUPS.find(g => g.tabs.some(t => t[0] === name)) || ADMIN_GROUPS[0];
+  document.querySelectorAll(".admin-group").forEach(b =>
+    b.classList.toggle("active", b.dataset.group === grp.id));
+  const tbox = document.getElementById("admin-tabs");
+  tbox.innerHTML = grp.tabs.length > 1 ? grp.tabs.map(t =>
+    `<button class="admin-tab${t[0] === name ? " active" : ""}" data-tab="${t[0]}" onclick="showAdminTab('${t[0]}')">${esc(t[1])}</button>`
+  ).join("") : "";
   document.querySelectorAll(".admin-tab-content").forEach(d =>
     d.classList.remove("active"));
   const el = document.getElementById("admin-tab-" + name);
@@ -3804,7 +4115,9 @@ function showAdminTab(name) {
     if (name === "bot")       loadBotAdmin();
     if (name === "robert")    loadRobertChats();
     if (name === "crosslink") loadCrosslink();
-    if (name === "debug")     { loadDebugTraces(); loadDebugModelList(); loadSpeakerIdSettings(); }
+    if (name === "audio")     loadAudioSettings();
+    if (name === "sprecher")  loadSpeakerIdSettings();
+    if (name === "debug")     { loadDebugTraces(); loadDebugModelList(); }
   }
   if (name !== "debug") stopDebugAutoRefresh();
   else startDebugAutoRefresh();
@@ -4337,6 +4650,24 @@ async function loadBotAdmin() {
     document.getElementById("bot-ollama-numpredict").value = d.ollama_num_predict ?? 150;
     // Server liefert nur eine Maske (••••), nie das echte Geheimnis
     document.getElementById("bot-ollama-token").value = d.ollama_token || "";
+    document.getElementById("bot-ollama-keepalive").value = d.ollama_keep_alive ?? 0;
+    const ctl = d.control || {};
+    document.getElementById("ctl-enabled").checked = ctl.enabled !== false;
+    document.getElementById("ctl-confirm").checked = ctl.confirm !== false;
+    document.getElementById("ctl-off").value       = (ctl.off || []).join(", ");
+    document.getElementById("ctl-on").value        = (ctl.on  || []).join(", ");
+    document.getElementById("ctl-reply-off").value = ctl.reply_off || "";
+    document.getElementById("ctl-reply-on").value  = ctl.reply_on  || "";
+    const ws = d.websearch || {};
+    document.getElementById("ws-enabled").checked = !!ws.enabled;
+    document.getElementById("ws-url").value       = ws.searxng_url || "";
+    document.getElementById("ws-max").value       = ws.max_results ?? 3;
+    document.getElementById("tp-enabled").checked = d.tagesprogramm_enabled !== false;
+    document.getElementById("tp-zeit").value      = d.tagesprogramm_zeit || "05:30";
+    document.getElementById("tp-pro").value       = d.tagesprogramm_pro_antwort ?? 2;
+    const tpT = d.tagesprogramm_themen || [];
+    document.querySelectorAll("#tp-themen input").forEach(c => c.checked = tpT.includes(c.value));
+    loadTagesprogramm();
     document.getElementById("bot-gemini-model").value = d.gemini_model || "";
     document.getElementById("bot-gemini-key").value   = d.gemini_api_key || "";
     loadGeminiModels();   // Datalist mit echten Modell-IDs füllen
@@ -4701,6 +5032,24 @@ async function saveBotAdmin() {
     ollama_token:          document.getElementById("bot-ollama-token").value,
     gemini_model:          document.getElementById("bot-gemini-model").value,
     gemini_api_key:        document.getElementById("bot-gemini-key").value,
+    ollama_keep_alive:     keepAliveWert(document.getElementById("bot-ollama-keepalive").value),
+    control: {
+      enabled:   document.getElementById("ctl-enabled").checked,
+      confirm:   document.getElementById("ctl-confirm").checked,
+      off:       document.getElementById("ctl-off").value,
+      on:        document.getElementById("ctl-on").value,
+      reply_off: document.getElementById("ctl-reply-off").value,
+      reply_on:  document.getElementById("ctl-reply-on").value,
+    },
+    websearch: {
+      enabled:     document.getElementById("ws-enabled").checked,
+      searxng_url: document.getElementById("ws-url").value,
+      max_results: numOderStandard("ws-max", 3),
+    },
+    tagesprogramm_enabled:     document.getElementById("tp-enabled").checked,
+    tagesprogramm_zeit:        document.getElementById("tp-zeit").value,
+    tagesprogramm_pro_antwort: numOderStandard("tp-pro", 2),
+    tagesprogramm_themen:      [...document.querySelectorAll("#tp-themen input:checked")].map(c => c.value),
     memory:                collectBotMemory(),
     notebook_enabled:      document.getElementById("bot-notebook-enabled").checked,
     notebook:              collectBotNotebook(),
@@ -4717,6 +5066,95 @@ async function saveBotAdmin() {
   } catch(e) {
     showMsg("msg-bot", "Fehler: " + e, "error");
   }
+}
+
+// keep_alive: reine Zahl = Sekunden (0 = sofort entladen), sonst Text wie "2h"
+function keepAliveWert(v) {
+  v = String(v ?? "").trim();
+  if (v === "") return 0;
+  return /^-?\d+$/.test(v) ? parseInt(v, 10) : v;
+}
+
+async function loadTagesprogramm() {
+  const inh = document.getElementById("tp-inhalt"), st = document.getElementById("tp-stand");
+  if (!inh) return;
+  try {
+    const r = await adminFetch("/api/admin/tagesprogramm");
+    const d = await r.json();
+    if (!r.ok || d.error) { st.textContent = "nicht geladen: " + (d.error || r.status); return; }
+    const namen = {wetter: "Wetter", nachrichten: "Nachrichten", fussball: "Fußball", lippstadt: "Lippstadt"};
+    const th = d.themen || {};
+    st.textContent = d.gebaut ? "Stand: " + new Date(d.gebaut * 1000).toLocaleString("de-DE") : "noch nicht gebaut";
+    inh.innerHTML = Object.keys(th).length
+      ? Object.entries(th).map(([k, v]) =>
+          `<div style="margin-bottom:6px"><b style="color:var(--accent)">${esc(namen[k] || k)}</b><br>` +
+          `<span style="color:var(--muted);white-space:pre-wrap">${esc(v)}</span></div>`).join("")
+      : '<span style="color:var(--muted)">Heute noch nichts gebaut.</span>';
+  } catch(e) { st.textContent = "nicht geladen: " + e; }
+}
+
+async function tagesprogrammNeu() {
+  const btn = document.getElementById("tp-neu-btn"), st = document.getElementById("tp-stand");
+  btn.disabled = true; st.textContent = "⏳ baue … (Quellen werden abgefragt)";
+  try {
+    const r = await adminFetch("/api/admin/tagesprogramm", {method: "POST"});
+    const d = await r.json();
+    if (!r.ok || d.error) st.textContent = "Fehler: " + (d.error || r.status);
+    else await loadTagesprogramm();
+    if (d.neu_gebaut === false) st.textContent += " — keine Quelle erreichbar, altes Programm bleibt";
+  } catch(e) { st.textContent = "Fehler: " + e; }
+  finally { btn.disabled = false; }
+}
+
+// ── Transkription, Archiv-Kleben, Seitentitel ───────────────────────────────
+async function loadAudioSettings() {
+  try {
+    const r = await adminFetch("/api/admin/settings");
+    const d = await r.json();
+    if (!r.ok || d.error) {
+      showMsg("msg-audio", "Einstellungen nicht geladen: " +
+              (d.error === "unauthorized" ? "Sitzung abgelaufen — bitte neu anmelden" : (d.error || r.status)), "error");
+      return;
+    }
+    const w = d.whisper || {}, k = d.archive_auto_kleben || {}, u = d.ui || {};
+    document.getElementById("wh-url").value      = w.remote_url || "";
+    document.getElementById("wh-prompt").value   = w.initial_prompt || "";
+    document.getElementById("wh-hotwords").value = w.hotwords || "";
+    document.getElementById("wh-info").textContent =
+      `Modell auf dem Whisper-Server: ${w.model || "—"} · Sprache: ${w.language || "de"} · ` +
+      `lokales Modell (Notfall): ${w.lokal_modell || "—"}. Diese Werte stehen in config.json bzw. config.ini.`;
+    document.getElementById("kl-enabled").checked = k.enabled !== false;
+    document.getElementById("kl-gap").value       = k.max_gap_s ?? 2;
+    document.getElementById("kl-total").value     = k.max_total_s ?? 90;
+    document.getElementById("ui-title").value     = u.title || "";
+    document.getElementById("ui-subtitle").value  = u.subtitle || "";
+  } catch(e) { showMsg("msg-audio", "Fehler beim Laden: " + e, "error"); }
+}
+
+async function saveAudioSettings() {
+  const body = {
+    whisper: {
+      remote_url:     document.getElementById("wh-url").value,
+      initial_prompt: document.getElementById("wh-prompt").value,
+      hotwords:       document.getElementById("wh-hotwords").value,
+    },
+    archive_auto_kleben: {
+      enabled:     document.getElementById("kl-enabled").checked,
+      max_gap_s:   numOderStandard("kl-gap", 2),
+      max_total_s: numOderStandard("kl-total", 90),
+    },
+    ui: {
+      title:    document.getElementById("ui-title").value,
+      subtitle: document.getElementById("ui-subtitle").value,
+    },
+  };
+  try {
+    const r = await adminFetch("/api/admin/settings", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if (!r.ok || d.error) { showMsg("msg-audio", "Fehler: " + (d.error || r.status), "error"); return; }
+    showMsg("msg-audio", "Gespeichert.", "ok");
+  } catch(e) { showMsg("msg-audio", "Fehler: " + e, "error"); }
 }
 
 async function testBot() {
@@ -5009,7 +5447,7 @@ async function loadSpeakerIdSettings() {
     // Bei abgelaufener Anmeldung NICHTS ueberschreiben (2026-09-16):
     // sonst werden die Felder geleert und ein Speichern schreibt das fest.
     if (!r.ok || d.error) {
-      showMsg("msg-debug", "Einstellungen nicht geladen: " +
+      showMsg("msg-sprecher", "Einstellungen nicht geladen: " +
               (d.error === "unauthorized" ? "Sitzung abgelaufen — bitte neu anmelden"
                                           : (d.error || r.status)), "error");
       return;
@@ -5048,9 +5486,9 @@ async function saveSpeakerIdSettings() {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ enabled, threshold, short_threshold_2s, short_threshold_4s, min_margin }),
     });
-    showMsg("msg-debug", "Sprecher-ID-Einstellungen gespeichert.", "ok");
+    showMsg("msg-sprecher", "Sprecher-ID-Einstellungen gespeichert.", "ok");
   } catch(e) {
-    showMsg("msg-debug", "Fehler: " + e, "error");
+    showMsg("msg-sprecher", "Fehler: " + e, "error");
   }
 }
 // ── Übersicht der Stimmproben (2026-09-29) ─────────────────────────────
@@ -5146,8 +5584,8 @@ async function sidProbeLoeschen(btn, name, index, fp) {
   const r = await adminFetch(`/api/admin/speaker-id/enrollments/${encodeURIComponent(name)}/${index}?fp=${encodeURIComponent(fp)}`,
                              { method: "DELETE" });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) showMsg("msg-debug", "Probe nicht gelöscht: " + (d.error || r.status), "error");
-  else showMsg("msg-debug", `Probe #${index + 1} von ${name} gelöscht.`, "ok");
+  if (!r.ok) showMsg("msg-sprecher", "Probe nicht gelöscht: " + (d.error || r.status), "error");
+  else showMsg("msg-sprecher", `Probe #${index + 1} von ${name} gelöscht.`, "ok");
   await loadSpeakerIdSettings();
 }
 async function sidGrenzLoeschen(btn, name) {
@@ -5162,7 +5600,7 @@ async function sidGrenzLoeschen(btn, name) {
                                { method: "DELETE" });
     if (r.ok) ok++;
   }
-  showMsg("msg-debug", `${ok} von ${weg.length} grenzwertigen Proben von ${name} gelöscht.`, ok === weg.length ? "ok" : "error");
+  showMsg("msg-sprecher", `${ok} von ${weg.length} grenzwertigen Proben von ${name} gelöscht.`, ok === weg.length ? "ok" : "error");
   await loadSpeakerIdSettings();
 }
 
