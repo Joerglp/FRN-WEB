@@ -800,6 +800,11 @@ class TXServer:
         self._rueckblick: dict = {}
         self._rueckblick_laeuft = False
         self._rueckblick_laden()
+        self._nachrichten_pfad = Path(__file__).parent / "nachrichten.json"
+        self._nachrichten: list[dict] = []
+        self._nachricht_rueckfrage: dict[str, dict] = {}   # Raum → halbe Nachricht
+        self._raum_eingang: dict[str, float] = {}          # Raum → letzter fremder Spruch
+        self._nachrichten_laden()
         self._bot_state_pending = False
         self._bot_state_load()
         self._bot_busy: set[str] = set()
@@ -1913,7 +1918,9 @@ class TXServer:
         "tagesprogramm_pro_antwort": 2,
         "rueckblick_enabled": True,
         "rueckblick_zeit": "03:00",
-        "rueckblick_tage": 30,   # so viele Themen je Anfrage im Hinweis
+        "rueckblick_tage": 30,
+        "nachrichten_enabled": True,
+        "nachrichten_tage": 7,   # so viele Themen je Anfrage im Hinweis
         "name":     "Robert",
         "trigger":  ["robert", "roboter", "funk-roboter"],
         "speaker":  "damien_black",
@@ -3065,6 +3072,7 @@ class TXServer:
             return   # eigenes Echo -- keine Spur, das ist kein "gehoerter" Funkspruch
         self._mitschreiber_pruefen(room_name, ts, text, bot)
         self._begruessung_pruefen(room, room_name, ts, bot)
+        self._nachrichten_pruefen(room, room_name, callsign, text, ts, bot)
         # Sprachsteuerung: greift AUCH bei deaktiviertem Bot (sonst kein Wecken).
         # No-Op (schon im Zielzustand) fällt durch zur normalen Antwort-Logik.
         cmd = self._bot_command(bot, name, low)
@@ -3113,6 +3121,20 @@ class TXServer:
                                   detail="Raum nicht in Robert-Liste (z.B. Papagei-Testraum)",
                                   final=True)
             return
+        # Rueckfrage beim Ausrichten offen ("Was soll ich Hans ausrichten?"):
+        # der naechste fremde Spruch ist die Antwort darauf.
+        rf = self._nachricht_rueckfrage.get(room_name)
+        if rf and bot.get("nachrichten_enabled", True):
+            if ts > rf["gefragt"] and time.time() - rf["gefragt"] < 120:
+                del self._nachricht_rueckfrage[room_name]
+                self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
+                                      detail="Antwort auf Rückfrage zum Ausrichten", final=True)
+                asyncio.create_task(self._nachricht_annehmen(
+                    room, room_name, rf.get("von") or callsign,
+                    rf["text"] + " ... " + text, ts, rf.get("an")))
+                return
+            if time.time() - rf["gefragt"] >= 120:
+                del self._nachricht_rueckfrage[room_name]
         now  = time.time()
         last = self._bot_last_reply.get(room_name, 0.0)
         if now - last < float(bot.get("cooldown_s", 20)):
@@ -3144,6 +3166,11 @@ class TXServer:
                                   detail="Name nur erwähnt (Erzählung über jemanden) -- keine Ansprache")
         if name_hit:
             self._anschluss_folge[room_name] = 0
+        if name_hit and bot.get("nachrichten_enabled", True) and self._AUSRICHTEN_RE.search(low):
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
+                                  detail="Auftrag zum Ausrichten erkannt", final=True)
+            asyncio.create_task(self._nachricht_annehmen(room, room_name, callsign, text, ts))
+            return
         name_or_call = name_hit or bool(self._BOT_CALL_RE.search(low))
         # Schalter "nur auf Ansprache" (User-Wunsch 2026-09-16): dann meldet
         # sich Robert AUSSCHLIESSLICH, wenn sein Name faellt -- kein
@@ -4699,7 +4726,7 @@ class TXServer:
         return zeilen
 
     async def _ollama_text(self, bot: dict, system: str, prompt: str,
-                           num_predict: int = 600) -> str:
+                           num_predict: int = 600, als_json: bool = False) -> str:
         """Einfacher Ollama-Aufruf ohne Tools (Zusammenfassungen). Gleiches
         Modell und Kontextfenster wie Robert, damit nichts neu geladen wird."""
         ar = self.cfg.get("voice", {}).get("auto_reply", {})
@@ -4714,6 +4741,8 @@ class TXServer:
                              {"role": "user", "content": prompt}],
                 "stream": False, "think": False, "options": optionen,
                 "keep_alive": bot.get("ollama_keep_alive", 0)}
+        if als_json:
+            body["format"] = "json"
         timeout = aiohttp.ClientTimeout(total=300)
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             async with sess.post(f"{url}/api/chat", json=body,
@@ -4817,6 +4846,218 @@ class TXServer:
             except Exception:
                 log.exception("Tagesrückblick-Schleife")
             await asyncio.sleep(900)
+
+    # ── Nachrichten ausrichten (02.10.) ─────────────────────────────────────
+    # "Robert, richte dem Hans aus, ..." -> speichern, und wenn Hans auf dem
+    # Kanal auftaucht, in der naechsten Pause zustellen.
+    _AUSRICHTEN_RE = re.compile(
+        r"aus\s*zu\s*richten|ausrichten|\bricht\w*\s+(?:\S+\s+){0,4}?aus\b"
+        r"|\bbestell\w*\s+(?:\S+\s+){0,4}?gr[üu](?:ß|ss)"
+        r"|\bsag\w*\s+(?:\S+\s+){0,4}?bescheid\b"
+        r"|\bnachricht\s+f[üu]r\b"
+        r"|\bsag\w*\s+(?:mal\s+)?(?:dem|der)\s+\w+\W+(?:er|sie)\s+soll")
+
+    def _nachrichten_laden(self):
+        try:
+            d = json.loads(self._nachrichten_pfad.read_text(encoding="utf-8"))
+            self._nachrichten = [n for n in d.get("nachrichten", []) if isinstance(n, dict)]
+        except Exception:
+            self._nachrichten = []
+
+    def _nachrichten_speichern(self):
+        try:
+            tmp = self._nachrichten_pfad.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"nachrichten": self._nachrichten}, ensure_ascii=False,
+                                      indent=1), encoding="utf-8")
+            tmp.replace(self._nachrichten_pfad)
+        except Exception as e:
+            log.warning("Nachrichten nicht gespeichert: %s", e)
+
+    @staticmethod
+    def _namen_norm(n: str) -> str:
+        n = (n or "").strip().lower()
+        for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+            n = n.replace(a, b)
+        return n
+
+    def _bekannte_namen(self, bot: dict) -> list[str]:
+        namen = [m.get("name", "").strip() for m in (bot.get("memory") or [])
+                 if isinstance(m, dict)]
+        namen += list((getattr(self, "_speaker_enrollments", None) or {}).keys())
+        return sorted({n for n in namen if n and n.lower() != (bot.get("name") or "robert").lower()})
+
+    async def _spontan_senden(self, room, room_name: str, text: str, art: str,
+                              warten_s: float = 300) -> bool:
+        """In der naechsten Funkpause einen festen Satz senden, mit derselben
+        Buchfuehrung wie eine normale Antwort."""
+        ende = time.time() + warten_s
+        while time.time() < ende:
+            await asyncio.sleep(2)
+            if (time.time() - self._raum_eingang.get(room_name, 0) >= self._BEGRUESSUNG_PAUSE_S
+                    and room_name not in self._bot_busy):
+                break
+        else:
+            return False
+        bot = self._bot_cfg()
+        if not bot.get("enabled"):
+            return False
+        self._bot_busy.add(room_name)
+        try:
+            stimmung = self._emotion_liste(bot)[0] if bot.get("emotion_auto") else ""
+            t0 = time.time()
+            ok = await self._auto_send_voice(room, text, stimmung or bot.get("speaker") or "default")
+            t1 = time.time()
+            if not ok:
+                return False
+            self._bot_last_reply[room_name] = t1
+            self._bot_protokoll(room_name, t0, t1, text, art, t0)
+            own = self._bot_own_tx.setdefault(room_name, [])
+            own.append((t0, t1, text))
+            del own[:-6]
+            self._hist_insert(self._room_hist.setdefault(room_name, []),
+                              (t1, f"{bot.get('name') or 'Robert'} (du)", text),
+                              max(4, int(bot.get("history_len", 10))) + 2 * self._PROMPT_BLOCK)
+            self._bot_state_merken()
+            log.info("[%s] %s: %s", room_name, art, text)
+            return True
+        except Exception as e:
+            log.warning("[%s] %s fehlgeschlagen: %s", room_name, art, e)
+            return False
+        finally:
+            self._bot_busy.discard(room_name)
+
+    async def _nachricht_annehmen(self, room, room_name: str, callsign: str,
+                                  text: str, ts: float, an_vorher: str | None = None):
+        bot = self._bot_cfg()
+        von_stimme = callsign if callsign and callsign != "Funker" else ""
+        prompt = (
+            f'Funkspruch an Robert: "{text}"\n'
+            f"Absender laut Stimmerkennung: {von_stimme or 'unbekannt'}\n"
+            + (f"Empfänger aus einem früheren Spruch: {an_vorher}\n" if an_vorher else "")
+            + f"Namen, die auf dem Kanal vorkommen: {', '.join(self._bekannte_namen(bot)) or '-'}\n\n"
+            "Jemand bittet Robert, einer Person etwas auszurichten. Antworte NUR mit JSON:\n"
+            '{"an": Vorname des Empfängers oder null, '
+            '"von": Vorname des Absenders oder null (nur wenn er sich im Spruch selbst nennt, '
+            'z.B. "hier ist der Peter" / "von Peter", oder die Stimmerkennung ihn kennt; nie raten), '
+            '"satz": die Nachricht als EIN Satz, den Robert dem Empfänger direkt sagen kann, '
+            'in indirekter Rede, ohne Anrede. Schreib für den Absender IMMER das Wort VON, '
+            'nie einen Namen und nie "der Absender"/"jemand" (z.B. "VON lässt ausrichten, '
+            'dass er morgen später kommt." / "Du sollst VON heute Abend mal anrufen." / '
+            '"Schöne Grüße von VON."). Achte auf die Rollen: "ich/mich/mir" im Spruch ist '
+            'der Absender (VON), "er/sie/ihn/ihm" ist der Empfänger (im satz: "du/dich/dir"). '
+            '"Er soll mich anrufen" wird also zu "Du sollst VON mal anrufen." '
+            'satz ist null, wenn der Spruch nur fragt, OB Robert '
+            'etwas ausrichten kann, ohne den Inhalt zu nennen. '
+            '"ablehnen": true wenn der Inhalt beleidigend, bedrohlich oder anstößig ist, sonst false}')
+        try:
+            roh = await self._ollama_text(bot,
+                "Du liest Aufträge aus Funksprüchen aus. Die Sprüche stammen aus "
+                "Spracherkennung und können Hörfehler enthalten. Erfinde nichts.",
+                prompt, num_predict=200, als_json=True)
+            d = json.loads(roh)
+        except Exception as e:
+            log.warning("[%s] Ausrichten: Auswertung fehlgeschlagen: %s", room_name, e)
+            await self._spontan_senden(room, room_name,
+                                       "Da hab ich nicht mitbekommen, was ich ausrichten soll. "
+                                       "Sag's bitte nochmal.", "(Ausrichten)", 60)
+            return
+        an = str(d.get("an") or an_vorher or "").strip()
+        an = an[:1].upper() + an[1:] if an else ""
+        von = str(d.get("von") or von_stimme or "").strip()
+        satz = str(d.get("satz") or "").strip()
+        if not re.fullmatch(r"[A-Za-zÄÖÜäöüß\- ]{2,30}", an or "-"):
+            an = ""
+        if d.get("ablehnen"):
+            antwort = "Nee, so was richte ich nicht aus."
+        elif not an:
+            antwort = "Klar, wem soll ich denn was ausrichten?"
+            self._nachricht_rueckfrage[room_name] = {"gefragt": time.time(), "text": text,
+                                                     "von": von_stimme}
+        elif not satz:
+            antwort = f"Klar, was soll ich {an} denn ausrichten?"
+            self._nachricht_rueckfrage[room_name] = {"gefragt": time.time(), "text": text,
+                                                     "von": von_stimme, "an": an}
+        elif not von and not an_vorher:
+            antwort = f"Mach ich. Und von wem soll ich das {an} ausrichten?"
+            self._nachricht_rueckfrage[room_name] = {"gefragt": time.time(), "text": text,
+                                                     "von": "", "an": an}
+        else:
+            von = von or "jemand vom Kanal"
+            satz = re.sub(r"\bVON\b", von, satz)
+            satz = satz[:1].upper() + satz[1:]
+            self._nachrichten.append({
+                "id": f"{int(ts * 1000):x}", "ts": ts, "raum": room_name,
+                "an": an, "von": von, "satz": satz[:300], "original": text[:400],
+                "zugestellt": None, "versuche": 0})
+            self._nachrichten_speichern()
+            log.info("[%s] Nachricht für %s hinterlegt (von %s): %s",
+                     room_name, an, von or "?", satz)
+            antwort = f"Alles klar, ich richte es aus, sobald {an} auf Kanal ist."
+        gesendet = await self._spontan_senden(room, room_name, antwort, "(Ausrichten)", 120)
+        if gesendet and room_name in self._nachricht_rueckfrage:
+            self._nachricht_rueckfrage[room_name]["gefragt"] = time.time()
+
+    _GRUSS_AN = r"(?:moin|hallo|morgen|guten\s+(?:morgen|tag|abend)|n'?abend|tach|servus|gr[üu](?:ß|ss)\s+dich|na)"
+
+    def _nachrichten_pruefen(self, room, room_name: str, callsign: str, text: str,
+                             ts: float, bot: dict) -> None:
+        """Ist ein Empfaenger offener Nachrichten gerade auf dem Kanal?"""
+        if time.time() - ts < self._BEGRUESSUNG_RUECKSTAU_S:
+            self._raum_eingang[room_name] = time.time()
+        if not (bot.get("enabled") and bot.get("nachrichten_enabled", True)):
+            return
+        rooms = bot.get("rooms") or []
+        if rooms and room_name not in rooms:
+            return
+        jetzt = time.time()
+        frist = float(bot.get("nachrichten_tage", 7)) * 86400
+        vorher = len(self._nachrichten)
+        self._nachrichten = [n for n in self._nachrichten
+                             if (n.get("zugestellt") and jetzt - n["zugestellt"] < 3 * 86400)
+                             or (not n.get("zugestellt") and jetzt - n.get("ts", 0) < frist)]
+        if len(self._nachrichten) != vorher:
+            self._nachrichten_speichern()
+        if jetzt - ts > self._BEGRUESSUNG_RUECKSTAU_S:
+            return
+        low = self._namen_norm(text)
+        cs = self._namen_norm(callsign)
+        for n in self._nachrichten:
+            if n.get("zugestellt") or n.get("plan") or ts < n.get("ts", 0) + 20:
+                continue
+            if jetzt < n.get("naechster", 0):
+                continue
+            an = self._namen_norm(n["an"])
+            sicher = (cs == an
+                      or re.search(rf"\b(?:hier\s+(?:ist|spricht|sitzt)\s+(?:der\s+|die\s+)?|"
+                                   rf"ich\s+bin(?:'?s)?\s+(?:der\s+|die\s+)?){re.escape(an)}\b", low)
+                      or re.search(rf"\b{re.escape(an)}\s+hier\b", low))
+            if sicher:
+                n["plan"] = True
+                asyncio.create_task(self._nachricht_zustellen(room, room_name, n["an"]))
+            elif re.search(rf"\b{self._GRUSS_AN}\W+(?:\w+\W+)?{re.escape(an)}\b", low):
+                n["gegruesst"] = ts      # begruesst -- ist er da, antwortet er gleich
+            elif n.get("gegruesst") and ts - n["gegruesst"] < 120:
+                n["plan"] = True
+                asyncio.create_task(self._nachricht_zustellen(room, room_name, n["an"]))
+
+    async def _nachricht_zustellen(self, room, room_name: str, an: str):
+        offen = [n for n in self._nachrichten
+                 if not n.get("zugestellt") and self._namen_norm(n["an"]) == self._namen_norm(an)]
+        if not offen:
+            return
+        saetze = " Und: ".join(n["satz"].rstrip(".!") + "." for n in offen)
+        text = f"{an}, ich soll dir was ausrichten: {saetze}"
+        ok = await self._spontan_senden(room, room_name, text, "(Nachricht zugestellt)", 300)
+        for n in offen:
+            n.pop("plan", None)
+            n.pop("gegruesst", None)
+            if ok:
+                n["zugestellt"] = time.time()
+                n["zugestellt_raum"] = room_name
+            else:
+                n["versuche"] = n.get("versuche", 0) + 1
+                n["naechster"] = time.time() + 300
+        self._nachrichten_speichern()
 
     _RB_WOCHENTAG = {"montag": 0, "dienstag": 1, "mittwoch": 2, "donnerstag": 3,
                      "freitag": 4, "samstag": 5, "sonnabend": 5, "sonntag": 6}
@@ -5952,6 +6193,13 @@ class TXServer:
                 erlaubt = ("wetter", "nachrichten", "fussball", "lippstadt")
                 bot["tagesprogramm_themen"] = [t for t in _strlist(body["tagesprogramm_themen"])
                                                if t in erlaubt]
+            if "nachrichten_enabled" in body:
+                bot["nachrichten_enabled"] = bool(body["nachrichten_enabled"])
+            if "nachrichten_tage" in body:
+                try:
+                    bot["nachrichten_tage"] = max(1, min(60, int(body["nachrichten_tage"])))
+                except (TypeError, ValueError):
+                    pass
             if "rueckblick_enabled" in body:
                 bot["rueckblick_enabled"] = bool(body["rueckblick_enabled"])
             if isinstance(body.get("rueckblick_zeit"), str):
@@ -6149,6 +6397,22 @@ class TXServer:
         return web.json_response({
             "datum": tp.get("datum"), "gebaut": tp.get("gebaut"),
             "themen": tp.get("themen") or {}, "neu_gebaut": neu})
+
+    async def handle_admin_nachrichten(self, request):
+        """GET: hinterlegte Nachrichten; POST {loeschen: id}."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            nid = str(body.get("loeschen") or "")
+            self._nachrichten = [n for n in self._nachrichten if n.get("id") != nid]
+            self._nachrichten_speichern()
+        return web.json_response({"nachrichten": sorted(
+            self._nachrichten, key=lambda n: n.get("ts", 0), reverse=True)})
 
     async def handle_admin_rueckblick(self, request):
         """GET: gespeicherte Tagesrueckblicke; POST {datum}: diesen Tag (Standard
@@ -9546,6 +9810,8 @@ class TXServer:
         app.router.add_get ("/api/admin/bot",       self.handle_admin_bot)
         app.router.add_get ("/api/admin/settings",  self.handle_admin_settings)
         app.router.add_post("/api/admin/settings",  self.handle_admin_settings)
+        app.router.add_get ("/api/admin/nachrichten", self.handle_admin_nachrichten)
+        app.router.add_post("/api/admin/nachrichten", self.handle_admin_nachrichten)
         app.router.add_get ("/api/admin/rueckblick", self.handle_admin_rueckblick)
         app.router.add_post("/api/admin/rueckblick", self.handle_admin_rueckblick)
         app.router.add_get ("/api/admin/tagesprogramm", self.handle_admin_tagesprogramm)

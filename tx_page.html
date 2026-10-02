@@ -1791,6 +1791,29 @@ audio {
         </div>
 
         <div class="adm-card">
+          <div class="adm-card-title">📨 Nachrichten ausrichten</div>
+          <div class="adm-card-sub">„Robert, richte dem Hans aus, er soll mich mal anrufen." Robert merkt sich das und sagt es Hans,
+            sobald der auf Kanal ist. Ist der Absender unbekannt oder fehlt der Inhalt, fragt er kurz nach.</div>
+          <label class="adm-sw">
+            <input type="checkbox" id="na-enabled" autocomplete="off">
+            <span class="adm-sw-text">Nachrichten annehmen und ausrichten</span>
+          </label>
+          <div class="adm-fields">
+            <div class="form-field">
+              <label>Verfällt nach <small>Tagen, wenn der Empfänger nicht auftaucht</small></label>
+              <input type="number" id="na-tage" min="1" max="60" autocomplete="off">
+            </div>
+          </div>
+          <div class="adm-hint">Wann der Empfänger als da gilt: Die Sprecher-Erkennung erkennt ihn sicher, er meldet sich selbst
+            („hier ist der Hans") oder er wird begrüßt („Moin Hans") und danach antwortet jemand. Beleidigendes lehnt er ab.</div>
+          <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+            <button type="button" class="btn-save" style="padding:6px 14px" onclick="loadNachrichten()">Aktualisieren</button>
+            <span id="na-stand" class="adm-hint" style="margin:0"></span>
+          </div>
+          <div id="na-liste" style="margin-top:10px;font-size:.8rem;line-height:1.5"></div>
+        </div>
+
+        <div class="adm-card">
           <div class="adm-card-title">🔎 Websuche</div>
           <div class="adm-card-sub">„Robert, such mal nach …" fragt die selbst gehostete SearXNG-Instanz ab, die Treffer
             landen als Zusatz im Prompt. Kostenlos, kein Cloud-Suchdienst.</div>
@@ -4709,6 +4732,9 @@ async function loadBotAdmin() {
     document.getElementById("rb-zeit").value      = d.rueckblick_zeit || "03:00";
     document.getElementById("rb-tage").value      = d.rueckblick_tage ?? 30;
     loadRueckblick();
+    document.getElementById("na-enabled").checked = d.nachrichten_enabled !== false;
+    document.getElementById("na-tage").value      = d.nachrichten_tage ?? 7;
+    loadNachrichten();
     document.getElementById("bot-gemini-model").value = d.gemini_model || "";
     document.getElementById("bot-gemini-key").value   = d.gemini_api_key || "";
     loadGeminiModels();   // Datalist mit echten Modell-IDs füllen
@@ -5093,6 +5119,8 @@ async function saveBotAdmin() {
     tagesprogramm_pro_antwort: numOderStandard("tp-pro", 2),
     tagesprogramm_themen:      [...document.querySelectorAll("#tp-themen input:checked")].map(c => c.value),
     rueckblick_enabled:        document.getElementById("rb-enabled").checked,
+    nachrichten_enabled:       document.getElementById("na-enabled").checked,
+    nachrichten_tage:          numOderStandard("na-tage", 7),
     rueckblick_zeit:           document.getElementById("rb-zeit").value,
     rueckblick_tage:           numOderStandard("rb-tage", 30),
     memory:                collectBotMemory(),
@@ -5150,6 +5178,44 @@ function rueckblickZeigen(tage) {
                `<div style="color:var(--muted);white-space:pre-wrap;margin:6px 0 0 12px">${esc(t.text)}</div></details>`;
       }).join("")
     : '<span style="color:var(--muted)">Noch kein Rückblick gespeichert.</span>';
+}
+
+function nachrichtenZeigen(liste) {
+  const el = document.getElementById("na-liste");
+  const zeit = ts => new Date(ts * 1000).toLocaleString("de-DE", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"});
+  el.innerHTML = (liste || []).length
+    ? liste.map(n => {
+        const status = n.zugestellt
+          ? `<span style="color:var(--accent)">✓ ausgerichtet ${esc(zeit(n.zugestellt))}</span>`
+          : `<span style="color:var(--muted)">offen${n.versuche ? ` · ${n.versuche} Fehlversuch(e)` : ""}</span>`;
+        return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">` +
+               `<b>an ${esc(n.an)}</b> <span style="color:var(--muted)">von ${esc(n.von || "?")} · ${esc(zeit(n.ts))}</span> · ${status}` +
+               ` <button type="button" class="btn-icon" style="float:right" title="Löschen" data-id="${esc(n.id)}" onclick="nachrichtLoeschen(this.dataset.id)">✕</button>` +
+               `<div style="margin-top:4px">${esc(n.satz)}</div>` +
+               `<div style="color:var(--muted);font-size:.74rem">gehört: „${esc(n.original)}"</div></div>`;
+      }).join("")
+    : '<span style="color:var(--muted)">Keine Nachrichten hinterlegt.</span>';
+}
+
+async function loadNachrichten() {
+  const st = document.getElementById("na-stand");
+  try {
+    const r = await adminFetch("/api/admin/nachrichten");
+    const d = await r.json();
+    if (!r.ok || d.error) { st.textContent = "nicht geladen: " + (d.error || r.status); return; }
+    st.textContent = "";
+    nachrichtenZeigen(d.nachrichten);
+  } catch(e) { st.textContent = "nicht geladen: " + e; }
+}
+
+async function nachrichtLoeschen(id) {
+  if (!confirm("Nachricht löschen?")) return;
+  try {
+    const r = await adminFetch("/api/admin/nachrichten", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({loeschen: id})});
+    const d = await r.json();
+    if (r.ok && !d.error) nachrichtenZeigen(d.nachrichten);
+  } catch(e) { document.getElementById("na-stand").textContent = "Fehler: " + e; }
 }
 
 async function loadRueckblick() {
