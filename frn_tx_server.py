@@ -776,6 +776,7 @@ class TXServer:
         self._room_hist: dict[str, list] = {}       # Raum → [(ts, wer, text), …]
         self._bot_last_reply: dict[str, float] = {} # Raum → Zeit letzter Bot-Sendung
         self._bot_own_tx: dict[str, list] = {}      # Raum → [(t0, t1, text), …]
+        self._anschluss_folge: dict[str, int] = {}    # Raum → Anschluss-Antworten seit letztem Namensruf
         self._kurzruf_zuletzt: dict[str, float] = {}  # Raum → Zeit des letzten beantworteten Kurzrufs
         self._bot_protokoll_pfad = Path(__file__).parent / "bot_replies.jsonl"
         self._prompt_anker: dict = {}   # Raumname (sonst id(Verlauf)) -> ts des ersten Spruchs
@@ -1847,6 +1848,7 @@ class TXServer:
                                                     # 0 = nicht mitschicken (Server-Vorgabe)
             "ollama_num_predict":       (0, 4096),
             "follow_up_window_s":       (0, 3600),   # 0 = keine Anschlussfragen
+            "follow_up_max":            (0, 50),     # 0 = unbegrenzt
             "history_max_age_s":        (600, 86400),# Verlauf hoechstens so alt
             "begruessung_ruhe_h":       (0.5, 48),
             "begruessung_min_sprueche": (1, 200),
@@ -1886,6 +1888,7 @@ class TXServer:
         # kann ihm also antworten, ohne ihn jedes Mal neu zu rufen. 0 = aus
         # (dann muss der Name wirklich in jedem Spruch stehen).
         "follow_up_window_s": 120,
+        "follow_up_max": 3,
         # Wie weit der Verlauf hoechstens zurueckreicht (Sekunden). Die Anzahl
         # begrenzt history_len; diese Grenze wirkt nur in ruhigen Phasen.
         "history_max_age_s": 10800,
@@ -2228,15 +2231,37 @@ class TXServer:
     # einmal je voice.bot.kurzruf_sperre_s (Standard 10 min) und Raum.
     _GRUSS_VOR_NAME = re.compile(r"\b(hallo|moin|morgen|tag|abend|servus|hey|hi|na|hei)\W*$")
 
+    # Erzaehlung UEBER einen (anderen) Robert statt Ansprache (02.10.: "Und da
+    # war erst Robert, der sagt, ich uebernehme das Haus" loeste 13 Minuten
+    # Antwortkette aus).
+    _ERWAEHNT_VOR = re.compile(
+        r"\b(der|den|dem|des|vom|von|mit|beim|bei|zum|f[uü]r|fuer|[uü]ber|ueber|ohne|"
+        r"unser\w*|mein\w*|dein\w*|sein\w*|ihr\w*|ein|einen|einem|kein\w*|namens)\W*$")
+    _ERWAEHNT_NACH = re.compile(r"^\W*(der|wo|welcher|den|dem)\s+\w+")
+    _DU_RE = re.compile(r"\b(du|dir|dich|dein\w*)\b")
+
+    def _nur_erwaehnt(self, low: str, m) -> bool:
+        anfang = max(low.rfind(z, 0, m.start()) for z in ".!?")
+        ende = min([i for i in (low.find(z, m.end()) for z in ".!?") if i >= 0] or [len(low)])
+        if ende < len(low) and low[ende] == "?":
+            return False
+        if self._DU_RE.search(low[anfang + 1:ende]):
+            return False
+        return bool(self._ERWAEHNT_VOR.search(low[anfang + 1:m.start()])
+                    or self._ERWAEHNT_NACH.search(low[m.end():ende]))
+
     def _namensruf(self, low: str, triggers: list) -> str | None:
         """None = Name faellt nicht; "echt" = richtige Ansprache; "kurz" = nur
         Name (+Gruss/Frage), max. 3 Woerter; "angehaengt" = Name ohne Frage,
-        ohne Gruss und ohne etwas danach -- zaehlt nicht als Ansprache."""
+        ohne Gruss und ohne etwas danach -- zaehlt nicht als Ansprache;
+        "erwaehnt" = es wird ueber jemanden mit dem Namen erzaehlt."""
         treffer = []
         for t in triggers:
-            treffer += list(re.finditer(re.escape(t), low))
+            treffer += list(re.finditer(r"\b" + re.escape(t), low))
         if not treffer:
             return None
+        if all(self._nur_erwaehnt(low, m) for m in treffer):
+            return "erwaehnt"
         frage = "?" in low
         worte = len(re.findall(r"\w+", low))
         echt = frage
@@ -2250,6 +2275,10 @@ class TXServer:
         if not echt:
             return "angehaengt"
         return "kurz" if worte <= 3 else "echt"
+
+    def _anschluss_erschoepft(self, bot: dict, room: str) -> bool:
+        maxi = int(bot.get("follow_up_max", 3) or 0)
+        return maxi > 0 and self._anschluss_folge.get(room, 0) >= maxi
 
     def bot_angesprochen(self, text: str, room: str = "") -> bool:
         """Faellt Roberts Name (oder ein Trigger-Wort) im Text? Gleiche Pruefung
@@ -2275,7 +2304,7 @@ class TXServer:
         if room and len(re.findall(r"\w+", low)) >= 4:
             folge_s = float(bot.get("follow_up_window_s", 120))
             letzte = self._bot_last_reply.get(room, 0.0)
-            if folge_s > 0 and time.time() - letzte < folge_s:
+            if folge_s > 0 and time.time() - letzte < folge_s and not self._anschluss_erschoepft(bot, room):
                 return True
         return False
 
@@ -3103,6 +3132,11 @@ class TXServer:
                 return
             self._kurzruf_zuletzt[room_name] = now
         name_hit     = ruf in ("echt", "kurz")
+        if ruf == "erwaehnt":
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "warn",
+                                  detail="Name nur erwähnt (Erzählung über jemanden) -- keine Ansprache")
+        if name_hit:
+            self._anschluss_folge[room_name] = 0
         name_or_call = name_hit or bool(self._BOT_CALL_RE.search(low))
         # Schalter "nur auf Ansprache" (User-Wunsch 2026-09-16): dann meldet
         # sich Robert AUSSCHLIESSLICH, wenn sein Name faellt -- kein
@@ -3122,6 +3156,15 @@ class TXServer:
                                       detail="nur auf Ansprache aktiv -- Name nicht gefallen",
                                       final=True)
                 return
+            # Kettenbremse (02.10.): jede eigene Sendung oeffnet das Fenster neu,
+            # ohne Grenze plaudert er endlos in fremde Gespraeche hinein.
+            if self._anschluss_erschoepft(bot, room_name):
+                self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                      detail=f"Anschluss-Grenze erreicht ({self._anschluss_folge.get(room_name, 0)} "
+                                             f"Antworten ohne Namensruf) -- erst wieder auf Ansprache",
+                                      final=True)
+                return
+            self._anschluss_folge[room_name] = self._anschluss_folge.get(room_name, 0) + 1
             self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
                                   detail=f"Anschlussfrage ({now - last:.0f}s nach eigener "
                                          f"Sendung, Fenster {folge_s:.0f}s)")

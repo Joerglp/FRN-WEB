@@ -1611,11 +1611,18 @@ audio {
               <label>Anschlussfragen (Sek.) <small>0 = aus</small></label>
               <input type="number" id="bot-followup" min="0" max="3600" step="10" autocomplete="off">
             </div>
+            <div class="form-field">
+              <label>Max. Anschluss-Antworten <small>ohne neuen Namensruf, 0 = unbegrenzt</small></label>
+              <input type="number" id="bot-followup-max" min="0" max="50" step="1" autocomplete="off">
+            </div>
           </div>
           <div class="adm-hint">
             Anschlussfragen: Nach seiner Sendung bleibt er so lange ohne Namensnennung ansprechbar
             („Geht deine Suche nicht?"). Der Zeitraum beginnt mit jeder seiner Sendungen neu und
-            gilt nur zusammen mit „Nur auf Ansprache".
+            gilt nur zusammen mit „Nur auf Ansprache". Nach der eingestellten Zahl Antworten ohne
+            Namensruf ist Schluss, bis ihn wieder jemand mit Namen anspricht. Das verhindert, dass er
+            sich endlos in fremde Gespräche einklinkt. Erzählungen über einen anderen Robert
+            („…da war der Robert, der sagt…“) zählen nicht als Ansprache.
           </div>
         </div>
 
@@ -4489,6 +4496,7 @@ const GRENZ_FELDER = {
   "bot-historylen": ["bot", "history_len", 1],
   "bot-ollama-numctx": ["bot", "ollama_num_ctx", 1],
   "bot-followup": ["bot", "follow_up_window_s", 1],
+  "bot-followup-max": ["bot", "follow_up_max", 1],
   "bot-ollama-numpredict": ["bot", "ollama_num_predict", 1],
   "bot-temperatur": ["bot", "temperature", 1],
   "ar-cooldown": ["auto_reply", "cooldown_s", 1],
@@ -4621,6 +4629,7 @@ async function loadBotAdmin() {
     document.getElementById("bot-enabled").checked = !!d.enabled;
     document.getElementById("bot-only-addressed").checked = !!d.only_when_addressed;
     document.getElementById("bot-followup").value = d.follow_up_window_s ?? 120;
+    document.getElementById("bot-followup-max").value = d.follow_up_max ?? 3;
     document.getElementById("bot-begruessung").checked = d.begruessung_enabled !== false;
     document.getElementById("bot-begr-ruhe").value     = d.begruessung_ruhe_h ?? 3;
     document.getElementById("bot-begr-sprueche").value = d.begruessung_min_sprueche ?? 6;
@@ -5002,6 +5011,7 @@ async function saveBotAdmin() {
     mitschreiber_enabled:  document.getElementById("bot-mitschreiber").checked,
     unsicher_markieren:    document.getElementById("bot-unsicher").checked,
     follow_up_window_s:    numOderStandard("bot-followup", 120),   // 0 gueltig = aus
+    follow_up_max:         numOderStandard("bot-followup-max", 3),
     begruessung_enabled:   document.getElementById("bot-begruessung").checked,
     begruessung_ruhe_h:    numOderStandard("bot-begr-ruhe", 3),
     begruessung_min_sprueche: numOderStandard("bot-begr-sprueche", 6),
