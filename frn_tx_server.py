@@ -1913,6 +1913,7 @@ class TXServer:
         # sich aus ein Thema einbringen -- damit er nicht immer dasselbe erzaehlt.
         "tagesprogramm_enabled": True,
         "tagesprogramm_zeit": "05:30",
+        "tagesprogramm_zeit_abend": "20:15",   # leer = nur morgens
         "tagesprogramm_themen": ["wetter", "nachrichten", "fussball", "lippstadt"],
         "rueckblick_enabled": True,
         "rueckblick_zeit": "03:00",
@@ -3927,6 +3928,12 @@ class TXServer:
         return (f"Fussball-Daten (OpenLigaDB, heute ist {self._WOTAG[heute.weekday()]} "
                 f"{heute:%d.%m.%Y}):\n" + "\n".join(zeilen))
 
+    # Feed-Eintraege, die nur eine Sendung sind ("tagesschau 20:00 Uhr"), keine Meldung
+    _SENDUNG_RE = re.compile(
+        r"^\s*(?:tagesschau|tagesthemen|nachtmagazin|tagesschau24|tagesschau in 100 sekunden|"
+        r"tagesschau vor 20 jahren|bericht aus berlin)"
+        r"(?:\s*,?\s*(?:\d{1,2}[:.]\d{2}\s*uhr|(?:vom\s+)?\d{1,2}\.\d{1,2}\.(?:\d{2,4})?|extra|spezial))*\s*$", re.IGNORECASE)
+
     async def _bot_nachrichten(self, nur_titel: bool = False) -> str:
         """Top-Schlagzeilen der tagesschau (RSS). "" bei Fehler."""
         import xml.etree.ElementTree as ET
@@ -3946,7 +3953,7 @@ class TXServer:
         for it in wurzel.iter("item"):
             titel = (it.findtext("title") or "").strip()
             text = re.sub(r"<[^>]+>", "", it.findtext("description") or "").strip()
-            if not titel or "livestream" in titel.lower():
+            if not titel or "livestream" in titel.lower() or self._SENDUNG_RE.match(titel):
                 continue
             if nur_titel:
                 zeilen.append(f"- {titel}")
@@ -4206,15 +4213,24 @@ class TXServer:
             try:
                 bot = self._bot_cfg()
                 if bot.get("tagesprogramm_enabled"):
-                    zeit = str(bot.get("tagesprogramm_zeit") or "05:30")
-                    try:
-                        hh, mm = (int(x) for x in zeit.split(":")[:2])
-                    except ValueError:
-                        hh, mm = 5, 30
+                    # Morgens und (optional) abends nach der Tagesschau neu bauen:
+                    # faellig ist der juengste heutige Termin, der schon vorbei
+                    # ist und nach dem noch nicht gebaut wurde.
                     jetzt = datetime.now()
-                    faellig = (jetzt.hour, jetzt.minute) >= (hh, mm)
-                    if faellig or not self._tagesprogramm.get("themen"):
-                        await self._tagesprogramm_refresh()
+                    termine = []
+                    for z in (bot.get("tagesprogramm_zeit") or "05:30",
+                              bot.get("tagesprogramm_zeit_abend") or ""):
+                        try:
+                            hh, mm = (int(x) for x in str(z).split(":")[:2])
+                        except ValueError:
+                            continue
+                        t = jetzt.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                        if t <= jetzt:
+                            termine.append(t.timestamp())
+                    gebaut = float(self._tagesprogramm.get("gebaut") or 0)
+                    if not self._tagesprogramm.get("themen") or \
+                            (termine and gebaut < max(termine)):
+                        await self._tagesprogramm_refresh(erzwingen=True)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -4234,7 +4250,8 @@ class TXServer:
             return ""
         try:
             d = datetime.strptime(tp.get("datum") or "", "%Y-%m-%d")
-            stand = f" (Stand {self._WOCHENTAGE[d.weekday()]}, {d:%d.%m.%Y}, früh morgens)"
+            uhr = datetime.fromtimestamp(float(tp.get("gebaut") or 0)).strftime("%H:%M")
+            stand = f" (Stand {self._WOCHENTAGE[d.weekday()]}, {d:%d.%m.%Y}, {uhr} Uhr)"
         except ValueError:
             stand = ""
         return f"Tagesprogramm{stand}:\n" + "\n\n".join(themen.values())
@@ -6271,6 +6288,12 @@ class TXServer:
                 bot["trigger"] = _strlist(body["trigger"])
             if "tagesprogramm_enabled" in body:
                 bot["tagesprogramm_enabled"] = bool(body["tagesprogramm_enabled"])
+            if isinstance(body.get("tagesprogramm_zeit_abend"), str):
+                z = body["tagesprogramm_zeit_abend"].strip()
+                m_z = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", z)
+                if m_z or not z:
+                    bot["tagesprogramm_zeit_abend"] = \
+                        f"{int(m_z.group(1)):02d}:{m_z.group(2)}" if m_z else ""
             if isinstance(body.get("tagesprogramm_zeit"), str):
                 m_z = re.fullmatch(r"\s*([01]?\d|2[0-3]):([0-5]\d)\s*", body["tagesprogramm_zeit"])
                 if m_z:
@@ -8819,7 +8842,9 @@ class TXServer:
              "items": [
                 ("Tagesprogramm",   "AN" if bot.get("tagesprogramm_enabled") else "AUS",
                                     bool(bot.get("tagesprogramm_enabled"))),
-                ("Neu um",          str(bot.get("tagesprogramm_zeit")) + " Uhr", None),
+                ("Neu um",          str(bot.get("tagesprogramm_zeit")) + " Uhr"
+                                    + (f" und {bot.get('tagesprogramm_zeit_abend')} Uhr"
+                                       if bot.get("tagesprogramm_zeit_abend") else ""), None),
                 ("Themen",          ", ".join(bot.get("tagesprogramm_themen") or []) or "—", None),
                 ("Websuche",        "AN" if (bot.get("websearch") or {}).get("enabled") else "AUS",
                                     bool((bot.get("websearch") or {}).get("enabled"))),
