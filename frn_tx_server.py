@@ -4130,8 +4130,53 @@ class TXServer:
         if n < 2:
             return ""
         wie = "gewonnen" if de > geg else "verloren" if de < geg else "unentschieden gespielt"
-        return (f"Letztes Länderspiel (aus den Meldungen der letzten Tage): Deutschland hat "
-                f"gegen {gegner} {de}:{geg} {wie}")
+        return f"Letztes Länderspiel: Deutschland hat gegen {gegner} {de}:{geg} {wie}"
+
+    _VEREIN_KURZ = {
+        "FC Bayern München": "Bayern", "1. FC Union Berlin": "Union", "Borussia Dortmund": "Dortmund",
+        "Borussia Mönchengladbach": "Gladbach", "FC Schalke 04": "Schalke", "SC Paderborn 07": "Paderborn",
+        "TSG Hoffenheim": "Hoffenheim", "VfB Stuttgart": "Stuttgart", "SV Werder Bremen": "Bremen",
+        "Bayer 04 Leverkusen": "Leverkusen", "RB Leipzig": "Leipzig", "Eintracht Frankfurt": "Frankfurt",
+        "SC Freiburg": "Freiburg", "1. FSV Mainz 05": "Mainz", "Hamburger SV": "HSV", "1. FC Köln": "Köln",
+        "FC Augsburg": "Augsburg", "SV 07 Elversberg": "Elversberg", "VfL Wolfsburg": "Wolfsburg",
+        "1. FC Heidenheim 1846": "Heidenheim", "FC St. Pauli": "St. Pauli", "Holstein Kiel": "Kiel",
+        "VfL Bochum": "Bochum", "1. FC Kaiserslautern": "Kaiserslautern", "Hertha BSC": "Hertha"}
+    _TP_SPIEL_RE = re.compile(r"^\s*(\w\w) (\d\d\.\d\d\.) \d\d:\d\d Uhr: (.+?) gegen (.+?)"
+                              r"(?: (\d+:\d+) \(Endstand\)| \(noch nicht gespielt\))?$")
+
+    def _fussball_kompakt(self, f: str) -> list[str]:
+        """Bundesliga-Block aus _bot_fussball in wenige Zeilen: Ergebnisse
+        und Termine je Spieltag in einer Zeile, Tabellenspitze."""
+        kurz = lambda n: self._VEREIN_KURZ.get(n.strip(), n.strip())
+        zeilen, kopf, teile, tag_vorher = [], "", [], ""
+        def fertig():
+            if kopf and teile:
+                zeilen.append(f"{kopf}: " + ", ".join(teile))
+        for l in f.splitlines():
+            if l.startswith("1. Bundesliga"):
+                fertig()
+                kopf = l.rstrip(":").replace("1. Bundesliga, ", "Bundesliga ")
+                teile, tag_vorher = [], ""
+            elif l.startswith("Tabellenspitze"):
+                fertig()
+                kopf, teile = "", []
+                tab = re.findall(r"(\d)\. (.+?) \((\d+) Punkte\)", l)
+                zeilen.append("Tabelle: " + ", ".join(f"{p}. {kurz(n)} {pk}" for p, n, pk in tab[:3]))
+            else:
+                m = self._TP_SPIEL_RE.match(l)
+                if not m:
+                    continue
+                wt, dat, t1, t2, erg = m.groups()
+                # Nur die Vereine der Runde; andere fragt Robert live ab
+                if not re.search(r"Paderborn|Dortmund|Bayern|Schalke", t1 + t2):
+                    continue
+                spiel = f"{kurz(t1)}–{kurz(t2)}" + (f" {erg}" if erg else "")
+                if not erg and f"{wt} {dat}" != tag_vorher:
+                    spiel = f"{wt} {dat} {spiel}"
+                    tag_vorher = f"{wt} {dat}"
+                teile.append(spiel)
+        fertig()
+        return zeilen
 
     async def _tagesprogramm_bauen(self, bot: dict) -> dict:
         """Holt alle gewaehlten Themen und gibt {thema: kurzer Text} zurueck;
@@ -4155,21 +4200,12 @@ class TXServer:
             if zl:
                 out["nachrichten"] = "Schlagzeilen (tagesschau):\n" + "\n".join(zl)
         if "fussball" in themen:
-            f = await self._bot_fussball("Bundesliga")
-            zl = []
-            for l in f.splitlines():
-                l = l.replace(" (noch nicht gespielt)", "").rstrip()
-                if l.startswith("1. Bundesliga") or l.startswith("Tabellenspitze") \
-                        or re.search(r"Paderborn|Dortmund|Bayern|Schalke", l):
-                    if l.startswith("Tabellenspitze"):
-                        l = ", ".join(l.split(", ")[:3])
-                    zl.append(l.strip())
-            ls = "\n".join(x for x in (await self._tp_laenderspiel_ergebnis(bot),
-                                        await self._tp_laenderspiel(bot)) if x)
-            if zl or ls:
-                out["fussball"] = "Fußball:\n" + ("\n".join([ls] if ls else [])
-                                                 + ("\n" if ls and zl else "")
-                                                 + "\n".join(zl[:12]))
+            # Kompakt (02.10.): steht den ganzen Tag im festen Prompt-Teil
+            zl = self._fussball_kompakt(await self._bot_fussball("Bundesliga"))
+            zl = [x for x in (await self._tp_laenderspiel_ergebnis(bot),
+                              await self._tp_laenderspiel(bot)) if x] + zl
+            if zl:
+                out["fussball"] = "Fußball:\n" + "\n".join(zl)
         if "lippstadt" in themen:
             l = await self._tp_lippstadt(bot)
             if l:
@@ -5241,26 +5277,18 @@ class TXServer:
         # Sprechernamen (02.10.): das Modell wusste nicht, dass der Name vor dem
         # Doppelpunkt aus der Stimmerkennung kommt -- es sprach nie jemanden an.
         if self._speaker_id_cfg().get("enabled"):
-            system += ("\n\nVor jedem Funkspruch steht, wer spricht: Der Name ist per "
-                       "Stimme erkannt und meist richtig, 'Funker' heißt, die Stimme ist "
-                       "unbekannt. Sprich bekannte Leute ruhig mal mit ihrem Namen an, "
-                       "aber nicht in jedem Satz, und nie mit 'Funker'. Ist bei 'Funker' "
-                       "aus dem Gespräch klar, wer es ist (\"hier ist der Hans\"), darfst "
-                       "du den Namen nehmen, sonst lass ihn weg.")
+            system += ("\n\nVor jedem Funkspruch steht der per Stimme erkannte Sprecher "
+                       "('Funker' = unbekannt). Bekannte darfst du ab und zu mit Namen "
+                       "ansprechen, nie mit 'Funker'.")
         # Regel zum Tagesprogramm steht im statischen Teil (zwischengespeichert),
         # im Hinweis stehen nur die Daten.
         tp_text = self._tagesprogramm_text(bot)
         if tp_text:
-            system += ("\n\nUnten steht dein Tagesprogramm mit echten Meldungen. Du darfst "
-                       "daraus von dir aus EIN Thema einbringen, aber nur, wenn es zum "
-                       "Gespräch passt oder eine Pause ist: nicht aufzählen, in einem "
-                       "lockeren Satz. Schau in den Verlauf, was du schon erzählt hast, "
-                       "und nimm dann ein ANDERES Thema, statt dich zu wiederholen. Nenne "
-                       "nur, was dort WÖRTLICH steht. Fragt dich jemand nach Neuigkeiten "
-                       "(\"was gibt's Neues\", \"was ist los\", \"was hörst du so\"), "
-                       "antworte mit einem Thema daraus, in ein bis zwei Sätzen, statt nur "
-                       "zu grüßen. Fragt jemand gezielt (Wetter, Fußball, Nachrichten), "
-                       "nimm das passende.\n\n" + tp_text)
+            system += ("\n\nTagesprogramm (unten, echte Meldungen): Bring höchstens EIN "
+                       "Thema ein, wenn es passt oder Pause ist, locker in einem Satz, nichts "
+                       "aufzählen, nichts wiederholen, was im Verlauf schon steht. Nur was "
+                       "dort WÖRTLICH steht. Auf \"was gibt's Neues\" antworte mit einem "
+                       "Thema daraus, bei gezielter Frage mit dem passenden.\n\n" + tp_text)
         spaet = [self._jetzt_satz(datetime.fromtimestamp(jetzt_ts) if jetzt_ts else None)]   # Teile des Hinweises vor dem letzten Spruch
         # Stimmungsregel nur, solange eine Stimme mit Stimmungen spricht
         # (2026-09-27): XTTS spricht fest mit dem xtts_speaker, die gewaehlte
