@@ -19,7 +19,7 @@ import ctypes
 import ctypes.util
 import base64
 import bisect
-from datetime import datetime
+from datetime import datetime, timedelta
 import difflib
 import hashlib
 import io
@@ -796,6 +796,10 @@ class TXServer:
         self._tagesprogramm_pfad = Path(__file__).parent / "tagesprogramm.json"
         self._tagesprogramm: dict = {}
         self._tagesprogramm_laden()
+        self._rueckblick_pfad = Path(__file__).parent / "tagesrueckblick.json"
+        self._rueckblick: dict = {}
+        self._rueckblick_laeuft = False
+        self._rueckblick_laden()
         self._bot_state_pending = False
         self._bot_state_load()
         self._bot_busy: set[str] = set()
@@ -1906,7 +1910,10 @@ class TXServer:
         "tagesprogramm_enabled": True,
         "tagesprogramm_zeit": "05:30",
         "tagesprogramm_themen": ["wetter", "nachrichten", "fussball", "lippstadt"],
-        "tagesprogramm_pro_antwort": 2,   # so viele Themen je Anfrage im Hinweis
+        "tagesprogramm_pro_antwort": 2,
+        "rueckblick_enabled": True,
+        "rueckblick_zeit": "03:00",
+        "rueckblick_tage": 30,   # so viele Themen je Anfrage im Hinweis
         "name":     "Robert",
         "trigger":  ["robert", "roboter", "funk-roboter"],
         "speaker":  "damien_black",
@@ -4637,6 +4644,240 @@ class TXServer:
             return "Dieser Verlauf läuft auf CB-Kanal 74."
         return ""
 
+    # ── Tagesrueckblick (02.10.) ────────────────────────────────────────────
+    # Nachts eine Zusammenfassung des Vortags aus dem Archiv bauen, damit
+    # Robert auf "was war gestern los?" antworten kann. Themenorientiert:
+    # die Sprecher-Zuordnung im CB-Kanal ist zu unsicher fuer "wer sagte was".
+
+    def _rueckblick_laden(self):
+        try:
+            d = json.loads(self._rueckblick_pfad.read_text(encoding="utf-8"))
+            if isinstance(d.get("tage"), dict):
+                self._rueckblick = d
+        except Exception:
+            self._rueckblick = {"tage": {}}
+
+    def _rueckblick_speichern(self):
+        try:
+            tmp = self._rueckblick_pfad.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._rueckblick, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            tmp.replace(self._rueckblick_pfad)
+        except Exception as e:
+            log.warning("Tagesrückblick nicht gespeichert: %s", e)
+
+    def _rueckblick_zeilen(self, datum: str, rooms: list) -> list[str]:
+        """Durchsagen eines Tages als 'HH:MM Name: Text' (Name nur bei sicherer
+        Sprecher-Erkennung, sonst '?')."""
+        import sqlite3
+        from frn_archive import DB_PATH
+        t0 = datetime.strptime(datum, "%Y-%m-%d").timestamp()
+        con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT timestamp, room, callsign, sprecher, text FROM transmissions "
+                "WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+                (t0, t0 + 86400)).fetchall()
+        finally:
+            con.close()
+        zeilen = []
+        for ts, room, cs, sp, tx in rows:
+            tx = (tx or "").strip()
+            if rooms and room not in rooms:
+                continue
+            if len(re.findall(r"\w+", tx)) < 3:
+                continue
+            wer = cs or "?"
+            if sp:
+                try:
+                    j = json.loads(sp)
+                    if j.get("ergebnis") == "treffer" and j.get("name"):
+                        wer = j["name"]
+                except (ValueError, AttributeError):
+                    pass
+            zeilen.append(f"{datetime.fromtimestamp(ts):%H:%M} {wer}: {tx[:400]}")
+        return zeilen
+
+    async def _ollama_text(self, bot: dict, system: str, prompt: str,
+                           num_predict: int = 600) -> str:
+        """Einfacher Ollama-Aufruf ohne Tools (Zusammenfassungen). Gleiches
+        Modell und Kontextfenster wie Robert, damit nichts neu geladen wird."""
+        ar = self.cfg.get("voice", {}).get("auto_reply", {})
+        url = (bot.get("ollama_url") or ar.get("ollama_url")
+               or "http://192.0.0.17:11434").rstrip("/")
+        optionen = {"num_predict": num_predict, "temperature": 0.2}
+        num_ctx = int(bot.get("ollama_num_ctx", 0) or 0)
+        if num_ctx > 0:
+            optionen["num_ctx"] = num_ctx
+        body = {"model": bot.get("ollama_model") or "qwen3:14b",
+                "messages": [{"role": "system", "content": system},
+                             {"role": "user", "content": prompt}],
+                "stream": False, "think": False, "options": optionen,
+                "keep_alive": bot.get("ollama_keep_alive", 0)}
+        timeout = aiohttp.ClientTimeout(total=300)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.post(f"{url}/api/chat", json=body,
+                                 headers=self._ollama_headers(bot.get("ollama_token"))) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"Ollama HTTP {resp.status}: {(await resp.text())[:120]}")
+                data = await resp.json()
+        return ((data.get("message") or {}).get("content") or "").strip()
+
+    _RB_SYSTEM = (
+        "Du fasst Mitschriften eines CB-Funk-Kanals (Kanal 74, Eickelborn/Lippstadt) "
+        "zusammen. Die Mitschriften stammen aus automatischer Spracherkennung und "
+        "enthalten Hörfehler und Wortsalat: ignoriere Unverständliches, rate nichts "
+        "dazu und erfinde nichts. 'Robert' ist der KI-Funker selbst. Namen nur "
+        "nennen, wenn sie im Text eindeutig fallen. Schreib auf Deutsch, sachlich, "
+        "ohne Einleitung.")
+
+    async def _rueckblick_bauen(self, datum: str) -> str | None:
+        """Baut den Rueckblick fuer datum; None bei Erfolg, sonst Fehlertext."""
+        if self._rueckblick_laeuft:
+            return "läuft schon"
+        self._rueckblick_laeuft = True
+        try:
+            bot = self._bot_cfg()
+            zeilen = await asyncio.to_thread(self._rueckblick_zeilen, datum,
+                                             bot.get("rooms") or [])
+            if len(zeilen) < 5:
+                return f"zu wenig Funkverkehr am {datum} ({len(zeilen)} Durchsagen)"
+            # Bloecke von ~6000 Zeichen: passt auch in kleine Kontextfenster
+            bloecke, akt = [], []
+            for z in zeilen:
+                if akt and sum(len(x) for x in akt) + len(z) > 6000:
+                    bloecke.append(akt)
+                    akt = []
+                akt.append(z)
+            bloecke.append(akt)
+            notizen = []
+            for b in bloecke:
+                von, bis = b[0][:5], b[-1][:5]
+                n = await self._ollama_text(bot, self._RB_SYSTEM,
+                    f"Funkmitschrift {von}–{bis} Uhr:\n" + "\n".join(b) +
+                    "\n\nNotiere stichpunktartig die Gesprächsthemen dieses Abschnitts "
+                    "(je Punkt ein kurzer Satz, mit Uhrzeit, wer beteiligt war, falls "
+                    "klar). Höchstens 8 Punkte. Nur Belangloses (Grüße, Rapporte) weglassen.",
+                    num_predict=500)
+                if n:
+                    notizen.append(f"[{von}–{bis}]\n{n}")
+            if not notizen:
+                return "Modell lieferte keine Notizen"
+            d = datetime.strptime(datum, "%Y-%m-%d")
+            tag = f"{self._WOCHENTAGE[d.weekday()]}, {d:%d.%m.%Y}"
+            text = await self._ollama_text(bot, self._RB_SYSTEM,
+                f"Notizen zum Funktag {tag}:\n\n" + "\n\n".join(notizen) +
+                "\n\nSchreib daraus einen Tagesrückblick: höchstens 10 Stichpunkte, "
+                "die wichtigsten und auffälligsten Themen zuerst, jeweils mit ungefährer "
+                "Tageszeit (morgens/mittags/nachmittags/abends) und den Beteiligten, "
+                "wenn bekannt. Am Ende eine Zeile 'Dabei: ' mit den Namen, die "
+                "eindeutig auf dem Kanal waren.",
+                num_predict=700)
+            if not text:
+                return "Modell lieferte keinen Rückblick"
+            tage = self._rueckblick.setdefault("tage", {})
+            tage[datum] = {"gebaut": time.time(), "durchsagen": len(zeilen), "text": text}
+            behalten = max(1, int(bot.get("rueckblick_tage", 30) or 30))
+            for k in sorted(tage)[:-behalten]:
+                del tage[k]
+            self._rueckblick_speichern()
+            log.info("Tagesrückblick %s gebaut (%d Durchsagen, %d Blöcke)",
+                     datum, len(zeilen), len(bloecke))
+            return None
+        except Exception as e:
+            log.warning("Tagesrückblick %s fehlgeschlagen: %s", datum, e)
+            return str(e)
+        finally:
+            self._rueckblick_laeuft = False
+
+    async def _rueckblick_loop(self):
+        """Ab der eingestellten Uhrzeit den Vortag bauen, falls er fehlt;
+        bei Fehlschlag alle 15 Min. erneut."""
+        await asyncio.sleep(60)
+        while True:
+            try:
+                bot = self._bot_cfg()
+                if bot.get("rueckblick_enabled"):
+                    try:
+                        hh, mm = (int(x) for x in str(bot.get("rueckblick_zeit") or "03:00").split(":")[:2])
+                    except ValueError:
+                        hh, mm = 3, 0
+                    jetzt = datetime.now()
+                    gestern = (jetzt - timedelta(days=1)).strftime("%Y-%m-%d")
+                    if (jetzt.hour, jetzt.minute) >= (hh, mm) \
+                            and gestern not in (self._rueckblick.get("tage") or {}):
+                        fehler = await self._rueckblick_bauen(gestern)
+                        if fehler and fehler.startswith("zu wenig"):
+                            self._rueckblick.setdefault("tage", {})[gestern] = {
+                                "gebaut": time.time(), "durchsagen": 0,
+                                "text": "Kaum Funkverkehr an diesem Tag."}
+                            self._rueckblick_speichern()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Tagesrückblick-Schleife")
+            await asyncio.sleep(900)
+
+    _RB_WOCHENTAG = {"montag": 0, "dienstag": 1, "mittwoch": 2, "donnerstag": 3,
+                     "freitag": 4, "samstag": 5, "sonnabend": 5, "sonntag": 6}
+
+    def _rueckblick_daten(self, text: str, jetzt: datetime) -> list[str]:
+        """Welche vergangenen Tage meint der Spruch? ("gestern", "vorgestern",
+        "am Montag", "am 28.", "28.09.")"""
+        low = (text or "").lower()
+        heute = jetzt.date()
+        out = []
+        vergangen = bool(re.search(r"\b(war|waren|los|gewesen|erzählt|besprochen|geredet|"
+                                   r"gesagt|passiert|hattet|hatten|gab)\b", low))
+        if re.search(r"\bvorgestern\b", low):
+            out.append(heute - timedelta(days=2))
+        if re.search(r"\bgestern\b", low):
+            out.append(heute - timedelta(days=1))
+        for wt, nr in self._RB_WOCHENTAG.items():
+            if re.search(rf"\b(letzte[nm]?|vergangenen)\s+{wt}\b", low) or (
+                    re.search(rf"\b{wt}s?\b", low) and vergangen):
+                diff = (heute.weekday() - nr) % 7 or 7
+                out.append(heute - timedelta(days=diff))
+        for m in re.finditer(r"\b(?:am\s+)?(\d{1,2})\.\s*(?:(\d{1,2})\.?)?", low):
+            tag_n = int(m.group(1))
+            mon = int(m.group(2)) if m.group(2) else heute.month
+            if not m.group(2) and not m.group(0).strip().startswith("am"):
+                continue
+            try:
+                d = heute.replace(month=mon, day=tag_n)
+            except ValueError:
+                continue
+            if d >= heute:
+                try:
+                    d = d.replace(year=d.year - 1) if m.group(2) else \
+                        (d.replace(month=12, year=d.year - 1) if mon == 1 else d.replace(month=mon - 1))
+                except ValueError:
+                    continue
+            out.append(d)
+        return list(dict.fromkeys(d.strftime("%Y-%m-%d") for d in out))[:2]
+
+    def _rueckblick_hinweis(self, bot: dict, text: str, jetzt_ts: float | None = None) -> str:
+        if not bot.get("rueckblick_enabled"):
+            return ""
+        jetzt = datetime.fromtimestamp(jetzt_ts) if jetzt_ts else datetime.now()
+        daten = self._rueckblick_daten(text, jetzt)
+        if not daten:
+            return ""
+        tage = (self._rueckblick or {}).get("tage") or {}
+        teile = []
+        for datum in daten:
+            d = datetime.strptime(datum, "%Y-%m-%d")
+            tag = f"{self._WOCHENTAGE[d.weekday()]}, {d:%d.%m.%Y}"
+            if datum in tage:
+                teile.append(f"Rückblick auf {tag} (deine eigene Zusammenfassung "
+                             f"des Funkverkehrs an dem Tag):\n{tage[datum]['text']}")
+            else:
+                teile.append(f"Für {tag} hast du keinen Rückblick -- sag ehrlich, "
+                             f"dass du da nichts mitgeschrieben hast.")
+        return ("\n\n".join(teile) + "\n(Wirst du nach diesem Tag gefragt, erzähl "
+                "locker in zwei, drei Sätzen die interessantesten Punkte, nicht alles "
+                "aufzählen. Nur was dort steht, nichts dazuerfinden.)")
+
     def _bot_build_prompt(self, bot: dict, hist: list,
                           search_context: str = "",
                           anker_key: str | None = None,
@@ -4773,6 +5014,10 @@ class TXServer:
                            "(nutze sie nur, wenn's natürlich passt, erzähl nicht "
                            "unaufgefordert alles auf einmal runter, und erwähne "
                            "nicht, dass du dir das notiert hast):\n" + notes_txt)
+        if recent and recent[-1][1] != own_tag:
+            rb = self._rueckblick_hinweis(bot, recent[-1][2], jetzt_ts)
+            if rb:
+                spaet.append(rb)
         # Notizbuch: eigene, per Tool-Call selbst gemerkte Notizen (siehe
         # _BOT_NOTE_TOOL/_bot_save_note) -- im Unterschied zum Personen-
         # Gedaechtnis oben IMMER eingespeist (nicht an einen im Gespraech
@@ -5707,6 +5952,17 @@ class TXServer:
                 erlaubt = ("wetter", "nachrichten", "fussball", "lippstadt")
                 bot["tagesprogramm_themen"] = [t for t in _strlist(body["tagesprogramm_themen"])
                                                if t in erlaubt]
+            if "rueckblick_enabled" in body:
+                bot["rueckblick_enabled"] = bool(body["rueckblick_enabled"])
+            if isinstance(body.get("rueckblick_zeit"), str):
+                m_z = re.fullmatch(r"\s*([01]?\d|2[0-3]):([0-5]\d)\s*", body["rueckblick_zeit"])
+                if m_z:
+                    bot["rueckblick_zeit"] = f"{int(m_z.group(1)):02d}:{m_z.group(2)}"
+            if "rueckblick_tage" in body:
+                try:
+                    bot["rueckblick_tage"] = max(1, min(365, int(body["rueckblick_tage"])))
+                except (TypeError, ValueError):
+                    pass
             if "tagesprogramm_pro_antwort" in body:
                 try:
                     bot["tagesprogramm_pro_antwort"] = max(1, min(4, int(body["tagesprogramm_pro_antwort"])))
@@ -5893,6 +6149,30 @@ class TXServer:
         return web.json_response({
             "datum": tp.get("datum"), "gebaut": tp.get("gebaut"),
             "themen": tp.get("themen") or {}, "neu_gebaut": neu})
+
+    async def handle_admin_rueckblick(self, request):
+        """GET: gespeicherte Tagesrueckblicke; POST {datum}: diesen Tag (Standard
+        gestern) jetzt neu bauen."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        fehler = None
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            datum = str(body.get("datum") or
+                        (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"))
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", datum):
+                return web.json_response({"error": "datum muss JJJJ-MM-TT sein"}, status=400)
+            if self._rueckblick_laeuft:
+                return web.json_response({"error": "Rückblick wird gerade schon gebaut"}, status=409)
+            fehler = await self._rueckblick_bauen(datum)
+        tage = (self._rueckblick or {}).get("tage") or {}
+        return web.json_response({
+            "tage": [dict(v, datum=k) for k, v in sorted(tage.items(), reverse=True)],
+            "fehler": fehler})
 
     async def handle_admin_bot_probe(self, request):
         """POST /api/admin/bot/probe {room, text, wer?} -- tut so, als haette
@@ -9182,6 +9462,7 @@ class TXServer:
     async def _on_startup(self, _app):
         await self._discover_rooms()
         self._tagesprogramm_task = asyncio.create_task(self._tagesprogramm_loop())
+        self._rueckblick_task = asyncio.create_task(self._rueckblick_loop())
 
     def build_app(self) -> web.Application:
         app = web.Application(middlewares=[self.cors_middleware])
@@ -9265,6 +9546,8 @@ class TXServer:
         app.router.add_get ("/api/admin/bot",       self.handle_admin_bot)
         app.router.add_get ("/api/admin/settings",  self.handle_admin_settings)
         app.router.add_post("/api/admin/settings",  self.handle_admin_settings)
+        app.router.add_get ("/api/admin/rueckblick", self.handle_admin_rueckblick)
+        app.router.add_post("/api/admin/rueckblick", self.handle_admin_rueckblick)
         app.router.add_get ("/api/admin/tagesprogramm", self.handle_admin_tagesprogramm)
         app.router.add_post("/api/admin/tagesprogramm", self.handle_admin_tagesprogramm)
         app.router.add_post("/api/admin/bot",       self.handle_admin_bot)

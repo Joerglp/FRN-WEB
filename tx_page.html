@@ -1763,6 +1763,34 @@ audio {
         </div>
 
         <div class="adm-card">
+          <div class="adm-card-title">🗓️ Tagesrückblick</div>
+          <div class="adm-card-sub">Nachts fasst Robert den Funkverkehr des Vortags aus dem Archiv zusammen.
+            Fragt jemand „Was war gestern los?", „am Montag" oder „am 28.", bekommt er den passenden Tag in den Prompt.</div>
+          <label class="adm-sw">
+            <input type="checkbox" id="rb-enabled" autocomplete="off">
+            <span class="adm-sw-text">Tagesrückblick aktiv</span>
+          </label>
+          <div class="adm-fields">
+            <div class="form-field">
+              <label>Bauen um <small>Uhrzeit, für den Vortag</small></label>
+              <input type="time" id="rb-zeit" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Aufbewahren <small>Tage</small></label>
+              <input type="number" id="rb-tage" min="1" max="365" autocomplete="off">
+            </div>
+          </div>
+          <div class="adm-hint">Themenorientiert: die Sprecher-Erkennung ist im CB-Kanal zu unsicher für „wer hat was gesagt".
+            Das Bauen dauert je nach Funkverkehr ein bis drei Minuten auf der GPU-Box.</div>
+          <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <input type="date" id="rb-datum" autocomplete="off" style="max-width:170px">
+            <button type="button" class="btn-save" style="padding:6px 14px" onclick="rueckblickBauen()" id="rb-neu-btn">Diesen Tag (neu) bauen</button>
+            <span id="rb-stand" class="adm-hint" style="margin:0"></span>
+          </div>
+          <div id="rb-liste" style="margin-top:10px;font-size:.8rem;line-height:1.5"></div>
+        </div>
+
+        <div class="adm-card">
           <div class="adm-card-title">🔎 Websuche</div>
           <div class="adm-card-sub">„Robert, such mal nach …" fragt die selbst gehostete SearXNG-Instanz ab, die Treffer
             landen als Zusatz im Prompt. Kostenlos, kein Cloud-Suchdienst.</div>
@@ -4677,6 +4705,10 @@ async function loadBotAdmin() {
     const tpT = d.tagesprogramm_themen || [];
     document.querySelectorAll("#tp-themen input").forEach(c => c.checked = tpT.includes(c.value));
     loadTagesprogramm();
+    document.getElementById("rb-enabled").checked = d.rueckblick_enabled !== false;
+    document.getElementById("rb-zeit").value      = d.rueckblick_zeit || "03:00";
+    document.getElementById("rb-tage").value      = d.rueckblick_tage ?? 30;
+    loadRueckblick();
     document.getElementById("bot-gemini-model").value = d.gemini_model || "";
     document.getElementById("bot-gemini-key").value   = d.gemini_api_key || "";
     loadGeminiModels();   // Datalist mit echten Modell-IDs füllen
@@ -5060,6 +5092,9 @@ async function saveBotAdmin() {
     tagesprogramm_zeit:        document.getElementById("tp-zeit").value,
     tagesprogramm_pro_antwort: numOderStandard("tp-pro", 2),
     tagesprogramm_themen:      [...document.querySelectorAll("#tp-themen input:checked")].map(c => c.value),
+    rueckblick_enabled:        document.getElementById("rb-enabled").checked,
+    rueckblick_zeit:           document.getElementById("rb-zeit").value,
+    rueckblick_tage:           numOderStandard("rb-tage", 30),
     memory:                collectBotMemory(),
     notebook_enabled:      document.getElementById("bot-notebook-enabled").checked,
     notebook:              collectBotNotebook(),
@@ -5101,6 +5136,49 @@ async function loadTagesprogramm() {
           `<span style="color:var(--muted);white-space:pre-wrap">${esc(v)}</span></div>`).join("")
       : '<span style="color:var(--muted)">Heute noch nichts gebaut.</span>';
   } catch(e) { st.textContent = "nicht geladen: " + e; }
+}
+
+function rueckblickZeigen(tage) {
+  const el = document.getElementById("rb-liste");
+  const wt = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
+  el.innerHTML = (tage || []).length
+    ? tage.map((t, i) => {
+        const d = new Date(t.datum + "T12:00:00");
+        const kopf = `${wt[d.getDay()]}, ${d.toLocaleDateString("de-DE")} · ${t.durchsagen} Durchsagen`;
+        return `<details ${i === 0 ? "open" : ""} style="margin-bottom:6px">` +
+               `<summary style="cursor:pointer;color:var(--accent)">${esc(kopf)}</summary>` +
+               `<div style="color:var(--muted);white-space:pre-wrap;margin:6px 0 0 12px">${esc(t.text)}</div></details>`;
+      }).join("")
+    : '<span style="color:var(--muted)">Noch kein Rückblick gespeichert.</span>';
+}
+
+async function loadRueckblick() {
+  const dat = document.getElementById("rb-datum");
+  if (dat && !dat.value) {
+    const g = new Date(Date.now() - 86400000);
+    dat.value = `${g.getFullYear()}-${String(g.getMonth() + 1).padStart(2, "0")}-${String(g.getDate()).padStart(2, "0")}`;
+  }
+  try {
+    const r = await adminFetch("/api/admin/rueckblick");
+    const d = await r.json();
+    if (!r.ok || d.error) { document.getElementById("rb-stand").textContent = "nicht geladen: " + (d.error || r.status); return; }
+    rueckblickZeigen(d.tage);
+  } catch(e) { document.getElementById("rb-stand").textContent = "nicht geladen: " + e; }
+}
+
+async function rueckblickBauen() {
+  const btn = document.getElementById("rb-neu-btn"), st = document.getElementById("rb-stand");
+  const datum = document.getElementById("rb-datum").value;
+  btn.disabled = true; st.textContent = "⏳ baue Rückblick … (dauert ein bis drei Minuten)";
+  try {
+    const r = await adminFetch("/api/admin/rueckblick", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({datum})});
+    const d = await r.json();
+    if (!r.ok || d.error) { st.textContent = "Fehler: " + (d.error || r.status); return; }
+    st.textContent = d.fehler ? "Nicht gebaut: " + d.fehler : "Fertig.";
+    rueckblickZeigen(d.tage);
+  } catch(e) { st.textContent = "Fehler: " + e; }
+  finally { btn.disabled = false; }
 }
 
 async function tagesprogrammNeu() {
