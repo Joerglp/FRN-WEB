@@ -5226,6 +5226,15 @@ class TXServer:
                    "Gefühl für das Datum, und schreib in Suchanfragen kein Datum, "
                    "das du nicht sicher weisst. Solche [Hinweise] sind keine "
                    "Funksprüche, antworte nicht darauf.")
+        # Sprechernamen (02.10.): das Modell wusste nicht, dass der Name vor dem
+        # Doppelpunkt aus der Stimmerkennung kommt -- es sprach nie jemanden an.
+        if self._speaker_id_cfg().get("enabled"):
+            system += ("\n\nVor jedem Funkspruch steht, wer spricht: Der Name ist per "
+                       "Stimme erkannt und meist richtig, 'Funker' heißt, die Stimme ist "
+                       "unbekannt. Sprich bekannte Leute ruhig mal mit ihrem Namen an, "
+                       "aber nicht in jedem Satz, und nie mit 'Funker'. Ist bei 'Funker' "
+                       "aus dem Gespräch klar, wer es ist (\"hier ist der Hans\"), darfst "
+                       "du den Namen nehmen, sonst lass ihn weg.")
         # Regel zum Tagesprogramm steht im statischen Teil (zwischengespeichert),
         # im Hinweis stehen nur die Daten.
         if bot.get("tagesprogramm_enabled"):
