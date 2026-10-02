@@ -3793,6 +3793,8 @@ class TXServer:
         r"nations ?league|wm|em|weltmeisterschaft|europameisterschaft|qualifikation\w*|"
         r"champions ?league|europa ?league|conference ?league|pokal\w*|"
         r"deutschland (?:gegen|vs)|gegen deutschland)\b", re.IGNORECASE)
+    _BOT_DFB_RE = re.compile(r"\b(deutschland|dfb|nationalmannschaft|nationalelf|"
+                             r"die mannschaft|klopp)\b", re.IGNORECASE)
     # Nur wenn die Frage ausdruecklich die Liga meint, gibt es ohne erkannte
     # Mannschaft den aktuellen Spieltag -- sonst lieber die normale Suche.
     _BOT_LIGA_RE = re.compile(r"\b(bundesliga|liga|spieltag|tabelle\w*|tabellenf\w*)\b",
@@ -3900,6 +3902,16 @@ class TXServer:
                     akt = await self._oldb_get(sess, "getmatchdata/bl1")
                     tabelle = await self._oldb_get(
                         sess, f"getbltable/bl1/{akt[0]['leagueSeason']}") if akt else []
+                    # Noch kein Ergebnis im aktuellen Spieltag (z.B. Laenderspielpause,
+                    # 02.10.: "keine Ergebnisse"): den letzten Spieltag dazu.
+                    nr = akt[0]["group"]["groupOrderID"] if akt else 0
+                    if akt and nr > 1 and not any(sp.get("matchIsFinished") for sp in akt):
+                        vor = await self._oldb_get(
+                            sess, f"getmatchdata/bl1/{akt[0]['leagueSeason']}/{nr - 1}")
+                        if vor:
+                            zeilen.append(f"1. Bundesliga, {vor[0]['group']['groupName']} (Ergebnisse):")
+                            zeilen += ["  " + self._spiel_text(sp)
+                                       for sp in sorted(vor, key=lambda sp: sp["matchDateTime"])]
                     if akt:
                         zeilen.append(f"1. Bundesliga, {akt[0]['group']['groupName']}:")
                         zeilen += ["  " + self._spiel_text(sp)
@@ -4054,6 +4066,68 @@ class TXServer:
         return f"Länderspiel: {paar}, {wann} um {hh}:{mi:02d} Uhr" \
             if diff <= 1 else f"Nächstes Länderspiel: {paar}, {wann} um {hh}:{mi:02d} Uhr"
 
+    _TP_DE = r"(?:Deutschland|DFB-Team|DFB-Elf|Nationalmannschaft|Klopps\s+DFB-\w+|Klopp-Elf)"
+    _TP_LERG_RES = (
+        # "Deutschland gegen Serbien – 2:0"
+        (re.compile(_TP_DE + r"\s*(?:gegen|vs\.?|[-–])\s*([A-ZÄÖÜ][\wäöüß]+)[^\d\n]{0,40}?\b(\d{1,2}):(\d{1,2})\b"), "heim"),
+        # "Serbien gegen Deutschland 0:2"
+        (re.compile(r"\b([A-ZÄÖÜ][\wäöüß]+)\s*(?:gegen|vs\.?|[-–])\s*" + _TP_DE + r"[^\d\n]{0,40}?\b(\d{1,2}):(\d{1,2})\b"), "gast"),
+        # "DFB-Elf gewinnt 2:0 gegen Serbien" / "verliert 1:3 in Spanien"
+        (re.compile(_TP_DE + r"\s+(?:gewinnt|siegt|verliert|unterliegt|spielt|schlägt)\s+(?:mit\s+)?(\d{1,2}):(\d{1,2})\s+"
+                    r"(?:gegen|in|bei|im\s+\w+\s+gegen)\s+([A-ZÄÖÜ][\wäöüß]+)"), "verb"),
+    )
+
+    async def _tp_laenderspiel_ergebnis(self, bot: dict) -> str:
+        """Letztes Ergebnis der Nationalmannschaft aus News der letzten Woche.
+        Nur wenn mindestens zwei Meldungen denselben Gegner und Stand nennen
+        (Live-Ticker mit Zwischenstaenden fallen so raus)."""
+        ws  = bot.get("websearch") or {}
+        url = (ws.get("searxng_url") or "http://127.0.0.1:8075/search").strip()
+        zaehler: dict[tuple, int] = {}
+        gesehen = set()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as sess:
+                for q in ("Deutschland Länderspiel Ergebnis", "DFB-Team Sieg Niederlage"):
+                    async with sess.get(url, params={"q": q, "format": "json", "language": "de",
+                                                     "categories": "news",
+                                                     "time_range": "week"}) as resp:
+                        if resp.status != 200:
+                            continue
+                        res = (await resp.json()).get("results") or []
+                    for r in res:
+                        for txt in (r.get("title") or "", r.get("content") or ""):
+                            txt = re.sub(r"\s+", " ", txt)
+                            if not txt or txt in gesehen or re.search(
+                                    r"frauen|damen|\bU\s?\d\d\b|tipp|prognose|quote|halbzeit|pause",
+                                    txt, re.I):
+                                continue
+                            gesehen.add(txt)
+                            for rx, art in self._TP_LERG_RES:
+                                m = rx.search(txt)
+                                if not m:
+                                    continue
+                                if art == "heim":
+                                    k = (m.group(1), int(m.group(2)), int(m.group(3)))
+                                elif art == "gast":
+                                    k = (m.group(1), int(m.group(3)), int(m.group(2)))
+                                else:
+                                    k = (m.group(3), int(m.group(1)), int(m.group(2)))
+                                if k[0].lower() in ("heute", "live", "im", "das", "die", "der", "den"):
+                                    continue
+                                zaehler[k] = zaehler.get(k, 0) + 1
+                                break
+        except Exception as e:
+            log.warning("Länderspiel-Ergebnis: Suche fehlgeschlagen: %s", e)
+            return ""
+        if not zaehler:
+            return ""
+        (gegner, de, geg), n = max(zaehler.items(), key=lambda kv: kv[1])
+        if n < 2:
+            return ""
+        wie = "gewonnen" if de > geg else "verloren" if de < geg else "unentschieden gespielt"
+        return (f"Letztes Länderspiel (aus den Meldungen der letzten Tage): Deutschland hat "
+                f"gegen {gegner} {de}:{geg} {wie}")
+
     async def _tagesprogramm_bauen(self, bot: dict) -> dict:
         """Holt alle gewaehlten Themen und gibt {thema: kurzer Text} zurueck;
         Themen, deren Quelle gerade nicht antwortet, fehlen."""
@@ -4085,11 +4159,12 @@ class TXServer:
                     if l.startswith("Tabellenspitze"):
                         l = ", ".join(l.split(", ")[:3])
                     zl.append(l.strip())
-            ls = await self._tp_laenderspiel(bot)
+            ls = "\n".join(x for x in (await self._tp_laenderspiel_ergebnis(bot),
+                                        await self._tp_laenderspiel(bot)) if x)
             if zl or ls:
                 out["fussball"] = "Fußball:\n" + ("\n".join([ls] if ls else [])
                                                  + ("\n" if ls and zl else "")
-                                                 + "\n".join(zl[:6]))
+                                                 + "\n".join(zl[:12]))
         if "lippstadt" in themen:
             l = await self._tp_lippstadt(bot)
             if l:
@@ -4182,6 +4257,14 @@ class TXServer:
             w = await self._bot_nachrichten()
             if w:
                 return w
+        if (self._BOT_LAENDERSPIEL_RE.search(query or "")
+                or (self._BOT_DFB_RE.search(query or "") and self._BOT_FUSSBALL_RE.search(query or ""))):
+            teile = [x for x in (await self._tp_laenderspiel_ergebnis(bot),
+                                 await self._tp_laenderspiel(bot)) if x]
+            if teile:
+                heute = datetime.now()
+                return (f"Länderspiel-Daten (heute ist {self._WOTAG[heute.weekday()]} "
+                        f"{heute:%d.%m.%Y}):\n" + "\n".join(teile))
         if (self._BOT_FUSSBALL_RE.search(query or "")
                 and not self._BOT_LAENDERSPIEL_RE.search(query or "")):
             w = await self._bot_fussball(query)
