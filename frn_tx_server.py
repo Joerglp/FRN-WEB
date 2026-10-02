@@ -26,7 +26,6 @@ import io
 import json
 import logging
 import os
-import random
 import re
 import secrets
 import signal
@@ -1915,7 +1914,6 @@ class TXServer:
         "tagesprogramm_enabled": True,
         "tagesprogramm_zeit": "05:30",
         "tagesprogramm_themen": ["wetter", "nachrichten", "fussball", "lippstadt"],
-        "tagesprogramm_pro_antwort": 2,
         "rueckblick_enabled": True,
         "rueckblick_zeit": "03:00",
         "rueckblick_tage": 30,
@@ -4223,26 +4221,23 @@ class TXServer:
                 log.exception("Tagesprogramm-Schleife")
             await asyncio.sleep(900)
 
-    def _tagesprogramm_hinweis(self, bot: dict) -> str:
-        """Hinweistext fuers Prompt ("" wenn aus oder nichts da). Je Anfrage
-        nur ein paar zufaellige Themen, damit der Hinweis klein bleibt und
-        Robert nicht immer dasselbe aufgreift."""
+    def _tagesprogramm_text(self, bot: dict) -> str:
+        """Komplettes Tagesprogramm fuer den festen Prompt-Teil ("" wenn aus
+        oder leer). Bleibt den ganzen Tag gleich und wird so vom Prompt-Cache
+        der Box mitgenommen (02.10.: das frueher je Anfrage ausgeloste
+        Programm stand hinten im Prompt und kostete jede Antwort ~0,6 s)."""
         if not bot.get("tagesprogramm_enabled"):
             return ""
         tp = getattr(self, "_tagesprogramm", None) or {}
         themen = tp.get("themen") or {}
         if not themen:
             return ""
-        n = max(1, int(bot.get("tagesprogramm_pro_antwort", 2) or 2))
-        namen = list(themen)
-        if len(namen) > n:
-            # Spielt Deutschland heute/morgen, ist das Fussball-Thema gesetzt
-            fest = [k for k in namen if k == "fussball"
-                    and re.search(r"Länderspiel: .*\b(HEUTE|MORGEN)\b", themen[k])]
-            rest = [k for k in namen if k not in fest]
-            namen = fest + random.sample(rest, max(0, n - len(fest)))
-            namen = sorted(namen, key=list(themen).index)
-        return "Tagesprogramm heute:\n" + "\n".join(themen[k] for k in namen)
+        try:
+            d = datetime.strptime(tp.get("datum") or "", "%Y-%m-%d")
+            stand = f" (Stand {self._WOCHENTAGE[d.weekday()]}, {d:%d.%m.%Y}, früh morgens)"
+        except ValueError:
+            stand = ""
+        return f"Tagesprogramm{stand}:\n" + "\n\n".join(themen.values())
 
     async def _bot_websearch(self, bot: dict, query: str) -> str:
         """Fragt die lokale SearXNG-Instanz ab (JSON-API) und liefert eine
@@ -5237,15 +5232,18 @@ class TXServer:
                        "du den Namen nehmen, sonst lass ihn weg.")
         # Regel zum Tagesprogramm steht im statischen Teil (zwischengespeichert),
         # im Hinweis stehen nur die Daten.
-        if bot.get("tagesprogramm_enabled"):
-            system += ("\n\nIm [Hinweis] steht manchmal ein \"Tagesprogramm heute\" "
-                       "mit echten Meldungen. Du darfst daraus von dir aus EIN Thema "
-                       "einbringen, aber nur, wenn es zum Gespräch passt oder eine "
-                       "Pause ist: nicht aufzählen, in einem lockeren Satz, nichts "
-                       "wiederholen, was du schon erzählt hast. Nenne nur, was dort "
-                       "WÖRTLICH steht. Fragt dich jemand nach Neuigkeiten (\"was gibt's "
-                       "Neues\", \"was ist los\", \"was hörst du so\"), antworte mit "
-                       "einem Thema daraus, in ein bis zwei Sätzen, statt nur zu grüßen.")
+        tp_text = self._tagesprogramm_text(bot)
+        if tp_text:
+            system += ("\n\nUnten steht dein Tagesprogramm mit echten Meldungen. Du darfst "
+                       "daraus von dir aus EIN Thema einbringen, aber nur, wenn es zum "
+                       "Gespräch passt oder eine Pause ist: nicht aufzählen, in einem "
+                       "lockeren Satz. Schau in den Verlauf, was du schon erzählt hast, "
+                       "und nimm dann ein ANDERES Thema, statt dich zu wiederholen. Nenne "
+                       "nur, was dort WÖRTLICH steht. Fragt dich jemand nach Neuigkeiten "
+                       "(\"was gibt's Neues\", \"was ist los\", \"was hörst du so\"), "
+                       "antworte mit einem Thema daraus, in ein bis zwei Sätzen, statt nur "
+                       "zu grüßen. Fragt jemand gezielt (Wetter, Fußball, Nachrichten), "
+                       "nimm das passende.\n\n" + tp_text)
         spaet = [self._jetzt_satz(datetime.fromtimestamp(jetzt_ts) if jetzt_ts else None)]   # Teile des Hinweises vor dem letzten Spruch
         # Stimmungsregel nur, solange eine Stimme mit Stimmungen spricht
         # (2026-09-27): XTTS spricht fest mit dem xtts_speaker, die gewaehlte
@@ -5259,10 +5257,6 @@ class TXServer:
                        ". Danach folgt normal dein Funkspruch, ohne die Klammern "
                        "vorzulesen. Im Zweifel " + f"[{stimmungen[0]}]" + ". "
                        "Antwortest du mit SKIP, lass die Klammer weg.")
-        if not search_context:
-            tp = self._tagesprogramm_hinweis(bot)
-            if tp:
-                spaet.append(tp)
         if search_context:
             spaet.append("Aktuelle Websuche-Ergebnisse (nutze sie nur, "
                        "wenn sie zur Frage passen, fass sie kurz und locker "
@@ -6301,11 +6295,6 @@ class TXServer:
             if "rueckblick_tage" in body:
                 try:
                     bot["rueckblick_tage"] = max(1, min(365, int(body["rueckblick_tage"])))
-                except (TypeError, ValueError):
-                    pass
-            if "tagesprogramm_pro_antwort" in body:
-                try:
-                    bot["tagesprogramm_pro_antwort"] = max(1, min(4, int(body["tagesprogramm_pro_antwort"])))
                 except (TypeError, ValueError):
                     pass
             if isinstance(body.get("websearch"), dict):

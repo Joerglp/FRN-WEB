@@ -1743,10 +1743,6 @@ audio {
               <label>Neu bauen um <small>Uhrzeit, danach alle 15 Min. Wiederholung bei Fehlschlag</small></label>
               <input type="time" id="tp-zeit" autocomplete="off">
             </div>
-            <div class="form-field">
-              <label>Themen je Anfrage <small>zufällige Auswahl, 1–4</small></label>
-              <input type="number" id="tp-pro" min="1" max="4" autocomplete="off">
-            </div>
           </div>
           <div class="adm-chips" id="tp-themen">
             <label class="adm-chip"><input type="checkbox" value="wetter">Wetter</label>
@@ -4758,7 +4754,6 @@ async function loadBotAdmin() {
     document.getElementById("ws-max").value       = ws.max_results ?? 3;
     document.getElementById("tp-enabled").checked = d.tagesprogramm_enabled !== false;
     document.getElementById("tp-zeit").value      = d.tagesprogramm_zeit || "05:30";
-    document.getElementById("tp-pro").value       = d.tagesprogramm_pro_antwort ?? 2;
     const tpT = d.tagesprogramm_themen || [];
     document.querySelectorAll("#tp-themen input").forEach(c => c.checked = tpT.includes(c.value));
     loadTagesprogramm();
@@ -5150,7 +5145,6 @@ async function saveBotAdmin() {
     },
     tagesprogramm_enabled:     document.getElementById("tp-enabled").checked,
     tagesprogramm_zeit:        document.getElementById("tp-zeit").value,
-    tagesprogramm_pro_antwort: numOderStandard("tp-pro", 2),
     tagesprogramm_themen:      [...document.querySelectorAll("#tp-themen input:checked")].map(c => c.value),
     rueckblick_enabled:        document.getElementById("rb-enabled").checked,
     nachrichten_enabled:       document.getElementById("na-enabled").checked,
