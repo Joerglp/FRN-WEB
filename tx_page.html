@@ -2297,6 +2297,18 @@ audio {
     </div>
 
     <!-- ── Debug tab ── -->
+    <div id="admin-tab-dienste" class="admin-tab-content">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:10px;flex-wrap:wrap">
+        <div class="admin-section-title" style="margin:0">Dienste &amp; Geräte</div>
+        <div style="display:flex;gap:8px">
+          <button type="button" class="btn-save" style="padding:6px 14px" onclick="statusSeiteLaden(true)">Neu laden</button>
+          <a href="/status" target="_blank" rel="noopener" class="btn-save" style="padding:6px 14px;text-decoration:none">Eigenes Fenster ↗</a>
+        </div>
+      </div>
+      <iframe id="status-frame" title="FRN Status"
+              style="width:100%;height:75vh;border:1px solid var(--border);border-radius:8px;background:var(--bg)"></iframe>
+    </div>
+
     <div id="admin-tab-debug" class="admin-tab-content">
       <div class="admin-section-title">Ablaufverfolgung Funksprüche</div>
       <div style="font-size:.78rem;color:var(--muted);margin-bottom:14px;line-height:1.5">
@@ -4154,7 +4166,7 @@ const ADMIN_GROUPS = [
   {id: "zugang", icon: "👥", label: "Zugang",    tabs: [["users", "Benutzer"], ["rooms", "Räume"], ["server", "FRN-Server"], ["crosslink", "Crosslink"]]},
   {id: "robert", icon: "🤖", label: "Robert",    tabs: [["bot", "KI-Funker"], ["robert", "Gespräche analysieren"], ["autoreply", "Namens-Antwort"]]},
   {id: "audio",  icon: "🎙", label: "Funk & Audio", tabs: [["audio", "Transkription & Archiv"], ["sprecher", "Sprecher-Erkennung"]]},
-  {id: "system", icon: "🛠", label: "System",    tabs: [["status", "Status"], ["debug", "Ablaufverfolgung"]]},
+  {id: "system", icon: "🛠", label: "System",    tabs: [["dienste", "Dienste & Geräte"], ["status", "Räume & Verbindungen"], ["debug", "Ablaufverfolgung"]]},
 ];
 
 function adminNavBauen() {
@@ -4163,6 +4175,12 @@ function adminNavBauen() {
   gbox.innerHTML = ADMIN_GROUPS.map(g =>
     `<button class="admin-group" data-group="${g.id}" onclick="showAdminTab('${g.tabs[0][0]}')">` +
     `<span class="ag-icon">${g.icon}</span><span class="ag-label">${esc(g.label)}</span></button>`).join("");
+}
+
+function statusSeiteLaden(neu) {
+  const f = document.getElementById("status-frame");
+  if (!f) return;
+  if (neu || !f.getAttribute("src")) f.setAttribute("src", TX_BASE + "/status?t=" + Date.now());
 }
 
 function showAdminTab(name) {
@@ -4182,6 +4200,7 @@ function showAdminTab(name) {
     if (name === "overview")  loadOverview();
     if (name === "users")     loadUsers();
     if (name === "status")    loadStatus();
+    if (name === "dienste")   statusSeiteLaden(false);
     if (name === "rooms")     loadRooms();
     if (name === "server")    loadServerTab();
     if (name === "autoreply") loadAutoReplyAdmin();
