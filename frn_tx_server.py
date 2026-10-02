@@ -6491,8 +6491,27 @@ class TXServer:
                 body = await request.json()
             except Exception:
                 body = {}
-            nid = str(body.get("loeschen") or "")
-            self._nachrichten = [n for n in self._nachrichten if n.get("id") != nid]
+            neu = body.get("neu")
+            if isinstance(neu, dict):
+                an = str(neu.get("an") or "").strip()
+                von = str(neu.get("von") or "").strip()
+                satz = re.sub(r"\s+", " ", str(neu.get("satz") or "")).strip()
+                if not re.fullmatch(r"[A-Za-zÄÖÜäöüß\- ]{2,30}", an):
+                    return web.json_response({"error": "Empfänger: nur ein Name (2–30 Buchstaben)"}, status=400)
+                if von and not re.fullmatch(r"[A-Za-zÄÖÜäöüß\- ]{2,30}", von):
+                    return web.json_response({"error": "Absender: nur ein Name (2–30 Buchstaben)"}, status=400)
+                if not 3 <= len(satz) <= 300:
+                    return web.json_response({"error": "Nachricht: 3–300 Zeichen"}, status=400)
+                ts = time.time()
+                self._nachrichten.append({
+                    "id": f"{int(ts * 1000):x}", "ts": ts, "raum": "",
+                    "an": an[:1].upper() + an[1:], "von": von, "satz": satz,
+                    "original": "(im Admin-Panel eingetragen)", "zugestellt": None,
+                    "versuche": 0})
+                log.info("Nachricht für %s im Admin-Panel hinterlegt", an)
+            else:
+                nid = str(body.get("loeschen") or "")
+                self._nachrichten = [n for n in self._nachrichten if n.get("id") != nid]
             self._nachrichten_speichern()
         return web.json_response({"nachrichten": sorted(
             self._nachrichten, key=lambda n: n.get("ts", 0), reverse=True)})

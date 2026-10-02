@@ -1806,7 +1806,22 @@ audio {
           </div>
           <div class="adm-hint">Wann der Empfänger als da gilt: Die Sprecher-Erkennung erkennt ihn sicher, er meldet sich selbst
             („hier ist der Hans") oder er wird begrüßt („Moin Hans") und danach antwortet jemand. Beleidigendes lehnt er ab.</div>
-          <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+          <div class="adm-fields" style="margin-top:14px">
+            <div class="form-field">
+              <label>An <small>Vorname</small></label>
+              <input type="text" id="na-neu-an" maxlength="30" placeholder="Hans" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Von <small>optional</small></label>
+              <input type="text" id="na-neu-von" maxlength="30" placeholder="Jörg" autocomplete="off">
+            </div>
+          </div>
+          <div class="form-field">
+            <label>Nachricht <small>so, wie Robert sie sagen soll — er stellt „Hans, ich soll dir was ausrichten:" davor</small></label>
+            <input type="text" id="na-neu-satz" maxlength="300" placeholder="Jörg lässt ausrichten, dass er Samstag zum Grillen kommt." autocomplete="off">
+          </div>
+          <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button type="button" class="btn-save" style="padding:6px 14px" onclick="nachrichtEintragen()">Nachricht hinterlegen</button>
             <button type="button" class="btn-save" style="padding:6px 14px" onclick="loadNachrichten()">Aktualisieren</button>
             <span id="na-stand" class="adm-hint" style="margin:0"></span>
           </div>
@@ -5206,6 +5221,25 @@ async function loadNachrichten() {
     st.textContent = "";
     nachrichtenZeigen(d.nachrichten);
   } catch(e) { st.textContent = "nicht geladen: " + e; }
+}
+
+async function nachrichtEintragen() {
+  const st = document.getElementById("na-stand");
+  const neu = {
+    an:   document.getElementById("na-neu-an").value.trim(),
+    von:  document.getElementById("na-neu-von").value.trim(),
+    satz: document.getElementById("na-neu-satz").value.trim(),
+  };
+  if (!neu.an || !neu.satz) { st.textContent = "Bitte Empfänger und Nachricht ausfüllen."; return; }
+  try {
+    const r = await adminFetch("/api/admin/nachrichten", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({neu})});
+    const d = await r.json();
+    if (!r.ok || d.error) { st.textContent = "Fehler: " + (d.error || r.status); return; }
+    ["na-neu-an", "na-neu-von", "na-neu-satz"].forEach(id => document.getElementById(id).value = "");
+    st.textContent = `Hinterlegt — Robert richtet es aus, sobald ${neu.an} auf Kanal ist.`;
+    nachrichtenZeigen(d.nachrichten);
+  } catch(e) { st.textContent = "Fehler: " + e; }
 }
 
 async function nachrichtLoeschen(id) {
