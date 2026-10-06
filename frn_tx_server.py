@@ -4982,7 +4982,10 @@ class TXServer:
     # "Robert, richte dem Hans aus, ..." -> speichern, und wenn Hans auf dem
     # Kanal auftaucht, in der naechsten Pause zustellen.
     _AUSRICHTEN_RE = re.compile(
-        r"aus\s*zu\s*richten|ausrichten|\bricht\w*\s+(?:\S+\s+){0,4}?aus\b"
+        # 06.10.: "richte den Gottfried mal schoene Gruesse von mir aus" hatte 7
+        # Woerter zwischen "richte" und "aus" -- jetzt ganzer Satz erlaubt.
+        r"aus\s*zu\s*richten|ausrichten|\bricht\w*\b[^.!?]{0,100}?\baus\b"
+        r"|\bgr[üu](?:ß|ss)\w*\s+(?:mir\s+)?(?:mal\s+)?(?:den|dem|die|der)\s+(?!runde\b|anderen\b|leute\b)\w+"
         r"|\bbestell\w*\s+(?:\S+\s+){0,4}?gr[üu](?:ß|ss)"
         r"|\bsag\w*\s+(?:\S+\s+){0,4}?bescheid\b"
         r"|\bnachricht\s+f[üu]r\b"
@@ -5061,13 +5064,17 @@ class TXServer:
                                   text: str, ts: float, an_vorher: str | None = None):
         bot = self._bot_cfg()
         von_stimme = callsign if callsign and callsign != "Funker" else ""
+        # Enrollment-Namen sind ASCII ("Joerg"), vorgelesen klingt das falsch
+        von_stimme = {"Joerg": "Jörg"}.get(von_stimme, von_stimme)
         prompt = (
             f'Funkspruch an Robert: "{text}"\n'
             f"Absender laut Stimmerkennung: {von_stimme or 'unbekannt'}\n"
             + (f"Empfänger aus einem früheren Spruch: {an_vorher}\n" if an_vorher else "")
             + f"Namen, die auf dem Kanal vorkommen: {', '.join(self._bekannte_namen(bot)) or '-'}\n\n"
-            "Jemand bittet Robert, einer Person etwas auszurichten. Antworte NUR mit JSON:\n"
-            '{"an": Vorname des Empfängers oder null, '
+            "Jemand bittet Robert vielleicht, einer Person etwas auszurichten. Antworte NUR mit JSON:\n"
+            '{"auftrag": true wenn Robert wirklich etwas an eine andere Person weitergeben soll '
+            '(auch Grüße), false wenn nicht (z.B. "die Antenne richte ich morgen aus"), '
+            '"an": Vorname des Empfängers oder null, '
             '"von": Vorname des Absenders oder null (nur wenn er sich im Spruch selbst nennt, '
             'z.B. "hier ist der Peter" / "von Peter", oder die Stimmerkennung ihn kennt; nie raten), '
             '"satz": die Nachricht als EIN Satz, den Robert dem Empfänger direkt sagen kann, '
@@ -5091,6 +5098,9 @@ class TXServer:
             await self._spontan_senden(room, room_name,
                                        "Da hab ich nicht mitbekommen, was ich ausrichten soll. "
                                        "Sag's bitte nochmal.", "(Ausrichten)", 60)
+            return
+        if d.get("auftrag") is False and not an_vorher:
+            log.info("[%s] Ausrichten: kein Auftrag (%.80r)", room_name, text)
             return
         an = str(d.get("an") or an_vorher or "").strip()
         an = an[:1].upper() + an[1:] if an else ""
