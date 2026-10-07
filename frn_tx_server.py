@@ -802,6 +802,7 @@ class TXServer:
         self._nachrichten_pfad = Path(__file__).parent / "nachrichten.json"
         self._nachrichten: list[dict] = []
         self._nachricht_rueckfrage: dict[str, dict] = {}   # Raum → halbe Nachricht
+        self._rueckantwort: dict[str, dict] = {}           # Raum → gerade zugestellt, Antwort moeglich
         self._raum_eingang: dict[str, float] = {}          # Raum → letzter fremder Spruch
         self._nachrichten_laden()
         self._bot_state_pending = False
@@ -3120,6 +3121,19 @@ class TXServer:
                                   detail="Raum nicht in Robert-Liste (z.B. Papagei-Testraum)",
                                   final=True)
             return
+        # Rueckantwort (07.10.): kurz nach einer Zustellung schickt der Empfaenger
+        # oft etwas zurueck ("Ich schick die Gruesse zurueck") -- ohne Robert-Namen.
+        ra = self._rueckantwort.get(room_name)
+        if ra and bot.get("nachrichten_enabled", True):
+            if time.time() > ra["bis"]:
+                del self._rueckantwort[room_name]
+            elif self._RUECKANTWORT_RE.search(low):
+                del self._rueckantwort[room_name]
+                self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
+                                      detail=f"Rückantwort von {ra['von']} an {ra['an']}", final=True)
+                asyncio.create_task(self._nachricht_annehmen(
+                    room, room_name, callsign, text, ts, ra["an"], ra["von"]))
+                return
         # Rueckfrage beim Ausrichten offen ("Was soll ich Hans ausrichten?"):
         # der naechste fremde Spruch ist die Antwort darauf.
         rf = self._nachricht_rueckfrage.get(room_name)
@@ -5061,7 +5075,8 @@ class TXServer:
             self._bot_busy.discard(room_name)
 
     async def _nachricht_annehmen(self, room, room_name: str, callsign: str,
-                                  text: str, ts: float, an_vorher: str | None = None):
+                                  text: str, ts: float, an_vorher: str | None = None,
+                                  von_vorher: str | None = None):
         bot = self._bot_cfg()
         von_stimme = callsign if callsign and callsign != "Funker" else ""
         # Enrollment-Namen sind ASCII ("Joerg"), vorgelesen klingt das falsch
@@ -5070,6 +5085,8 @@ class TXServer:
             f'Funkspruch an Robert: "{text}"\n'
             f"Absender laut Stimmerkennung: {von_stimme or 'unbekannt'}\n"
             + (f"Empfänger aus einem früheren Spruch: {an_vorher}\n" if an_vorher else "")
+            + (f"Kontext: Robert hat {von_vorher} gerade eine Nachricht von {an_vorher} "
+               f"ausgerichtet, dies ist {von_vorher}s Antwort darauf.\n" if von_vorher else "")
             + f"Namen, die auf dem Kanal vorkommen: {', '.join(self._bekannte_namen(bot)) or '-'}\n\n"
             "Jemand bittet Robert vielleicht, einer Person etwas auszurichten. Antworte NUR mit JSON:\n"
             '{"auftrag": true wenn Robert wirklich etwas an eine andere Person weitergeben soll '
@@ -5102,10 +5119,13 @@ class TXServer:
         if d.get("auftrag") is False and not an_vorher:
             log.info("[%s] Ausrichten: kein Auftrag (%.80r)", room_name, text)
             return
-        an = str(d.get("an") or an_vorher or "").strip()
+        # Rueckantwort: Empfaenger steht fest (das Modell nahm sonst den Absender)
+        an = str((an_vorher if von_vorher else d.get("an")) or an_vorher or "").strip()
         an = an[:1].upper() + an[1:] if an else ""
-        von = str(d.get("von") or von_stimme or "").strip()
+        von = str(von_vorher or d.get("von") or von_stimme or "").strip()
         satz = str(d.get("satz") or "").strip()
+        if von_vorher and not satz:
+            satz = "VON grüßt zurück."
         if not re.fullmatch(r"[A-Za-zÄÖÜäöüß\- ]{2,30}", an or "-"):
             an = ""
         if d.get("ablehnen"):
@@ -5137,6 +5157,14 @@ class TXServer:
         gesendet = await self._spontan_senden(room, room_name, antwort, "(Ausrichten)", 120)
         if gesendet and room_name in self._nachricht_rueckfrage:
             self._nachricht_rueckfrage[room_name]["gefragt"] = time.time()
+
+    _RUECKANTWORT_RE = re.compile(
+        r"gr[üu](?:ß|ss)\w*\s+(?:\S+\s+){0,3}?zur[üu]ck|zur[üu]ck\w*\s+gr[üu]"
+        r"|\bricht\w*\b[^.!?]{0,80}?\baus\b|ausrichten"
+        r"|\bsag\w*\s+(?:\S+\s+){0,2}?(?:ihm|ihr)\b"
+        r"|\b(?:ihm|ihr)\s+(?:\S+\s+){0,2}?gr[üu](?:ß|ss)"
+        r"|gr[üu](?:ß|ss)\w*\s+(?:\S+\s+){0,2}?(?:ihn|sie)\b"
+        r"|\berwider|\bgleichfalls\b|\bebenso\b")
 
     _GRUSS_AN = r"(?:moin|hallo|morgen|guten\s+(?:morgen|tag|abend)|n'?abend|tach|servus|gr[üu](?:ß|ss)\s+dich|na)"
 
@@ -5195,6 +5223,9 @@ class TXServer:
             if ok:
                 n["zugestellt"] = time.time()
                 n["zugestellt_raum"] = room_name
+                if n.get("von"):
+                    self._rueckantwort[room_name] = {"bis": time.time() + 120,
+                                                     "an": n["von"], "von": an}
             else:
                 n["versuche"] = n.get("versuche", 0) + 1
                 n["naechster"] = time.time() + 300
