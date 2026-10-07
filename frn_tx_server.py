@@ -1547,17 +1547,18 @@ class TXServer:
 
     @staticmethod
     def _xtts_text(text: str) -> str:
-        """Satzpunkte fuer XTTS entfernen (2026-09-28, User: "Den Punkt liest er
-        immer mit"). Das deutsche XTTS-Modell spricht den Punkt am Satzende
-        oft als Wort "Punkt" aus -- bekanntes Problem. Nur Punkte vor Leerraum
-        bzw. am Ende; Zahlen wie 13.5 und Abkuerzungen mitten im Wort bleiben.
-        ?/! bleiben stehen, die liest XTTS nicht vor und sie tragen die Melodie."""
-        t = re.sub(r"(?<!\.)\.\s*$", "", text.strip())       # am Ende: weg
+        """Satzpunkte fuer XTTS durch Semikolon ersetzen. Mit Punkt spricht das
+        deutsche Modell am Satzende oft "Punkt" oder haengt Unsinn an (28.09.,
+        im Test 07.10. 2 von 8 Saetzen). Ganz ohne Satzzeichen (28.09.-07.10.)
+        senkte es die Stimme kaum, es klang wie abgeschnitten (User 07.10.).
+        Gemessen 07.10., je 24 Saetze: Tonhoehe am Satzende ohne Zeichen -8 %,
+        mit Semikolon -17 %, beides ohne Artefakte. ?/! bleiben stehen."""
+        t = re.sub(r"(?<!\.)\.\s*$", ";", text.strip())       # am Ende
         # Mitten drin nur ECHTE Satzenden (Code-Review 28.09.): Wort aus >=2
         # Buchstaben, dann Grossbuchstabe. Sonst wurde "28. September" zu
-        # "28, September" (Ordinalzahl weg) und "z. B." zu "z, B,".
+        # "28; September" (Ordinalzahl weg) und "z. B." zu "z; B;".
         def _satzende(m):
-            return m.group(0) if m.group(1).lower() in XTTS_ABKUERZUNGEN else m.group(1) + ","
+            return m.group(0) if m.group(1).lower() in XTTS_ABKUERZUNGEN else m.group(1) + ";"
         t = re.sub(r"\b([^\W\d_]{2,})\.(?=\s+[A-ZÄÖÜ])", _satzende, t)
         return t or text
 
