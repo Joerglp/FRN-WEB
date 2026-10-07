@@ -2294,6 +2294,18 @@ class TXServer:
         maxi = int(bot.get("follow_up_max", 3) or 0)
         return maxi > 0 and self._anschluss_folge.get(room, 0) >= maxi
 
+    def _hotword_liste(self, low: str) -> bool:
+        """Besteht der Spruch fast nur aus Whisper-Hotwords? ("Ciao, Robert, Eddie,
+        Eickelborn, Lippstadt." am 07.10. -- Whisper erfindet bei unklarem Ton gern
+        eine Aufzaehlung aus seiner Hotword-Liste; 12 Faelle seit 20.09.)"""
+        hot = str((self.cfg.get("whisper") or {}).get("hotwords") or "").lower()
+        hw = set(re.findall(r"\w+", hot))
+        worte = re.findall(r"\w+", low)
+        if not hw or len(worte) < 3:
+            return False
+        treffer = sum(1 for w in worte if w in hw)
+        return treffer >= 3 and treffer / len(worte) >= 0.6
+
     def bot_angesprochen(self, text: str, room: str = "") -> bool:
         """Faellt Roberts Name (oder ein Trigger-Wort) im Text? Gleiche Pruefung
         wie name_hit in _bot_observe -- fuer die Transkription, die damit den
@@ -2302,6 +2314,8 @@ class TXServer:
         if not bot.get("enabled"):
             return False
         low = (text or "").lower()
+        if self._hotword_liste(low):
+            return False     # Kontroll-Lauf soll pruefen, ob das ueberhaupt gesagt wurde
         triggers = [t.lower() for t in bot.get("trigger", []) if t.strip()]
         triggers.append((bot.get("name") or "Robert").lower())
         ruf = self._namensruf(low, list(dict.fromkeys(triggers)))
@@ -3158,6 +3172,11 @@ class TXServer:
         triggers = [t.lower() for t in bot.get("trigger", []) if t.strip()]
         triggers.append(name.lower())
         ruf          = self._namensruf(low, list(dict.fromkeys(triggers)))
+        if self._hotword_liste(low):
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                  detail="nur Namen/Hotwords aufgezählt (oft Whisper-Erfindung) -- keine Antwort",
+                                  final=True)
+            return
         if ruf == "angehaengt":
             # Name ohne Frage/Gruss/Inhalt -- auch nicht als Anschlussfrage
             self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
