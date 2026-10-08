@@ -801,8 +801,8 @@ class TXServer:
         self._rueckblick_laden()
         self._nachrichten_pfad = Path(__file__).parent / "nachrichten.json"
         self._nachrichten: list[dict] = []
-        self._nachricht_rueckfrage: dict[str, dict] = {}   # Raum → halbe Nachricht
-        self._rueckantwort: dict[str, dict] = {}           # Raum → gerade zugestellt, Antwort moeglich
+        self._nachgang: dict[str, dict] = {}       # Raum → laufendes Gespraech mit Robert
+        self._nachgang_bis: dict[str, float] = {}  # Raum → bis hierhin ausgewertet
         self._raum_eingang: dict[str, float] = {}          # Raum → letzter fremder Spruch
         self._nachrichten_laden()
         self._bot_state_pending = False
@@ -1985,7 +1985,7 @@ class TXServer:
         # _bot_build_prompt. Liste aus {"name": ..., "notes": ...}.
         "memory": [],
         # Notizbuch: Robert merkt sich SELBST Dinge per Tool-Call (siehe
-        # _BOT_NOTE_TOOL/_bot_save_note), im Unterschied zum Personen-
+        # Nachgang/_bot_save_note), im Unterschied zum Personen-
         # Gedaechtnis oben (das pflegt der Admin manuell). Liste aus
         # {"ts": ..., "text": ...}, aelteste zuerst raus (siehe _bot_save_note).
         "notebook_enabled": False,
@@ -2123,33 +2123,6 @@ class TXServer:
     # pflegt). Bewusst als eigenstaendiges Tool statt automatisch aus jeder
     # Antwort abzuleiten -- das Modell entscheidet selbst, was wirklich
     # merkenswert ist, sonst wuerde bei jedem Smalltalk etwas gespeichert.
-    _BOT_NOTE_TOOL = [{
-        "type": "function",
-        "function": {
-            "name": "notiz_merken",
-            # 2026-09-24: "Nutze das sparsam" gestrichen -- gemma4 hat das Werkzeug
-            # daraufhin NIE benutzt, auch nicht auf ausdrueckliches "merk dir"
-            # (antwortete "hab ich mir eingepraegt" und notierte nichts). Die
-            # Abgrenzung gegen Smalltalk steht jetzt positiv formuliert drin.
-            "description": ("Schreibt einen Satz dauerhaft in dein Notizbuch, damit du "
-                            "es in späteren Gesprächen noch weisst. Für Dinge über "
-                            "die Leute auf dem Kanal, die in Tagen oder Wochen noch "
-                            "stimmen: Urlaub, Geburtstag, Krankheit, Termine, neue "
-                            "Antenne oder Station, Umzug -- und IMMER, wenn jemand "
-                            "'merk dir' sagt. Nicht für Wetter oder Smalltalk."),
-            "parameters": {
-                "type": "object",
-                "properties": {"text": {"type": "string",
-                                        "description": ("Ein Satz MIT Namen, Zeitangaben "
-                                                        "genau so, wie sie gesagt wurden "
-                                                        "('am Samstag', 'ab Montag') -- "
-                                                        "rechne KEIN Datum selbst aus, das "
-                                                        "Notizdatum wird automatisch "
-                                                        "vermerkt.")}},
-                "required": ["text"],
-            },
-        },
-    }]
 
     def _bot_cfg(self) -> dict:
         return {**self._BOT_DEFAULTS,
@@ -3136,33 +3109,6 @@ class TXServer:
                                   detail="Raum nicht in Robert-Liste (z.B. Papagei-Testraum)",
                                   final=True)
             return
-        # Rueckantwort (07.10.): kurz nach einer Zustellung schickt der Empfaenger
-        # oft etwas zurueck ("Ich schick die Gruesse zurueck") -- ohne Robert-Namen.
-        ra = self._rueckantwort.get(room_name)
-        if ra and bot.get("nachrichten_enabled", True):
-            if time.time() > ra["bis"]:
-                del self._rueckantwort[room_name]
-            elif self._RUECKANTWORT_RE.search(low):
-                del self._rueckantwort[room_name]
-                self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
-                                      detail=f"Rückantwort von {ra['von']} an {ra['an']}", final=True)
-                asyncio.create_task(self._nachricht_annehmen(
-                    room, room_name, callsign, text, ts, ra["an"], ra["von"]))
-                return
-        # Rueckfrage beim Ausrichten offen ("Was soll ich Hans ausrichten?"):
-        # der naechste fremde Spruch ist die Antwort darauf.
-        rf = self._nachricht_rueckfrage.get(room_name)
-        if rf and bot.get("nachrichten_enabled", True):
-            if ts > rf["gefragt"] and time.time() - rf["gefragt"] < 120:
-                del self._nachricht_rueckfrage[room_name]
-                self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
-                                      detail="Antwort auf Rückfrage zum Ausrichten", final=True)
-                asyncio.create_task(self._nachricht_annehmen(
-                    room, room_name, rf.get("von") or callsign,
-                    rf["text"] + " ... " + text, ts, rf.get("an")))
-                return
-            if time.time() - rf["gefragt"] >= 120:
-                del self._nachricht_rueckfrage[room_name]
         now  = time.time()
         last = self._bot_last_reply.get(room_name, 0.0)
         if now - last < float(bot.get("cooldown_s", 20)):
@@ -3199,11 +3145,6 @@ class TXServer:
                                   detail="Name nur erwähnt (Erzählung über jemanden) -- keine Ansprache")
         if name_hit:
             self._anschluss_folge[room_name] = 0
-        if name_hit and bot.get("nachrichten_enabled", True) and self._AUSRICHTEN_RE.search(low):
-            self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
-                                  detail="Auftrag zum Ausrichten erkannt", final=True)
-            asyncio.create_task(self._nachricht_annehmen(room, room_name, callsign, text, ts))
-            return
         name_or_call = name_hit or bool(self._BOT_CALL_RE.search(low))
         # Schalter "nur auf Ansprache" (User-Wunsch 2026-09-16): dann meldet
         # sich Robert AUSSCHLIESSLICH, wenn sein Name faellt -- kein
@@ -3713,6 +3654,7 @@ class TXServer:
             if not sent:
                 return
             self._bot_last_reply[room_name] = t1
+            self._nachgang_planen(room_name, t0)
             self._bot_protokoll(room_name, t0, t1, answer,
                                 gehoert or (hist[-1][2] if hist else ""), heard_ts)
             own = self._bot_own_tx.setdefault(room_name, [])
@@ -4679,8 +4621,6 @@ class TXServer:
         tools = []
         if (bot.get("websearch") or {}).get("enabled"):
             tools += self._BOT_WEBSEARCH_TOOL
-        if bot.get("notebook_enabled"):
-            tools += self._BOT_NOTE_TOOL
         persona = len((bot.get("persona") or "").strip())
         sysp    = len((bot.get("system_prompt") or self._BOT_SYSTEM_DEFAULT).replace("{persona}", ""))
         zusatz  = max(0, len(system) - persona - sysp)
@@ -5013,18 +4953,10 @@ class TXServer:
             await asyncio.sleep(900)
 
     # ── Nachrichten ausrichten (02.10.) ─────────────────────────────────────
-    # "Robert, richte dem Hans aus, ..." -> speichern, und wenn Hans auf dem
-    # Kanal auftaucht, in der naechsten Pause zustellen.
-    _AUSRICHTEN_RE = re.compile(
-        # 06.10.: "richte den Gottfried mal schoene Gruesse von mir aus" hatte 7
-        # Woerter zwischen "richte" und "aus" -- jetzt ganzer Satz erlaubt.
-        r"aus\s*zu\s*richten|ausrichten|\bricht\w*\b[^.!?]{0,100}?\baus\b"
-        r"|\bgr[üu](?:ß|ss)\w*\s+(?:mir\s+)?(?:mal\s+)?(?:den|dem|die|der)\s+(?!runde\b|anderen\b|leute\b)\w+"
-        r"|\bbestell\w*\s+(?:\S+\s+){0,4}?gr[üu](?:ß|ss)"
-        r"|\bsag\w*\s+(?:\S+\s+){0,4}?bescheid\b"
-        r"|\bnachricht\s+f[üu]r\b"
-        r"|\bsag\w*\s+(?:mal\s+)?(?:dem|der)\s+\w+\W+(?:er|sie)\s+soll")
-
+    # Annahme seit 08.10. im Nachgang (_nachgang_auswerten): Robert sagt im
+    # Gespraech einfach zu, danach wird der Ausschnitt in Ruhe ausgewertet.
+    # Zustellung: sobald der Empfaenger auf dem Kanal auftaucht, in der
+    # naechsten Pause.
     def _nachrichten_laden(self):
         try:
             d = json.loads(self._nachrichten_pfad.read_text(encoding="utf-8"))
@@ -5078,6 +5010,7 @@ class TXServer:
             if not ok:
                 return False
             self._bot_last_reply[room_name] = t1
+            self._nachgang_planen(room_name, t0)
             self._bot_protokoll(room_name, t0, t1, text, art, t0)
             own = self._bot_own_tx.setdefault(room_name, [])
             own.append((t0, t1, text))
@@ -5094,97 +5027,175 @@ class TXServer:
         finally:
             self._bot_busy.discard(room_name)
 
-    async def _nachricht_annehmen(self, room, room_name: str, callsign: str,
-                                  text: str, ts: float, an_vorher: str | None = None,
-                                  von_vorher: str | None = None):
-        bot = self._bot_cfg()
-        von_stimme = callsign if callsign and callsign != "Funker" else ""
-        # Enrollment-Namen sind ASCII ("Joerg"), vorgelesen klingt das falsch
-        von_stimme = {"Joerg": "Jörg"}.get(von_stimme, von_stimme)
-        prompt = (
-            f'Funkspruch an Robert: "{text}"\n'
-            f"Absender laut Stimmerkennung: {von_stimme or 'unbekannt'}\n"
-            + (f"Empfänger aus einem früheren Spruch: {an_vorher}\n" if an_vorher else "")
-            + (f"Kontext: Robert hat {von_vorher} gerade eine Nachricht von {an_vorher} "
-               f"ausgerichtet, dies ist {von_vorher}s Antwort darauf.\n" if von_vorher else "")
-            + f"Namen, die auf dem Kanal vorkommen: {', '.join(self._bekannte_namen(bot)) or '-'}\n\n"
-            "Jemand bittet Robert vielleicht, einer Person etwas auszurichten. Antworte NUR mit JSON:\n"
-            '{"auftrag": true wenn Robert wirklich etwas an eine andere Person weitergeben soll '
-            '(auch Grüße), false wenn nicht (z.B. "die Antenne richte ich morgen aus"), '
-            '"an": Vorname des Empfängers oder null, '
-            '"von": Vorname des Absenders oder null (nur wenn er sich im Spruch selbst nennt, '
-            'z.B. "hier ist der Peter" / "von Peter", oder die Stimmerkennung ihn kennt; nie raten), '
-            '"satz": die Nachricht als EIN Satz, den Robert dem Empfänger direkt sagen kann, '
-            'in indirekter Rede, ohne Anrede. Schreib für den Absender IMMER das Wort VON, '
-            'nie einen Namen und nie "der Absender"/"jemand" (z.B. "VON lässt ausrichten, '
-            'dass er morgen später kommt." / "Du sollst VON heute Abend mal anrufen." / '
-            '"Schöne Grüße von VON."). Achte auf die Rollen: "ich/mich/mir" im Spruch ist '
-            'der Absender (VON), "er/sie/ihn/ihm" ist der Empfänger (im satz: "du/dich/dir"). '
-            '"Er soll mich anrufen" wird also zu "Du sollst VON mal anrufen." '
-            'satz ist null, wenn der Spruch nur fragt, OB Robert '
-            'etwas ausrichten kann, ohne den Inhalt zu nennen. '
-            '"ablehnen": true wenn der Inhalt beleidigend, bedrohlich oder anstößig ist, sonst false}')
-        try:
-            roh = await self._ollama_text(bot,
-                "Du liest Aufträge aus Funksprüchen aus. Die Sprüche stammen aus "
-                "Spracherkennung und können Hörfehler enthalten. Erfinde nichts.",
-                prompt, num_predict=200, als_json=True)
-            d = json.loads(roh)
-        except Exception as e:
-            log.warning("[%s] Ausrichten: Auswertung fehlgeschlagen: %s", room_name, e)
-            await self._spontan_senden(room, room_name,
-                                       "Da hab ich nicht mitbekommen, was ich ausrichten soll. "
-                                       "Sag's bitte nochmal.", "(Ausrichten)", 60)
-            return
-        if d.get("auftrag") is False and not an_vorher:
-            log.info("[%s] Ausrichten: kein Auftrag (%.80r)", room_name, text)
-            return
-        # Rueckantwort: Empfaenger steht fest (das Modell nahm sonst den Absender)
-        an = str((an_vorher if von_vorher else d.get("an")) or an_vorher or "").strip()
-        an = an[:1].upper() + an[1:] if an else ""
-        von = str(von_vorher or d.get("von") or von_stimme or "").strip()
-        satz = str(d.get("satz") or "").strip()
-        if von_vorher and not satz:
-            satz = "VON grüßt zurück."
-        if not re.fullmatch(r"[A-Za-zÄÖÜäöüß\- ]{2,30}", an or "-"):
-            an = ""
-        if d.get("ablehnen"):
-            antwort = "Nee, so was richte ich nicht aus."
-        elif not an:
-            antwort = "Klar, wem soll ich denn was ausrichten?"
-            self._nachricht_rueckfrage[room_name] = {"gefragt": time.time(), "text": text,
-                                                     "von": von_stimme}
-        elif not satz:
-            antwort = f"Klar, was soll ich {an} denn ausrichten?"
-            self._nachricht_rueckfrage[room_name] = {"gefragt": time.time(), "text": text,
-                                                     "von": von_stimme, "an": an}
-        elif not von and not an_vorher:
-            antwort = f"Mach ich. Und von wem soll ich das {an} ausrichten?"
-            self._nachricht_rueckfrage[room_name] = {"gefragt": time.time(), "text": text,
-                                                     "von": "", "an": an}
-        else:
-            von = von or "jemand vom Kanal"
-            satz = re.sub(r"\bVON\b", von, satz)
-            satz = satz[:1].upper() + satz[1:]
-            self._nachrichten.append({
-                "id": f"{int(ts * 1000):x}", "ts": ts, "raum": room_name,
-                "an": an, "von": von, "satz": satz[:300], "original": text[:400],
-                "zugestellt": None, "versuche": 0})
-            self._nachrichten_speichern()
-            log.info("[%s] Nachricht für %s hinterlegt (von %s): %s",
-                     room_name, an, von or "?", satz)
-            antwort = f"Alles klar, ich richte es aus, sobald {an} auf Kanal ist."
-        gesendet = await self._spontan_senden(room, room_name, antwort, "(Ausrichten)", 120)
-        if gesendet and room_name in self._nachricht_rueckfrage:
-            self._nachricht_rueckfrage[room_name]["gefragt"] = time.time()
+    # ── Nachgang (08.10.) ───────────────────────────────────────────────────
+    # Auftraege ("richte aus", "merk dir") nicht mehr live per Muster/Werkzeug
+    # erkennen, sondern nach dem Gespraech in Ruhe aus dem ganzen Ausschnitt
+    # (inkl. Roberts Antworten) herausziehen. Ein Modell-Aufruf je Gespraech.
+    _NACHGANG_RUHE_S = 90
+    _NACHGANG_SYSTEM = (
+        "Du wertest mitgeschriebene CB-Funkgespräche aus, an denen der KI-Funker Robert "
+        "beteiligt war. Jede Zeile ist 'Name: Text'; 'Funker' heißt Sprecher unbekannt, "
+        "'Robert (du)' ist Robert selbst. Der Text stammt aus der Spracherkennung und kann "
+        "Hörfehler enthalten. Erfinde nichts.")
+    _NACHGANG_AUFGABE = (
+        "Antworte NUR mit JSON: {\"auftraege\": [{\"art\": \"ausrichten\" oder \"merken\", "
+        "\"an\": Vorname oder null, \"von\": Vorname oder null, \"text\": Satz}]}.\n"
+        "ausrichten: jemand bittet Robert, einer anderen Person etwas zu sagen, auszurichten, "
+        "Bescheid zu geben oder Grüße zu bestellen. an ist diese Person, von der Bittende "
+        "(null wenn unbekannt; 'Funker' ist kein Name). text ist der Satz, den Robert der "
+        "Person später sagt: indirekte Rede, ohne Anrede, mit dem Vornamen des Absenders oder "
+        "'jemand aus der Runde'. Was der Absender über sich sagt, steht mit seinem Namen; was "
+        "er über den Empfänger sagt, in Du-Form.\n"
+        "merken: jemand bittet Robert, sich selbst etwas zu merken. text ist nur der Inhalt "
+        "als ein Satz mit Namen, Zeitangaben wörtlich; an und von sind null.\n"
+        "Nicht aufnehmen: Nachrichten, die Robert selbst gerade zugestellt hat (seine Zeile "
+        "beginnt mit 'X, ich soll dir was ausrichten'), Beleidigendes oder Bedrohliches, "
+        "bloßes Grüßen in die Runde. Gibt es nichts davon, antworte {\"auftraege\": []}.")
 
-    _RUECKANTWORT_RE = re.compile(
-        r"gr[üu](?:ß|ss)\w*\s+(?:\S+\s+){0,3}?zur[üu]ck|zur[üu]ck\w*\s+gr[üu]"
-        r"|\bricht\w*\b[^.!?]{0,80}?\baus\b|ausrichten"
-        r"|\bsag\w*\s+(?:\S+\s+){0,2}?(?:ihm|ihr)\b"
-        r"|\b(?:ihm|ihr)\s+(?:\S+\s+){0,2}?gr[üu](?:ß|ss)"
-        r"|gr[üu](?:ß|ss)\w*\s+(?:\S+\s+){0,2}?(?:ihn|sie)\b"
-        r"|\berwider|\bgleichfalls\b|\bebenso\b")
+    # Vorpruefung ohne Modell: ohne passendes Wort im Ausschnitt gibt es nichts
+    # zu tun (das Modell erfand sonst Notizen aus Belanglosem).
+    _NG_NACHRICHT_RE = re.compile(
+        r"ausricht|\bricht\w*\b[^.!?]{0,100}\baus\b|gr[üu](?:ß|ss)|bestell|bescheid|"
+        r"\bsag\w*\s+(?:\S+\s+){0,2}(?:dem|der|ihm|ihr)\b|\b(?:dem|der)\s+\w+\s+(?:\S+\s+){0,2}sag", re.I)
+    _NG_ZURUECK_RE = re.compile(r"zur[üu]ck|gleichfalls|ebenso|erwider|\b(?:ihm|ihr)\s+(?:\S+\s+){0,2}gr[üu]|"
+                                r"gr[üu](?:ß|ss)\w*\s+(?:\S+\s+){0,2}(?:ihn|sie)\b", re.I)
+    _NG_NOTIZ_RE = re.compile(r"\bmerk|vergiss\w*\s+nicht|notier|aufschreib|schreib\w*\s+(?:dir|das)\s+auf", re.I)
+    _NG_ZUSTELLUNG_RE = re.compile(r"^(\w+), ich soll dir was ausrichten")
+
+    def _nachgang_planen(self, room_name: str, t: float) -> None:
+        """Nach jeder Sendung von Robert: Auswertung, sobald 90 s Ruhe ist."""
+        st = self._nachgang.get(room_name)
+        if st is None:
+            self._nachgang[room_name] = {"start": t, "letzte": t}
+            asyncio.create_task(self._nachgang_lauf(room_name))
+        else:
+            st["letzte"] = max(st["letzte"], t)
+
+    async def _nachgang_lauf(self, room_name: str) -> None:
+        try:
+            while True:
+                st = self._nachgang[room_name]
+                warte = st["letzte"] + self._NACHGANG_RUHE_S - time.time()
+                if warte <= 0:
+                    break
+                await asyncio.sleep(warte)
+            st = self._nachgang.pop(room_name)
+            await self._nachgang_auswerten(room_name, st["start"])
+        except Exception as e:
+            self._nachgang.pop(room_name, None)
+            log.warning("[%s] Nachgang fehlgeschlagen: %s", room_name, e)
+
+    async def _nachgang_auswerten(self, room_name: str, start: float,
+                                  zeilen: list | None = None, speichern: bool = True) -> dict:
+        """Zieht Auftraege aus dem Gespraech seit start. zeilen/speichern fuer Tests."""
+        bot = self._bot_cfg()
+        if not (bot.get("nachrichten_enabled", True) or bot.get("notebook_enabled")):
+            return {}
+        if zeilen is None:
+            ab = max(start - 120, self._nachgang_bis.get(room_name, 0.0) - 30)
+            zeilen = [(t, w, x) for t, w, x in self._room_hist.get(room_name, []) if t >= ab]
+            self._nachgang_bis[room_name] = time.time()
+        if len(zeilen) < 2:
+            return {}
+        ausschnitt = "\n".join(f"{w}: {x}" for _t, w, x in zeilen)[-6000:]
+        name_low = (bot.get("name") or "Robert").lower()
+        # Auftraege gelten nur, wenn die Bitte an Robert geht: sein Name steht in
+        # der Zeile, oder sie folgt direkt auf eine Sendung von ihm.
+        an_robert = [x for i, (_t, w, x) in enumerate(zeilen) if not w.endswith("(du)")
+                     and (name_low in x.lower() or (i > 0 and zeilen[i - 1][1].endswith("(du)")))]
+        will_nachricht = bot.get("nachrichten_enabled", True) and any(
+            self._NG_NACHRICHT_RE.search(x) for x in an_robert)
+        will_notiz = bot.get("notebook_enabled") and any(self._NG_NOTIZ_RE.search(x) for x in an_robert)
+        # Gerade zugestellt: X bekam eine Nachricht von Y. Schickt X direkt danach
+        # etwas zurueck, geht das an Y (in der Mitschrift steht X oft als "Funker").
+        zugestellt_von, rueckgruss = {}, []
+        for i, (_t, w, x) in enumerate(zeilen):
+            mz = self._NG_ZUSTELLUNG_RE.match(x) if w.endswith("(du)") else None
+            if not mz:
+                continue
+            for a in self._nachrichten:
+                if a.get("zugestellt") and a.get("von") and \
+                        self._namen_norm(a.get("an", "")) == self._namen_norm(mz.group(1)):
+                    zugestellt_von[self._namen_norm(a["von"])] = mz.group(1)
+                    if i + 1 < len(zeilen) and not zeilen[i + 1][1].endswith("(du)") \
+                            and self._NG_ZURUECK_RE.search(zeilen[i + 1][2]):
+                        rueckgruss.append((a["von"], mz.group(1)))
+                        will_nachricht = bot.get("nachrichten_enabled", True)
+        if not (will_nachricht or will_notiz):
+            log.info("[%s] Nachgang: kein Auftrag an Robert (%d Zeilen)", room_name, len(zeilen))
+            return {}
+        namen = ", ".join(self._bekannte_namen(bot)) or "-"
+        roh = await self._ollama_text(
+            bot, self._NACHGANG_SYSTEM,
+            f"Gespräch:\n{ausschnitt}\n\nNamen, die auf dem Kanal vorkommen: {namen}\n\n"
+            + self._NACHGANG_AUFGABE, num_predict=500, als_json=True)
+        d = json.loads(roh or "{}")
+        auftraege = [x for x in (d.get("auftraege") or []) if isinstance(x, dict)]
+        nachr = [dict(x, satz=x.get("text")) for x in auftraege
+                 if str(x.get("art") or "").lower().startswith("ausricht")]
+        notizen = [x.get("text") for x in auftraege
+                   if str(x.get("art") or "").lower().startswith("merk")]
+        for an_r, von_r in rueckgruss:
+            if not any(self._namen_norm(str(n.get("an") or "")) == self._namen_norm(an_r) for n in nachr):
+                nachr.append({"an": an_r, "von": von_r, "satz": f"{von_r} schickt dir die Grüße zurück."})
+        erg = {"nachrichten": [], "notizen": []}
+        jetzt = time.time()
+        if will_nachricht:
+            for n in nachr:
+                an = str(n.get("an") or "").strip()
+                an = {"Joerg": "Jörg"}.get(an, an)
+                von = str(n.get("von") or "").strip()
+                von = {"Joerg": "Jörg", "Funker": ""}.get(von, von)
+                satz = re.sub(r"\s+", " ", str(n.get("satz") or "")).strip()
+                if not von:
+                    von = zugestellt_von.get(self._namen_norm(an), "")
+                satz = re.sub(r"\b(?:[Dd]er |[Ee]in )?Funker\b", von or "jemand aus der Runde", satz)
+                satz = re.sub(r"\b[Jj]emand aus der Runde\b", von, satz) if von else satz
+                satz = satz.replace("Joerg", "Jörg")
+                satz = re.sub(rf"^{re.escape(an)}\W+", "", satz)
+                satz = satz[:1].upper() + satz[1:]
+                satz = satz[:1].upper() + satz[1:]
+                if not re.fullmatch(r"[A-Za-zÄÖÜäöüß\- ]{2,30}", an) or len(satz) < 3 \
+                        or an.lower() in ("funker", "jemand", "alle", "runde"):
+                    continue
+                an = an[:1].upper() + an[1:]
+                if an.lower() == (bot.get("name") or "robert").lower():
+                    continue
+                doppelt = any(
+                    self._namen_norm(a.get("an", "")) == self._namen_norm(an)
+                    and jetzt - float(a.get("ts") or 0) < 2 * 86400
+                    and difflib.SequenceMatcher(None, a.get("satz", "").lower(), satz.lower(),
+                                                autojunk=False).ratio() > 0.6
+                    for a in self._nachrichten)
+                if doppelt:
+                    continue
+                eintrag = {"id": f"{int(jetzt * 1000):x}{len(erg['nachrichten'])}", "ts": jetzt,
+                           "raum": room_name, "an": an, "von": von, "satz": satz[:300],
+                           "original": ausschnitt[-1500:], "zugestellt": None, "versuche": 0}
+                erg["nachrichten"].append(eintrag)
+                if speichern:
+                    self._nachrichten.append(eintrag)
+                    log.info("[%s] Nachgang: Nachricht für %s (von %s): %s",
+                             room_name, an, von or "?", satz)
+            if speichern and erg["nachrichten"]:
+                self._nachrichten_speichern()
+        if will_notiz:
+            alte = [x.get("text", "") for x in (bot.get("notebook") or [])
+                    if isinstance(x, dict) and jetzt - float(x.get("ts") or 0) < 14 * 86400]
+            for t in notizen:
+                t = re.sub(r"\s+", " ", str(t or "")).strip()
+                if len(t) < 8 or any(difflib.SequenceMatcher(None, t.lower(), a.lower(),
+                                                              autojunk=False).ratio() > 0.6
+                                     for a in alte):
+                    continue
+                alte.append(t)
+                erg["notizen"].append(t)
+                if speichern:
+                    self._bot_save_note(t)
+                    log.info("[%s] Nachgang: Notiz: %s", room_name, t)
+        if not (erg["nachrichten"] or erg["notizen"]):
+            log.info("[%s] Nachgang: nichts zu tun (%d Zeilen)", room_name, len(zeilen))
+        return erg
 
     _GRUSS_AN = r"(?:moin|hallo|morgen|guten\s+(?:morgen|tag|abend)|n'?abend|tach|servus|gr[üu](?:ß|ss)\s+dich|na)"
 
@@ -5243,9 +5254,6 @@ class TXServer:
             if ok:
                 n["zugestellt"] = time.time()
                 n["zugestellt_raum"] = room_name
-                if n.get("von"):
-                    self._rueckantwort[room_name] = {"bis": time.time() + 120,
-                                                     "an": n["von"], "von": an}
             else:
                 n["versuche"] = n.get("versuche", 0) + 1
                 n["naechster"] = time.time() + 300
@@ -5452,7 +5460,7 @@ class TXServer:
             if rb:
                 spaet.append(rb)
         # Notizbuch: eigene, per Tool-Call selbst gemerkte Notizen (siehe
-        # _BOT_NOTE_TOOL/_bot_save_note) -- im Unterschied zum Personen-
+        # Nachgang/_bot_save_note) -- im Unterschied zum Personen-
         # Gedaechtnis oben IMMER eingespeist (nicht an einen im Gespraech
         # vorkommenden Namen gebunden), aber auf die letzten paar begrenzt,
         # sonst blaeht sich der Prompt mit der Zeit unbegrenzt auf.
@@ -5832,8 +5840,6 @@ class TXServer:
         tools = []
         if (bot.get("websearch") or {}).get("enabled"):
             tools += self._BOT_WEBSEARCH_TOOL
-        if bot.get("notebook_enabled"):
-            tools += self._BOT_NOTE_TOOL
         if tools:
             body["tools"] = tools
         try:
@@ -5866,27 +5872,18 @@ class TXServer:
 
         call = tool_calls[0]
         fn   = call.get("function") or {}
-        name = fn.get("name") or ""
         args = fn.get("arguments") or {}
-        if name == "notiz_merken":
-            note = str(args.get("text") or "").strip()[:300]
-            self._bot_save_note(note)
-            result = "notiert" if note else "keine Notiz erhalten"
-            if do_trace:
-                self.debug_trace_step(room_name, trace_ts, "Notizbuch", "ok" if note else "warn",
-                                     None, f"[Modell-Initiative] {note[:200]}")
-        else:
-            query = str(args.get("query") or "").strip()[:200]
-            _t0 = time.time()
-            result = await self._bot_websearch(bot, query) if query else ""
-            _sdt = time.time() - _t0
-            log.info("KI-Funker Websuche (Tool-Call, Modell-Initiative): %.1fs -- %r",
-                     _sdt, query)
-            if do_trace:
-                self.debug_trace_step(room_name, trace_ts, "Websuche", "ok" if result else "warn",
-                                     _sdt, f"[Modell-Initiative] {query}: " +
-                                     (result[:200] if result else "keine Treffer"))
-            result = result or "(SUCHE FEHLGESCHLAGEN: kein Ergebnis, die Suchdienste sind gerade nicht erreichbar. Du hast also KEINE aktuellen Infos dazu. Sag ehrlich und kurz, dass du das gerade nicht nachschauen kannst. Erfinde auf KEINEN Fall Wetter, Nachrichten oder Ergebnisse.)"
+        query = str(args.get("query") or "").strip()[:200]
+        _t0 = time.time()
+        result = await self._bot_websearch(bot, query) if query else ""
+        _sdt = time.time() - _t0
+        log.info("KI-Funker Websuche (Tool-Call, Modell-Initiative): %.1fs -- %r",
+                 _sdt, query)
+        if do_trace:
+            self.debug_trace_step(room_name, trace_ts, "Websuche", "ok" if result else "warn",
+                                 _sdt, f"[Modell-Initiative] {query}: " +
+                                 (result[:200] if result else "keine Treffer"))
+        result = result or "(SUCHE FEHLGESCHLAGEN: kein Ergebnis, die Suchdienste sind gerade nicht erreichbar. Du hast also KEINE aktuellen Infos dazu. Sag ehrlich und kurz, dass du das gerade nicht nachschauen kannst. Erfinde auf KEINEN Fall Wetter, Nachrichten oder Ergebnisse.)"
         follow = full_messages + [
             {"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls},
             # Gleiche Regel wie im Prompt-Kopf (_bot_build_prompt) -- im

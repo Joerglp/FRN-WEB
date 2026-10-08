@@ -1793,7 +1793,8 @@ audio {
         <div class="adm-card">
           <div class="adm-card-title">📨 Nachrichten ausrichten</div>
           <div class="adm-card-sub">„Robert, richte dem Hans aus, er soll mich mal anrufen." Robert merkt sich das und sagt es Hans,
-            sobald der auf Kanal ist. Ist der Absender unbekannt oder fehlt der Inhalt, fragt er kurz nach.</div>
+            sobald der auf Kanal ist. Im Gespräch sagt er einfach zu; etwa 90 Sekunden danach liest der Nachgang
+            den Ausschnitt und legt die Nachricht an. Grüße zurück direkt nach einer Zustellung gehen an den Absender.</div>
           <label class="adm-sw">
             <input type="checkbox" id="na-enabled" autocomplete="off">
             <span class="adm-sw-text">Nachrichten annehmen und ausrichten</span>
@@ -1805,7 +1806,7 @@ audio {
             </div>
           </div>
           <div class="adm-hint">Wann der Empfänger als da gilt: Die Sprecher-Erkennung erkennt ihn sicher, er meldet sich selbst
-            („hier ist der Hans") oder er wird begrüßt („Moin Hans") und danach antwortet jemand. Beleidigendes lehnt er ab.</div>
+            („hier ist der Hans") oder er wird begrüßt („Moin Hans") und danach antwortet jemand. Beleidigendes nimmt der Nachgang nicht auf.</div>
           <div class="adm-fields" style="margin-top:14px">
             <div class="form-field">
               <label>An <small>Vorname</small></label>
@@ -2039,14 +2040,15 @@ audio {
       <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
       <div class="admin-section-title">Notizbuch</div>
       <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.5">
-        Robert merkt sich hier SELBST Dinge (per Tool-Call, eigene Entscheidung —
-        im Unterschied zum Personen-Gedächtnis oben, das du manuell pflegst).
+        Bittet jemand Robert, sich etwas zu merken, sagt er im Gespräch einfach zu. Etwa
+        90 Sekunden nach dem Gespräch liest der Nachgang den Ausschnitt und trägt die Notiz
+        hier ein (im Unterschied zum Personen-Gedächtnis oben, das du manuell pflegst).
         Die letzten Einträge werden immer in den Prompt eingespeist. Hier kannst
         du nur löschen, nicht hinzufügen.
       </div>
       <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer">
         <input type="checkbox" id="bot-notebook-enabled" style="accent-color:#f0b429" autocomplete="off">
-        Notizbuch aktiv (Robert darf sich selbst Notizen machen)
+        Notizbuch aktiv („merk dir …“ wird im Nachgang notiert)
       </label>
       <div id="bot-notebook-list" style="font-size:.82rem;color:var(--text);margin-bottom:6px"></div>
 
