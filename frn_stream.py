@@ -178,6 +178,8 @@ class FRNClient:
         self.sock           = None
         self.inbuffer       = b""
         self.clients        = []
+        self._idx_zuletzt   = None
+        self._sound_zuletzt = 0.0
         self.connected      = False
         self.last_keepalive = 0
         self.rx_sent        = False
@@ -282,6 +284,15 @@ class FRNClient:
                             resolved = self.clients[client_idx].get("ON", "")
                         if debug:
                             log.debug("SOUND idx=%d resolved=%s (nicht gespeichert)", client_idx, resolved)
+                        # Je Durchgang bzw. Wechsel einmal (08.10.): Test, ob client_idx
+                        # bei einem zweiten, direkt per FRN sendenden Client auf diesen zeigt.
+                        _jetzt = time.monotonic()
+                        _neu = _jetzt - self._sound_zuletzt > 1.0
+                        self._sound_zuletzt = _jetzt
+                        if client_idx != self._idx_zuletzt or _neu:
+                            self._idx_zuletzt = client_idx
+                            log.info("SOUND-Index %d -> %r | Liste: %s", client_idx, resolved,
+                                     [c.get("ON", "") for c in self.clients])
                         callsign = ""
                         # Decode each of the 5 WAV49 pairs individually
                         for i in range(WAV49_BLOCKS_PER_PACKET):
