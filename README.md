@@ -376,23 +376,15 @@ RestartSec=30
 WantedBy=multi-user.target
 ```
 
-## Bekannte Einschränkungen / Hilfe gesucht
+## Sprecher-Zuordnung
 
-### Sprecher-Zuordnung im Archiv (client_idx-Semantik unbekannt)
+Jedes Audio-Paket im FRN-Protokoll trägt einen `client_idx`, und der Server schickt mit `MARKER_CLIENTS` die Liste der verbundenen Stationen. Daraus lässt sich aber nur ablesen, **welcher FRN-Client** sendet – nicht, wer am Mikrofon spricht.
 
-Jedes Audio-Paket im FRN-Protokoll enthält einen 2-Byte-`client_idx`, der laut Protokollstruktur den sendenden Client identifizieren soll. Der FRN-Server sendet außerdem regelmäßig eine `MARKER_CLIENTS`-Liste mit allen verbundenen Stationen.
+In dieser Installation läuft der Funkverkehr komplett über ein Gateway: Ein Funkgerät hängt per Soundkarte und PTT an einem Raspberry Pi, der als einziger Client Audio ins FRN-Netz schickt. Wer auf dem CB-Kanal spricht, erscheint im FRN deshalb immer unter dem Namen des Gateways. `client_idx` und Rufzeichen sind damit zwangsläufig für jede Durchsage gleich; das ist kein Protokollrätsel, sondern die Topologie. [`frn_stream.py`](frn_stream.py) wertet `client_idx` deshalb nur noch fürs Debug-Log aus und speichert kein Rufzeichen.
 
-**Problem:** Der empfangene `client_idx` zeigt in unseren Tests konstant auf Position 0 der Clientliste — unabhängig davon, welche Station tatsächlich sendet. Es ist unklar ob:
+Wer gesprochen hat, wird darum an der **Stimme** erkannt: Die GPU-Box berechnet für jede Aufnahme ein Stimm-Embedding (ECAPA, Port 9005), der Pi vergleicht es mit den angelernten Proben jeder Person. Ein Name wird nur vergeben, wenn die Ähnlichkeit über der Schwelle liegt und der Zweitbeste deutlich dahinter – lieber kein Name als ein falscher. Schwellen und Proben stehen im Admin-Panel unter *Funk & Audio → Sprecher-Erkennung*.
 
-- `client_idx` ein direkter Array-Index in die empfangene Clientliste ist (was nicht funktioniert),
-- oder ob der Server eine interne Slot-Nummer vergibt, die nicht mit der Sortierung der `MARKER_CLIENTS`-Liste übereinstimmt,
-- oder ob die Semantik noch anders ist (z. B. Connection-ID, Ring-Buffer-Position o. ä.).
-
-Da das FRN-Protokoll proprietär und nicht öffentlich dokumentiert ist, ist die genaue Bedeutung von `client_idx` unbekannt.
-
-**Relevant in [`frn_stream.py`](frn_stream.py), Funktion `_parse_client_list()` und `MARKER_SOUND`-Handler.**
-
-Wer Einblick in die FRN-Protokollspezifikation hat oder den Java-Client analysiert hat — ein Hinweis als Issue wäre sehr willkommen!
+**Grenzen:** Über den bandbegrenzten, verrauschten Funkkanal trifft die Erkennung nur bei einem Teil der Durchsagen sicher (grob ein Drittel); der Rest erscheint als „Funker“. Kurze Durchsagen unter zwei Sekunden brauchen eine höhere Schwelle.
 
 ## Lizenz
 
