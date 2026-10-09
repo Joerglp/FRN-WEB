@@ -1,18 +1,18 @@
 {
   "rooms": [
     {
-      "mount":    "quasel",
-      "name":     "Quasel-Ecke",
+      "mount": "quasel",
+      "name": "Quasel-Ecke",
       "callsign": "WEB-Quasel",
-      "email":    "stream-quasel@example.com",
-      "password": "DEIN_FRN_PASSWORT"
+      "email": "stream-quasel@example.com",
+      "password": "PASSWORT"
     },
     {
-      "mount":    "steinheim",
-      "name":     "Steinheim-Freenet5",
+      "mount": "steinheim",
+      "name": "Steinheim-Freenet5",
       "callsign": "WEB-Steinheim",
-      "email":    "stream-steinheim@example.com",
-      "password": "DEIN_FRN_PASSWORT"
+      "email": "stream-steinheim@example.com",
+      "password": "PASSWORT"
     }
   ]
 }
