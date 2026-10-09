@@ -378,9 +378,9 @@ WantedBy=multi-user.target
 
 ## Sprecher-Zuordnung
 
-Jedes Audio-Paket im FRN-Protokoll trägt einen `client_idx`, und der Server schickt mit `MARKER_CLIENTS` die Liste der verbundenen Stationen. Daraus lässt sich aber nur ablesen, **welcher FRN-Client** sendet – nicht, wer am Mikrofon spricht.
+Jedes Audio-Paket im FRN-Protokoll trägt einen `client_idx`, und der Server schickt bei jedem Senden-Start und -Stopp mit `MARKER_CLIENTS` die Liste der verbundenen Stationen. `client_idx` ist die Position des sendenden Clients in dieser Liste, **gezählt ab 1** (verifiziert mit einem Gateway und einem zweiten, direkt sendenden FRN-Client: alle Durchgänge passten). Wer den Wert als Position ab 0 liest, landet immer einen Eintrag zu weit hinten.
 
-In dieser Installation läuft der Funkverkehr komplett über ein Gateway: Ein Funkgerät hängt per Soundkarte und PTT an einem Raspberry Pi, der als einziger Client Audio ins FRN-Netz schickt. Wer auf dem CB-Kanal spricht, erscheint im FRN deshalb immer unter dem Namen des Gateways. `client_idx` und Rufzeichen sind damit zwangsläufig für jede Durchsage gleich; das ist kein Protokollrätsel, sondern die Topologie. [`frn_stream.py`](frn_stream.py) wertet `client_idx` deshalb nur noch fürs Debug-Log aus und speichert kein Rufzeichen.
+Damit ist bekannt, **welcher FRN-Client** sendet – aber nicht, wer am Mikrofon spricht. In dieser Installation läuft der Funkverkehr über ein Gateway: Ein Funkgerät hängt per Soundkarte und PTT an einem Raspberry Pi, der als Client Audio ins FRN-Netz schickt. Alle, die auf dem CB-Kanal sprechen, erscheinen im FRN unter dem Namen des Gateways. [`frn_stream.py`](frn_stream.py) speichert den Client-Namen deshalb nicht als Sprecher.
 
 Wer gesprochen hat, wird darum an der **Stimme** erkannt: Die GPU-Box berechnet für jede Aufnahme ein Stimm-Embedding (ECAPA, Port 9005), der Pi vergleicht es mit den angelernten Proben jeder Person. Ein Name wird nur vergeben, wenn die Ähnlichkeit über der Schwelle liegt und der Zweitbeste deutlich dahinter – lieber kein Name als ein falscher. Schwellen und Proben stehen im Admin-Panel unter *Funk & Audio → Sprecher-Erkennung*.
 

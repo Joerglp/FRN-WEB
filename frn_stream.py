@@ -178,8 +178,6 @@ class FRNClient:
         self.sock           = None
         self.inbuffer       = b""
         self.clients        = []
-        self._idx_zuletzt   = None
-        self._sound_zuletzt = 0.0
         self.connected      = False
         self.last_keepalive = 0
         self.rx_sent        = False
@@ -272,27 +270,17 @@ class FRNClient:
                         idx_bytes = self._consume(2)
                         client_idx = struct.unpack(">H", bytes(idx_bytes))[0]
                         gsm_data = self._consume(AUDIO_PACKET_SIZE)
-                        # HINWEIS: Die Sprecher-Zuordnung über client_idx ist in
-                        # diesem Setup unzuverlässig — der Index zeigt konstant auf
-                        # Position 0 der Client-Liste (= Recorder selbst bzw. eine
-                        # eingeloggte Web-TX-Verbindung), nie auf den echten Sprecher.
-                        # Daher KEIN Sprechername, statt einen falschen zu speichern.
-                        # (Wieder aktivieren erst, wenn die Index-Semantik live mit
-                        # echtem Funkverkehr verifiziert ist — siehe debug-Ausgabe.)
+                        # client_idx ist die Position des Senders in der Client-Liste,
+                        # gezaehlt AB 1 (verifiziert 09.10. mit Repeater und einem
+                        # zweiten, direkt sendenden FRN-Client: 23 von 23 Durchgaengen).
+                        # Funkverkehr kommt hier immer ueber das Gateway, der Name
+                        # sagt also nicht, wer spricht -- deshalb wird er (noch)
+                        # nicht gespeichert; der Sprecher kommt aus der Stimmerkennung.
                         resolved = ""
-                        if 0 <= client_idx < len(self.clients):
-                            resolved = self.clients[client_idx].get("ON", "")
+                        if 1 <= client_idx <= len(self.clients):
+                            resolved = self.clients[client_idx - 1].get("ON", "")
                         if debug:
                             log.debug("SOUND idx=%d resolved=%s (nicht gespeichert)", client_idx, resolved)
-                        # Je Durchgang bzw. Wechsel einmal (08.10.): Test, ob client_idx
-                        # bei einem zweiten, direkt per FRN sendenden Client auf diesen zeigt.
-                        _jetzt = time.monotonic()
-                        _neu = _jetzt - self._sound_zuletzt > 1.0
-                        self._sound_zuletzt = _jetzt
-                        if client_idx != self._idx_zuletzt or _neu:
-                            self._idx_zuletzt = client_idx
-                            log.info("SOUND-Index %d -> %r | Liste: %s", client_idx, resolved,
-                                     [c.get("ON", "") for c in self.clients])
                         callsign = ""
                         # Decode each of the 5 WAV49 pairs individually
                         for i in range(WAV49_BLOCKS_PER_PACKET):
