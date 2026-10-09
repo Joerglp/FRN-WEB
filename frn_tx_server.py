@@ -2788,10 +2788,15 @@ class TXServer:
         sonst (wenn aktiviert) per Speaker-ID versuchen, den Sprecher zu
         identifizieren.
 
-        Greift nur, wenn die Aufnahme kein Rufzeichen hat (Normalfall, die
-        client_idx-basierte Sprecher-Zuordnung ist unzuverlaessig, siehe
-        _reader_loop-Kommentar in frn_stream.py)."""
-        if not callsign:
+        Ein echter Name kommt nur von direkt sendenden FRN-Clients und wird
+        uebernommen; Funkverkehr ("@gateway") und unser TX-Konto ("@tx") haben
+        keinen, dort entscheiden Sendefenster bzw. Stimmerkennung."""
+        # Sender-Typ aus frn_stream (09.10.): "@gateway" = Funkverkehr, kann nie
+        # Roberts eigene Sendung sein; "@tx" = unser TX-Konto (Robert oder Web).
+        quelle = callsign if callsign.startswith("@") else ""
+        if quelle:
+            callsign = ""
+        if not callsign and quelle != "@gateway":
             dur = self._wav_duration_s(wav_path) if wav_path else 0.0
             # Mit Audio: strenge Fensterpruefung (siehe _bot_own_recording).
             # Ohne Audio: wie bisher ueber Zeitfenster/Textaehnlichkeit.

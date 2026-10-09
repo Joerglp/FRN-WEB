@@ -273,15 +273,12 @@ class FRNClient:
                         # client_idx ist die Position des Senders in der Client-Liste,
                         # gezaehlt AB 1 (verifiziert 09.10. mit Repeater und einem
                         # zweiten, direkt sendenden FRN-Client: 23 von 23 Durchgaengen).
-                        # Funkverkehr kommt hier immer ueber das Gateway, der Name
-                        # sagt also nicht, wer spricht -- deshalb wird er (noch)
-                        # nicht gespeichert; der Sprecher kommt aus der Stimmerkennung.
-                        resolved = ""
-                        if 1 <= client_idx <= len(self.clients):
-                            resolved = self.clients[client_idx - 1].get("ON", "")
+                        sender = (self.clients[client_idx - 1]
+                                  if 1 <= client_idx <= len(self.clients) else {})
+                        resolved = sender.get("ON", "")
                         if debug:
                             log.debug("SOUND idx=%d resolved=%s (nicht gespeichert)", client_idx, resolved)
-                        callsign = ""
+                        callsign = self._sender_kennung(sender)
                         # Decode each of the 5 WAV49 pairs individually
                         for i in range(WAV49_BLOCKS_PER_PACKET):
                             pair = gsm_data[i * WAV49_BLOCK_SIZE :
@@ -415,6 +412,23 @@ class FRNClient:
                 if not data:
                     return None
                 self.inbuffer += data
+
+    @staticmethod
+    def _sender_kennung(sender: dict) -> str:
+        """Was ueber den Sender in die .meta kommt:
+        "@gateway" = Funkgeraet-Gateway (wer spricht, sagt die Stimmerkennung),
+        "@tx" = unser TX-Konto (Robert oder Web-Sender),
+        sonst der Name eines direkt sendenden FRN-Clients ("RUF, Name" -> "Name")."""
+        name = (sender.get("ON") or "").strip()
+        if not name:
+            return ""
+        if sender.get("CL") == "1":
+            return "@gateway"
+        if name.lower().startswith(("tx-", "web-")):
+            return "@tx"
+        if name.lower().startswith("stream-"):
+            return ""
+        return name.split(",", 1)[1].strip() if "," in name else name
 
     def _parse_client_list(self):
         if self._has_bytes(2):

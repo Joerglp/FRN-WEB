@@ -1077,6 +1077,9 @@ class TranscriptionPipeline:
                 callsign = await rc(room, callsign, ts, text, wav_path) or callsign
             except Exception as e:
                 log.debug("resolve_callsign-Hook: %s", e)
+        # Sender-Markierungen aus frn_stream ("@gateway", "@tx") sind kein Name
+        if callsign.startswith("@"):
+            callsign = ""
 
         self._log(ts, room, callsign, text)
 
