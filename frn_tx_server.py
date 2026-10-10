@@ -2217,7 +2217,7 @@ class TXServer:
     # ein Gruss direkt davor steht ("Hallo Robert") oder danach noch was kommt
     # ("Robert, bist du da"). Kurzrufe ("Robert?", "Moin Robert") hoechstens
     # einmal je voice.bot.kurzruf_sperre_s (Standard 10 min) und Raum.
-    _GRUSS_VOR_NAME = re.compile(r"\b(hallo|moin|morgen|tag|abend|servus|hey|hi|na|hei)\W*$")
+    _GRUSS_VOR_NAME = re.compile(r"\b(hallo|moin|morgen|tag|abend|servus|hey|hi|na|hei|qrz|cq)\W*$")
 
     # Erzaehlung UEBER einen (anderen) Robert statt Ansprache (02.10.: "Und da
     # war erst Robert, der sagt, ich uebernehme das Haus" loeste 13 Minuten
@@ -2225,7 +2225,8 @@ class TXServer:
     _ERWAEHNT_VOR = re.compile(
         r"\b(der|den|dem|des|vom|von|mit|beim|bei|zum|f[uü]r|fuer|[uü]ber|ueber|ohne|"
         r"unser\w*|mein\w*|dein\w*|sein\w*|ihr\w*|ein|einen|einem|kein\w*|namens)\W*$")
-    _ERWAEHNT_NACH = re.compile(r"^\W*(der|wo|welcher|den|dem)\s+\w+")
+    # "den/dem" raus (10.10.): "Robert, den Zuhälter" ist ein Spitzname, kein Relativsatz
+    _ERWAEHNT_NACH = re.compile(r"^\W*(der|wo|welcher)\s+\w+")
     _DU_RE = re.compile(r"\b(du|dir|dich|dein\w*)\b")
 
     def _nur_erwaehnt(self, low: str, m) -> bool:
