@@ -15,6 +15,7 @@ Usage:
 import argparse
 import asyncio
 import collections
+import contextvars
 import ctypes
 import ctypes.util
 import base64
@@ -40,6 +41,11 @@ import aiohttp
 import numpy as np
 from aiohttp import web
 from scipy.signal import resample as sp_resample
+
+# Welcher KI-Funker gerade handelt (12.10., zweite Funkerin "Susi"): "" = der
+# Haupt-Bot aus voice.bot (Robert), sonst die id aus voice.bots_weitere.
+# asyncio-Tasks erben den Wert beim Anlegen, _bot_cfg() liest ihn.
+_BOT_KONTEXT: contextvars.ContextVar[str] = contextvars.ContextVar("frn_bot", default="")
 
 try:
     from frn_transcription import TranscriptionPipeline, transcribe_wav
@@ -773,10 +779,12 @@ class TXServer:
         self._ws_users: dict[int, str] = {}
         # KI-Funker: Transkript-Verlauf, Echo-Schutz und Belegt-Flag pro Raum
         self._room_hist: dict[str, list] = {}       # Raum → [(ts, wer, text), …]
-        self._bot_last_reply: dict[str, float] = {} # Raum → Zeit letzter Bot-Sendung
-        self._bot_own_tx: dict[str, list] = {}      # Raum → [(t0, t1, text), …]
-        self._anschluss_folge: dict[str, int] = {}    # Raum → Anschluss-Antworten seit letztem Namensruf
-        self._kurzruf_zuletzt: dict[str, float] = {}  # Raum → Zeit des letzten beantworteten Kurzrufs
+        # Je Bot (_BOT_KONTEXT): last_reply (Raum → Zeit letzter Sendung),
+        # anschluss (Raum → Anschluss-Antworten seit letztem Namensruf),
+        # kurzruf (Raum → Zeit des letzten beantworteten Kurzrufs)
+        self._bot_zust: dict[str, dict] = {}
+        self._bot_own_tx: dict[str, list] = {}      # Raum → [(t0, t1, text), …], alle Bots
+        self._bot_tx_wer: dict[float, str] = {}     # t0 einer eigenen Sendung → Bot-Name
         self._bot_protokoll_pfad = Path(__file__).parent / "bot_replies.jsonl"
         self._prompt_anker: dict = {}   # Raumname (sonst id(Verlauf)) -> ts des ersten Spruchs
         # Stiller Mitschreiber (2026-09-24): Vorschlaege, die erst nach
@@ -1727,7 +1735,8 @@ class TXServer:
         if xtts and not force_xtts:
             # Robert ueber XTTS: fester Sprecher. Seine Stimmung (amused,
             # neutral ...) kennt XTTS nicht -- die gehoert zu Piper.
-            speaker = (vcfg.get("xtts_speaker") or "aaron_dreschner").strip()
+            speaker = ((self._bot_cfg().get("xtts_speaker") if _BOT_KONTEXT.get() else "")
+                       or vcfg.get("xtts_speaker") or "aaron_dreschner").strip()
         if xtts and vcfg.get("xtts_stream", True):
             url = (vcfg.get("xtts_url") if force_xtts else vcfg.get("remote_url")) or vcfg.get("xtts_url") or ""
             ergebnis = await self._auto_send_voice_stream(room, text, speaker, url.strip(),
@@ -2125,8 +2134,73 @@ class TXServer:
     # merkenswert ist, sonst wuerde bei jedem Smalltalk etwas gespeichert.
 
     def _bot_cfg(self) -> dict:
-        return {**self._BOT_DEFAULTS,
-                **self.cfg.get("voice", {}).get("bot", {})}
+        basis = {**self._BOT_DEFAULTS,
+                 **self.cfg.get("voice", {}).get("bot", {})}
+        bid = _BOT_KONTEXT.get()
+        if bid:
+            extra = self._bot_weitere_cfg(bid)
+            if extra is not None:
+                return {**basis, **extra}
+        return basis
+
+    # Weitere KI-Funker (12.10., "Susi"): voice.bots_weitere ist eine Liste von
+    # Ueberlagerungen fuer voice.bot -- jeder erbt alles von Robert (Modell,
+    # Websuche, Tagesprogramm, Gedaechtnis, Bremsen) und bringt nur id, name,
+    # trigger, persona, xtts_speaker und enabled selbst mit.
+    def _bot_weitere_cfg(self, bid: str) -> dict | None:
+        for b in self.cfg.get("voice", {}).get("bots_weitere") or []:
+            if isinstance(b, dict) and b.get("id") == bid:
+                return b
+        return None
+
+    def _bot_ids(self) -> list[str]:
+        return [""] + [b["id"] for b in self.cfg.get("voice", {}).get("bots_weitere") or []
+                       if isinstance(b, dict) and b.get("id")]
+
+    def _bot_im(self, bid: str):
+        """Kontext fuer einen Bot setzen: tok = self._bot_im(id) ... _BOT_KONTEXT.reset(tok)"""
+        return _BOT_KONTEXT.set(bid)
+
+    def _bot_feld(self, key: str) -> dict:
+        return self._bot_zust.setdefault(_BOT_KONTEXT.get(), {}).setdefault(key, {})
+
+    @property
+    def _bot_last_reply(self) -> dict:
+        return self._bot_feld("last_reply")
+
+    @property
+    def _anschluss_folge(self) -> dict:
+        return self._bot_feld("anschluss")
+
+    @property
+    def _kurzruf_zuletzt(self) -> dict:
+        return self._bot_feld("kurzruf")
+
+    def _bot_zuletzt_alle(self, room: str) -> float:
+        """Letzte Sendung irgendeines Bots im Raum."""
+        return max((z.get("last_reply", {}).get(room, 0.0) for z in self._bot_zust.values()),
+                   default=0.0)
+
+    def _bot_namen_alle(self) -> list[str]:
+        namen = []
+        for bid in self._bot_ids():
+            tok = self._bot_im(bid)
+            try:
+                namen.append(self._bot_cfg().get("name") or "Robert")
+            finally:
+                _BOT_KONTEXT.reset(tok)
+        return namen
+
+    def _bot_tx_merken(self, room: str, t0: float, t1: float, text: str, name: str) -> None:
+        own = self._bot_own_tx.setdefault(room, [])
+        own.append((t0, t1, text))
+        del own[:-6]
+        self._bot_tx_wer[t0] = name
+        for alt in [k for k in self._bot_tx_wer if k < t0 - 7200]:
+            del self._bot_tx_wer[alt]
+
+    def _bot_sender_name(self, t0: float) -> str:
+        return self._bot_tx_wer.get(t0) or (self.cfg.get("voice", {}).get("bot", {}).get("name") or "Robert")
 
     def _bot_is_own(self, room_name: str, text: str, ts: float) -> bool:
         """Eigene Sendung im Transkript wiedererkennen (Echo-Schutz):
@@ -2284,7 +2358,17 @@ class TXServer:
     def bot_angesprochen(self, text: str, room: str = "") -> bool:
         """Faellt Roberts Name (oder ein Trigger-Wort) im Text? Gleiche Pruefung
         wie name_hit in _bot_observe -- fuer die Transkription, die damit den
-        Kontroll-Lauf spart."""
+        Kontroll-Lauf spart. Mit mehreren Bots: einer reicht."""
+        for bid in self._bot_ids():
+            tok = self._bot_im(bid)
+            try:
+                if self._bot_angesprochen_einer(text, room):
+                    return True
+            finally:
+                _BOT_KONTEXT.reset(tok)
+        return False
+
+    def _bot_angesprochen_einer(self, text: str, room: str = "") -> bool:
         bot = self._bot_cfg()
         if not bot.get("enabled"):
             return False
@@ -2801,9 +2885,15 @@ class TXServer:
             dur = self._wav_duration_s(wav_path) if wav_path else 0.0
             # Mit Audio: strenge Fensterpruefung (siehe _bot_own_recording).
             # Ohne Audio: wie bisher ueber Zeitfenster/Textaehnlichkeit.
-            if (self._bot_own_recording(room, ts, dur) if dur
-                    else self._bot_is_own(room, text, ts)):
-                return self._bot_cfg().get("name") or "Robert"
+            if dur:
+                eigen = self._bot_own_recording(room, ts, dur)
+                if eigen:
+                    return self._bot_sender_name(eigen[0])
+            elif self._bot_is_own(room, text, ts):
+                t0 = next((a for a, b, _x in self._bot_own_tx.get(room, [])
+                           if a - 3.0 <= ts <= b + 3.0), None)
+                return self._bot_sender_name(t0) if t0 is not None else \
+                    (self._bot_cfg().get("name") or "Robert")
         if not callsign and wav_path and self._speaker_id_cfg().get("enabled"):
             _t0 = time.time()
             try:
@@ -2876,13 +2966,19 @@ class TXServer:
     def _bot_set_enabled(self, value: bool):
         """Bot ein-/ausschalten und in config.json persistieren (überlebt
         Neustart)."""
-        self.cfg.setdefault("voice", {}).setdefault("bot", {})["enabled"] = bool(value)
+        bid = _BOT_KONTEXT.get()
+
+        def _ziel(voice: dict) -> dict:
+            if bid:
+                return next((b for b in voice.get("bots_weitere") or []
+                             if isinstance(b, dict) and b.get("id") == bid), {})
+            return voice.setdefault("bot", {})
+        _ziel(self.cfg.setdefault("voice", {}))["enabled"] = bool(value)
         try:
             if self.args.config:
                 p = Path(self.args.config)
                 disk = json.loads(p.read_text(encoding="utf-8"))
-                disk.setdefault("voice", {}).setdefault(
-                    "bot", {})["enabled"] = bool(value)
+                _ziel(disk.setdefault("voice", {}))["enabled"] = bool(value)
                 p.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
                              encoding="utf-8")
         except Exception as e:
@@ -3047,26 +3143,71 @@ class TXServer:
         Aufrufe; die eigentliche Entscheidung trifft das Modell (SKIP-Option).
         """
         bot  = self._bot_cfg()
-        name = bot.get("name") or "Robert"
         own  = self._bot_is_own(room_name, text, ts)
         hist = self._room_hist.setdefault(room_name, [])
         limit = max(4, int(bot.get("history_len", 10))) + 2 * self._PROMPT_BLOCK
-        own_tag = f"{name} (du)"
         # Eigenes Echo nicht erneut eintragen, wenn _bot_reply denselben Satz
         # schon beim Senden eingetragen hat -- sonst stand jede eigene Antwort
         # doppelt (teils vierfach) im Verlauf und verdraengte echte Inhalte.
         doppelt = own and any(
-            w == own_tag and abs(t - ts) < 60
+            w.endswith(" (du)") and abs(t - ts) < 60
             and difflib.SequenceMatcher(None, x.lower(), text.lower(), autojunk=False).ratio() > 0.8
             for t, w, x in hist)
         if not doppelt:
-            self._hist_insert(hist, (ts, own_tag if own else (callsign or "Funker"), text), limit)
+            wer = callsign or "Funker"
+            if own:
+                t0 = next((a for a, b, _x in self._bot_own_tx.get(room_name, [])
+                           if a - 3.0 <= ts <= b + 3.0), None)
+                wer = f"{self._bot_sender_name(t0) if t0 is not None else bot.get('name') or 'Robert'} (du)"
+            self._hist_insert(hist, (ts, wer, text), limit)
             self._bot_state_merken()
         if own:
             return   # eigenes Echo -- keine Spur, das ist kein "gehoerter" Funkspruch
         self._mitschreiber_pruefen(room_name, ts, text, bot)
         self._begruessung_pruefen(room, room_name, ts, bot)
         self._nachrichten_pruefen(room, room_name, callsign, text, ts, bot)
+        # Wer ist gemeint? (12.10.) Ohne weitere Bots immer Robert.
+        bid = self._bot_waehlen(room_name, low) if len(self._bot_ids()) > 1 else ""
+        tok = self._bot_im(bid)
+        try:
+            self._bot_entscheiden(room, room_name, text, ts, low)
+        finally:
+            _BOT_KONTEXT.reset(tok)
+
+    def _bot_waehlen(self, room_name: str, low: str) -> str:
+        """Welcher Bot entscheidet ueber diesen Spruch: wer beim Namen gerufen
+        wird (der zuerst genannte), sonst wessen Name nur erwaehnt/angehaengt
+        ist (damit die Spur den Grund zeigt), sonst wer zuletzt gesendet hat."""
+        rufe = []
+        for bid in self._bot_ids():
+            tok = self._bot_im(bid)
+            try:
+                b = self._bot_cfg()
+                trig = [t.lower() for t in b.get("trigger", []) if t.strip()]
+                trig.append((b.get("name") or "Robert").lower())
+                trig = list(dict.fromkeys(trig))
+                ruf = self._namensruf(low, trig)
+                if ruf:
+                    pos = min(m.start() for t in trig for m in re.finditer(r"\b" + re.escape(t), low))
+                    rufe.append((ruf in ("echt", "kurz"), -pos, bid))
+                zuletzt = self._bot_last_reply.get(room_name, 0.0)
+            finally:
+                _BOT_KONTEXT.reset(tok)
+            rufe.append((None, zuletzt, bid))
+        echte = sorted([r for r in rufe if r[0] is True], reverse=True)
+        if echte:
+            return echte[0][2]
+        sonst = sorted([r for r in rufe if r[0] is False], reverse=True)
+        if sonst:
+            return sonst[0][2]
+        return max((r for r in rufe if r[0] is None), key=lambda r: r[1])[2]
+
+    def _bot_entscheiden(self, room: "FRNTXRoom", room_name: str, text: str,
+                         ts: float, low: str):
+        """Antwort-Entscheidung fuer den Bot im aktuellen _BOT_KONTEXT."""
+        bot  = self._bot_cfg()
+        name = bot.get("name") or "Robert"
+        hist = self._room_hist.setdefault(room_name, [])
         # Sprachsteuerung: greift AUCH bei deaktiviertem Bot (sonst kein Wecken).
         # No-Op (schon im Zielzustand) fällt durch zur normalen Antwort-Logik.
         cmd = self._bot_command(bot, name, low)
@@ -3232,6 +3373,8 @@ class TXServer:
                  "Websuche erkannt" if search_query else
                  "Name/Anruf erkannt" if name_or_call else
                  "Anruf nach langer Funkstille")
+        if len(self._bot_ids()) > 1:
+            reason += f" -- {name}"
         self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok", detail=reason)
         asyncio.create_task(self._bot_reply(room, room_name, bot, search_query, trigger_ts=ts))
 
@@ -3264,7 +3407,14 @@ class TXServer:
             return
         self._vorwaerm_laeuft = True
         self._llm_zuletzt = now     # Drossel greift sofort, nicht erst nach der Anfrage
-        asyncio.create_task(self._bot_vorwaermen(bot, room_name))
+        # Mit Susi: den vorwaermen, der zuletzt gesprochen hat
+        bid = max(self._bot_ids(), key=lambda i: self._bot_zust.get(i, {})
+                  .get("last_reply", {}).get(room_name, 0.0))
+        tok = self._bot_im(bid)
+        try:
+            asyncio.create_task(self._bot_vorwaermen(self._bot_cfg(), room_name))
+        finally:
+            _BOT_KONTEXT.reset(tok)
 
     # ── Statusseite (2026-09-28) ──────────────────────────────────────────
     # Alle Dienste auf einen Blick: Pi (systemd, Docker, HTTP) und GPU-Box
@@ -3663,9 +3813,7 @@ class TXServer:
             self._nachgang_planen(room_name, t0)
             self._bot_protokoll(room_name, t0, t1, answer,
                                 gehoert or (hist[-1][2] if hist else ""), heard_ts)
-            own = self._bot_own_tx.setdefault(room_name, [])
-            own.append((t0, t1, answer))
-            del own[:-6]
+            self._bot_tx_merken(room_name, t0, t1, answer, bot.get('name') or 'Robert')
             name = bot.get("name") or "Robert"
             self._hist_insert(self._room_hist.setdefault(room_name, []),
                               (t1, f"{name} (du)", answer),
@@ -4374,7 +4522,7 @@ class TXServer:
         st["eingang"] = jetzt
         st["n"] += 1
         # Hat Robert in dieser Sitzung schon geantwortet, ist er ja da.
-        if self._bot_last_reply.get(room_name, 0.0) >= st["start"]:
+        if self._bot_zuletzt_alle(room_name) >= st["start"]:
             st["gegruesst"] = True
         if st["gegruesst"] or st["geplant"]:
             return
@@ -4392,7 +4540,7 @@ class TXServer:
             while time.time() < ende:
                 await asyncio.sleep(2)
                 if (st.get("gegruesst")
-                        or self._bot_last_reply.get(room_name, 0.0) >= st["start"]):
+                        or self._bot_zuletzt_alle(room_name) >= st["start"]):
                     st["gegruesst"] = True
                     return                      # inzwischen normal geantwortet
                 if (time.time() - st.get("eingang", 0) >= self._BEGRUESSUNG_PAUSE_S
@@ -4442,9 +4590,7 @@ class TXServer:
             # Wiederhol-Bremse, Echo-Schutz und Analyse-Seite kennen sie so.
             self._bot_last_reply[room_name] = t1
             self._bot_protokoll(room_name, t0, t1, text, "(Begrüßung)", t0)
-            own = self._bot_own_tx.setdefault(room_name, [])
-            own.append((t0, t1, text))
-            del own[:-6]
+            self._bot_tx_merken(room_name, t0, t1, text, bot.get('name') or 'Robert')
             name = bot.get("name") or "Robert"
             self._hist_insert(self._room_hist.setdefault(room_name, []),
                               (t1, f"{name} (du)", text),
@@ -5018,9 +5164,7 @@ class TXServer:
             self._bot_last_reply[room_name] = t1
             self._nachgang_planen(room_name, t0)
             self._bot_protokoll(room_name, t0, t1, text, art, t0)
-            own = self._bot_own_tx.setdefault(room_name, [])
-            own.append((t0, t1, text))
-            del own[:-6]
+            self._bot_tx_merken(room_name, t0, t1, text, bot.get('name') or 'Robert')
             self._hist_insert(self._room_hist.setdefault(room_name, []),
                               (t1, f"{bot.get('name') or 'Robert'} (du)", text),
                               max(4, int(bot.get("history_len", 10))) + 2 * self._PROMPT_BLOCK)
@@ -5086,6 +5230,7 @@ class TXServer:
                     break
                 await asyncio.sleep(warte)
             st = self._nachgang.pop(room_name)
+            _BOT_KONTEXT.set("")      # gilt nur fuer diesen Task
             await self._nachgang_auswerten(room_name, st["start"])
         except Exception as e:
             self._nachgang.pop(room_name, None)
@@ -5104,11 +5249,23 @@ class TXServer:
         if len(zeilen) < 2:
             return {}
         ausschnitt = "\n".join(f"{w}: {x}" for _t, w, x in zeilen)[-6000:]
-        name_low = (bot.get("name") or "Robert").lower()
+        bot_namen = self._bot_namen_alle()
         # Auftraege gelten nur, wenn die Bitte an Robert geht: sein Name steht in
-        # der Zeile, oder sie folgt direkt auf eine Sendung von ihm.
-        an_robert = [x for i, (_t, w, x) in enumerate(zeilen) if not w.endswith("(du)")
-                     and (name_low in x.lower() or (i > 0 and zeilen[i - 1][1].endswith("(du)")))]
+        # der Zeile, oder sie folgt direkt auf eine Sendung von ihm. (Mit Susi:
+        # an einen der beiden; wer gemeint war, stellt spaeter auch zu.)
+        an_robert, an_bot = [], {}
+        for i, (_t, w, x) in enumerate(zeilen):
+            if w.endswith("(du)"):
+                continue
+            genannt = [n for n in bot_namen if n.lower() in x.lower()]
+            if not genannt and i > 0 and zeilen[i - 1][1].endswith("(du)"):
+                genannt = [zeilen[i - 1][1][:-5]]
+            if genannt:
+                an_robert.append(x)
+                if self._NG_NACHRICHT_RE.search(x):
+                    an_bot[genannt[0]] = True
+        zusteller = self._bot_ids()[bot_namen.index(next(iter(an_bot)))] \
+            if len(an_bot) == 1 and next(iter(an_bot)) in bot_namen else ""
         will_nachricht = bot.get("nachrichten_enabled", True) and any(
             self._NG_NACHRICHT_RE.search(x) for x in an_robert)
         will_notiz = bot.get("notebook_enabled") and any(self._NG_NOTIZ_RE.search(x) for x in an_robert)
@@ -5131,10 +5288,17 @@ class TXServer:
             log.info("[%s] Nachgang: kein Auftrag an Robert (%d Zeilen)", room_name, len(zeilen))
             return {}
         namen = ", ".join(self._bekannte_namen(bot)) or "-"
+        system = self._NACHGANG_SYSTEM
+        if len(bot_namen) > 1:
+            alle = " oder ".join(bot_namen)
+            system = system.replace("der KI-Funker Robert", f"die KI-Funker {alle}").replace(
+                "'Robert (du)' ist Robert selbst", "Namen mit '(du)' sind die KI-Funker selbst")
         roh = await self._ollama_text(
-            bot, self._NACHGANG_SYSTEM,
+            bot, system,
             f"Gespräch:\n{ausschnitt}\n\nNamen, die auf dem Kanal vorkommen: {namen}\n\n"
-            + self._NACHGANG_AUFGABE, num_predict=500, als_json=True)
+            + (self._NACHGANG_AUFGABE if len(bot_namen) < 2 else
+               self._NACHGANG_AUFGABE.replace("bittet Robert", f"bittet {' oder '.join(bot_namen)}")),
+            num_predict=500, als_json=True)
         d = json.loads(roh or "{}")
         auftraege = [x for x in (d.get("auftraege") or []) if isinstance(x, dict)]
         nachr = [dict(x, satz=x.get("text")) for x in auftraege
@@ -5165,7 +5329,7 @@ class TXServer:
                         or an.lower() in ("funker", "jemand", "alle", "runde"):
                     continue
                 an = an[:1].upper() + an[1:]
-                if an.lower() == (bot.get("name") or "robert").lower():
+                if an.lower() in [n.lower() for n in bot_namen]:
                     continue
                 doppelt = any(
                     self._namen_norm(a.get("an", "")) == self._namen_norm(an)
@@ -5177,7 +5341,8 @@ class TXServer:
                     continue
                 eintrag = {"id": f"{int(jetzt * 1000):x}{len(erg['nachrichten'])}", "ts": jetzt,
                            "raum": room_name, "an": an, "von": von, "satz": satz[:300],
-                           "original": ausschnitt[-1500:], "zugestellt": None, "versuche": 0}
+                           "original": ausschnitt[-1500:], "zugestellt": None, "versuche": 0,
+                           "bot": zusteller}
                 erg["nachrichten"].append(eintrag)
                 if speichern:
                     self._nachrichten.append(eintrag)
@@ -5253,7 +5418,12 @@ class TXServer:
             return
         saetze = " Und: ".join(n["satz"].rstrip(".!") + "." for n in offen)
         text = f"{an}, ich soll dir was ausrichten: {saetze}"
-        ok = await self._spontan_senden(room, room_name, text, "(Nachricht zugestellt)", 300)
+        bid = offen[0].get("bot") or ""
+        tok = self._bot_im(bid if bid in self._bot_ids() else "")
+        try:
+            ok = await self._spontan_senden(room, room_name, text, "(Nachricht zugestellt)", 300)
+        finally:
+            _BOT_KONTEXT.reset(tok)
         for n in offen:
             n.pop("plan", None)
             n.pop("gegruesst", None)
@@ -5509,6 +5679,8 @@ class TXServer:
             if who == own_tag:
                 messages.append({"role": "assistant", "content": txt})
             else:
+                if who.endswith(" (du)"):
+                    who = who[:-5]      # der andere KI-Funker
                 k = konf.get(round(ts, 3))
                 # Uhrzeit je Spruch (2026-09-28, User-Idee): FESTE Uhrzeit statt
                 # "vor x Minuten", damit der Verlauf fuer den Prompt-Cache
@@ -6629,6 +6801,47 @@ class TXServer:
         return web.json_response({"nachrichten": sorted(
             self._nachrichten, key=lambda n: n.get("ts", 0), reverse=True)})
 
+    async def handle_admin_bots_weitere(self, request):
+        """GET: weitere KI-Funker (voice.bots_weitere); POST {id, enabled, name,
+        trigger, xtts_speaker, persona}: einen davon aendern."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        liste = self.cfg.setdefault("voice", {}).setdefault("bots_weitere", [])
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            bid = str(body.get("id") or "")
+            b = next((x for x in liste if isinstance(x, dict) and x.get("id") == bid), None)
+            if b is None:
+                return web.json_response({"error": "unbekannter Funker"}, status=404)
+            name = str(body.get("name") or "").strip()
+            if not re.fullmatch(r"[A-Za-zÄÖÜäöüß\- ]{2,30}", name):
+                return web.json_response({"error": "Name: 2–30 Buchstaben"}, status=400)
+            if name.lower() in [n.lower() for n in self._bot_namen_alle()] and name != b.get("name"):
+                return web.json_response({"error": "Den Namen hat schon ein anderer KI-Funker"}, status=400)
+            trigger = [t.strip().lower() for t in str(body.get("trigger") or "").split(",")
+                       if re.fullmatch(r"[\wäöüß\- ]{2,30}", t.strip())][:10]
+            sprecher = str(body.get("xtts_speaker") or "").strip()
+            if sprecher and not re.fullmatch(r"[\wäöüßñçı\-]{2,60}", sprecher):
+                return web.json_response({"error": "Stimme: ungültiger Name"}, status=400)
+            b.update({"enabled": bool(body.get("enabled")), "name": name, "trigger": trigger,
+                      "xtts_speaker": sprecher,
+                      "persona": str(body.get("persona") or "").strip()[:2000]})
+            try:
+                cfg_path = Path(self.args.config)
+                disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+                disk.setdefault("voice", {})["bots_weitere"] = liste
+                cfg_path.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                                    encoding="utf-8")
+            except Exception as e:
+                log.warning("Weitere KI-Funker nicht gespeichert: %s", e)
+                return web.json_response({"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
+            log.info("KI-Funker %s gespeichert: enabled=%s stimme=%s", name, b["enabled"], sprecher)
+        return web.json_response({"bots": liste})
+
     async def handle_admin_rueckblick(self, request):
         """GET: gespeicherte Tagesrueckblicke; POST {datum}: diesen Tag (Standard
         gestern) jetzt neu bauen."""
@@ -6654,6 +6867,20 @@ class TXServer:
             "fehler": fehler})
 
     async def handle_admin_bot_probe(self, request):
+        """Mit mehreren KI-Funkern: der per Namen gemeinte bearbeitet den Satz."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        text = str(body.get("text") or "").lower() if isinstance(body, dict) else ""
+        room = str(body.get("room") or "") if isinstance(body, dict) else ""
+        tok = self._bot_im(self._bot_waehlen(room, text) if len(self._bot_ids()) > 1 else "")
+        try:
+            return await self._admin_bot_probe_einer(request)
+        finally:
+            _BOT_KONTEXT.reset(tok)
+
+    async def _admin_bot_probe_einer(self, request):
         """POST /api/admin/bot/probe {room, text, wer?} -- tut so, als haette
         jemand im Raum "text" gefunkt, und laesst Robert GANZ NORMAL antworten
         und SENDEN (anders als /bot/test). Fuer Live-Tests auf dem Kanal
@@ -6689,6 +6916,20 @@ class TXServer:
                                   "letzte_antwort": (self._bot_own_tx.get(room_name) or [(0, 0, "")])[-1][2]})
 
     async def handle_admin_bot_test(self, request):
+        """Mit mehreren KI-Funkern: der per Namen gemeinte bearbeitet den Satz."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        text = str(body.get("text") or "").lower() if isinstance(body, dict) else ""
+        room = str(body.get("room") or "") if isinstance(body, dict) else ""
+        tok = self._bot_im(self._bot_waehlen(room, text) if len(self._bot_ids()) > 1 else "")
+        try:
+            return await self._admin_bot_test_einer(request)
+        finally:
+            _BOT_KONTEXT.reset(tok)
+
+    async def _admin_bot_test_einer(self, request):
         """Trockenlauf: Satz einwerfen → Entscheidung + Antwort (sendet NICHT).
 
         Optional body.room = echten Raumverlauf als Kontext nutzen."""
@@ -7311,7 +7552,7 @@ class TXServer:
             call = new["callsign"].strip()
             if (prev["callsign"] or "").strip() != call:
                 return
-            if call.lower() == (self._bot_cfg().get("name") or "Robert").lower():
+            if call.lower() in [n.lower() for n in self._bot_namen_alle()]:
                 return
             gap = new["timestamp"] - (prev["timestamp"] + (prev["duration_s"] or 0.0))
             if gap > max_gap:
@@ -10029,6 +10270,8 @@ class TXServer:
         app.router.add_post("/api/admin/settings",  self.handle_admin_settings)
         app.router.add_get ("/api/admin/nachrichten", self.handle_admin_nachrichten)
         app.router.add_post("/api/admin/nachrichten", self.handle_admin_nachrichten)
+        app.router.add_get ("/api/admin/bots_weitere", self.handle_admin_bots_weitere)
+        app.router.add_post("/api/admin/bots_weitere", self.handle_admin_bots_weitere)
         app.router.add_get ("/api/admin/rueckblick", self.handle_admin_rueckblick)
         app.router.add_post("/api/admin/rueckblick", self.handle_admin_rueckblick)
         app.router.add_get ("/api/admin/tagesprogramm", self.handle_admin_tagesprogramm)

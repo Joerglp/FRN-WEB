@@ -1851,6 +1851,7 @@ audio {
       </div>
 
       <div id="bot-sub-sprache" class="bot-subtab-content">
+      <div id="bw-liste"></div>
       <div class="form-field" style="margin-top:8px">
         <label>Persona (wer ist der Bot?)</label>
         <textarea id="bot-persona" rows="3" style="width:100%;resize:vertical;
@@ -4771,6 +4772,7 @@ async function loadBotAdmin() {
     document.getElementById("na-enabled").checked = d.nachrichten_enabled !== false;
     document.getElementById("na-tage").value      = d.nachrichten_tage ?? 7;
     loadNachrichten();
+    loadBotsWeitere();
     document.getElementById("bot-gemini-model").value = d.gemini_model || "";
     document.getElementById("bot-gemini-key").value   = d.gemini_api_key || "";
     loadGeminiModels();   // Datalist mit echten Modell-IDs füllen
@@ -5231,6 +5233,65 @@ function nachrichtenZeigen(liste) {
                `<div style="color:var(--muted);font-size:.74rem">gehört: „${esc(n.original)}"</div></div>`;
       }).join("")
     : '<span style="color:var(--muted)">Keine Nachrichten hinterlegt.</span>';
+}
+
+// Weitere KI-Funker (12.10., "Susi"): erben alles von Robert, eigene Persona/Stimme
+function botsWeitereZeigen(bots) {
+  document.getElementById("bw-liste").innerHTML = (bots || []).map(b => `
+    <div class="adm-card" data-bw="${esc(b.id)}" style="margin-bottom:14px">
+      <div class="adm-card-title">👩 Zweite Stimme: ${esc(b.name)}</div>
+      <div class="adm-card-sub">Läuft parallel zu Robert und erbt alle seine Einstellungen (Modell, Bremsen,
+        Quellen, Gedächtnis). Wer beim Namen gerufen wird, antwortet; ohne Namen der, der zuletzt gesprochen hat.
+        Die beiden hören sich gegenseitig, antworten aber nicht aufeinander.</div>
+      <label class="adm-sw">
+        <input type="checkbox" class="bw-enabled" ${b.enabled ? "checked" : ""} autocomplete="off">
+        <span class="adm-sw-text">${esc(b.name)} aktiv</span>
+      </label>
+      <div class="adm-fields">
+        <div class="form-field"><label>Name</label>
+          <input type="text" class="bw-name" maxlength="30" value="${esc(b.name)}" autocomplete="off"></div>
+        <div class="form-field"><label>Stimme <small>XTTS-Sprecher</small></label>
+          <input type="text" class="bw-speaker" list="bot-speaker-list" value="${esc(b.xtts_speaker || "")}" autocomplete="off"></div>
+      </div>
+      <div class="form-field"><label>Hört auch auf <small>Komma-getrennt, z.B. Whisper-Schreibweisen</small></label>
+        <input type="text" class="bw-trigger" value="${esc((b.trigger || []).join(", "))}" autocomplete="off"></div>
+      <div class="form-field"><label>Persona</label>
+        <textarea class="bw-persona" rows="3" style="width:100%;resize:vertical;background:var(--panel);color:var(--text);
+          border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:inherit;font-size:.85em"
+          autocomplete="off">${esc(b.persona || "")}</textarea></div>
+      <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button type="button" class="btn-save" style="padding:6px 14px" onclick="botWeitereSpeichern(this)">Speichern</button>
+        <span class="adm-hint bw-stand" style="margin:0"></span>
+      </div>
+    </div>`).join("");
+}
+
+async function loadBotsWeitere() {
+  try {
+    const r = await adminFetch("/api/admin/bots_weitere");
+    const d = await r.json();
+    if (r.ok && !d.error) botsWeitereZeigen(d.bots);
+  } catch(e) { /* Karte bleibt leer */ }
+}
+
+async function botWeitereSpeichern(btn) {
+  const k = btn.closest("[data-bw]"), st = k.querySelector(".bw-stand");
+  const body = {
+    id: k.dataset.bw,
+    enabled: k.querySelector(".bw-enabled").checked,
+    name: k.querySelector(".bw-name").value.trim(),
+    xtts_speaker: k.querySelector(".bw-speaker").value.trim(),
+    trigger: k.querySelector(".bw-trigger").value,
+    persona: k.querySelector(".bw-persona").value.trim(),
+  };
+  try {
+    const r = await adminFetch("/api/admin/bots_weitere", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if (!r.ok || d.error) { st.textContent = "Fehler: " + (d.error || r.status); return; }
+    botsWeitereZeigen(d.bots);
+    document.querySelector(`[data-bw="${CSS.escape(body.id)}"] .bw-stand`).textContent = "Gespeichert.";
+  } catch(e) { st.textContent = "Fehler: " + e; }
 }
 
 async function loadNachrichten() {
