@@ -6,6 +6,7 @@ Stellt JSON-API und Audio-Serving bereit.
 """
 
 import asyncio
+import json
 import logging
 import os
 import shlex
@@ -82,6 +83,11 @@ def init_db():
         spalten = {r[1] for r in conn.execute("PRAGMA table_info(transmissions)")}
         if "sprecher" not in spalten:
             conn.execute("ALTER TABLE transmissions ADD COLUMN sprecher TEXT NOT NULL DEFAULT ''")
+        # Kontroll-Lauf je Eintrag (2026-10-13): JSON mit dem abweichenden
+        # zweiten Whisper-Text und beiden avg_logprob ("lp" = Haupttext,
+        # "lp_k" = Alternative); leer = kein Kontroll-Lauf oder gleicher Text.
+        if "kontrolle" not in spalten:
+            conn.execute("ALTER TABLE transmissions ADD COLUMN kontrolle TEXT NOT NULL DEFAULT ''")
     log.info("FRN Archive DB bereit: %s", DB_PATH)
 
 
@@ -172,10 +178,12 @@ async def add_entry(
     text: str,
     confidence: float | None = None,
     sprecher: str = "",
+    kontrolle: str = "",
 ) -> int | None:
     """
     Konvertiert WAV → Opus und speichert Eintrag in DB.
     sprecher: JSON der Sprecher-Erkennung (siehe init_db), leer = nicht gelaufen.
+    kontrolle: JSON des abweichenden Kontroll-Laufs (siehe init_db).
     Gibt die neue ID zurück, oder None bei Fehler.
     """
     dt        = datetime.fromtimestamp(timestamp)
@@ -211,10 +219,10 @@ async def add_entry(
             cur = conn.execute(
                 """INSERT INTO transmissions
                    (timestamp, room, callsign, text, audio_file, duration_s, wav_source,
-                    confidence, sprecher)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    confidence, sprecher, kontrolle)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (timestamp, room, callsign, text, filename, duration, wav_path, confidence,
-                 sprecher or "")
+                 sprecher or "", kontrolle or "")
             )
             entry_id = cur.lastrowid
         log.debug("Archiv-Eintrag #%d: [%s] %s → %s", entry_id, room, callsign, filename)
@@ -315,7 +323,7 @@ def query_entries(
     with _get_conn() as conn:
         rows = conn.execute(
             f"""SELECT id, timestamp, room, callsign, text, audio_file,
-                       duration_s, confidence, sprecher
+                       duration_s, confidence, sprecher, kontrolle
                 FROM transmissions
                 {where}
                 ORDER BY timestamp DESC
@@ -345,6 +353,7 @@ def query_entries(
             # markiert solche Eintraege, statt sie zu verschweigen.
             "confidence": r["confidence"],
             "sprecher":   r["sprecher"] or "",   # JSON, nur fuer Admins ausgeliefert
+            "kontrolle":  r["kontrolle"] or "",  # JSON, abweichender Kontroll-Lauf
         })
     return result, total
 
@@ -547,6 +556,31 @@ def update_callsign(entry_id: int, callsign: str) -> bool:
             (callsign.strip(), entry_id)
         )
         return cur.rowcount > 0
+
+
+def swap_kontrolle(entry_id: int) -> str | None:
+    """Tauscht Haupttext und Kontroll-Text eines Eintrags (beide logprobs
+    wandern mit), so dass ein zweiter Tausch alles wiederherstellt. Gibt den
+    neuen Haupttext zurueck, None wenn Eintrag oder Kontroll-Text fehlt."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT text, kontrolle FROM transmissions WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if not row or not row["kontrolle"]:
+            return None
+        try:
+            k = json.loads(row["kontrolle"])
+        except ValueError:
+            return None
+        if not isinstance(k, dict) or not k.get("text"):
+            return None
+        neu = {"text": row["text"], "lp": k.get("lp_k"), "lp_k": k.get("lp"),
+               "getauscht": not k.get("getauscht", False)}
+        conn.execute(
+            "UPDATE transmissions SET text = ?, kontrolle = ? WHERE id = ?",
+            (k["text"], json.dumps(neu, ensure_ascii=False), entry_id)
+        )
+        return k["text"]
 
 
 def delete_entry(entry_id: int) -> bool:

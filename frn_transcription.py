@@ -852,6 +852,7 @@ class TranscriptionPipeline:
         text = (rkt(room, ts, dur_s) if rkt else None) or ""
         confidence = None      # Verlaesslichkeit des Transkripts (0..1)
         messwerte = {}         # avg_logprob/Verworfenes vom Whisper-Dienst
+        kontroll_info = ""     # JSON: abweichender Kontroll-Text + beide logprobs
         if text:
             log.info("[%s] Bekannter Bot-Text übernommen (kein Whisper nötig)", room)
             if dbg:
@@ -960,8 +961,9 @@ class TranscriptionPipeline:
                             _var = await _tempo_variante(wav_path)
                             if _var is None:
                                 raise RuntimeError("keine Kontroll-Variante")
+                            mw_k = {}
                             kontrolle = await asyncio.wait_for(
-                                transcribe_wav(_var, model_size, language), timeout=120.0)
+                                transcribe_wav(_var, model_size, language, mw_k), timeout=120.0)
                             if not kontrolle.strip():
                                 # Kontroll-Lauf vom Halluzinationsfilter geleert
                                 # (2026-09-25): bisher ergab das 0 % und warf den
@@ -974,8 +976,9 @@ class TranscriptionPipeline:
                                 _unlink(_var)
                                 _var = await _tempo_variante(wav_path, tempo=0.97)
                                 if _var is not None:
+                                    mw_k = {}
                                     kontrolle = await asyncio.wait_for(
-                                        transcribe_wav(_var, model_size, language), timeout=120.0)
+                                        transcribe_wav(_var, model_size, language, mw_k), timeout=120.0)
                                     log.info("[%s] Kontroll-Lauf leer -- zweiter Versuch (langsamer): %s",
                                              room, "auch leer" if not kontrolle.strip() else "Text erkannt")
                             confidence = difflib.SequenceMatcher(
@@ -987,6 +990,18 @@ class TranscriptionPipeline:
                                 dbg(room, ts, "Kontrolle",
                                     "ok" if confidence >= 0.8 else "warn", time.time() - _t1,
                                     f"Übereinstimmung {100 * confidence:.0f}%: {kontrolle[:150]}")
+                            # Abweichenden Kontroll-Text mit ins Archiv
+                            # (2026-10-13): er ist nicht selten der richtige
+                            # ("Pferden" statt "Fernen"). Beide logprobs dazu,
+                            # um spaeter eine Auswahlregel daraus abzuleiten --
+                            # der hoehere Wert allein taugt nicht, der
+                            # Kontroll-Lauf erfindet auch Hotword-Ketten.
+                            if (kontrolle.strip()
+                                    and kontrolle.strip().lower() != text.strip().lower()):
+                                kontroll_info = json.dumps({
+                                    "text": kontrolle.strip(),
+                                    "lp": logprob, "lp_k": mw_k.get("avg_logprob"),
+                                }, ensure_ascii=False)
                         except Exception as e:
                             log.debug("[%s] Kontroll-Lauf fehlgeschlagen: %s", room, e)
                         finally:
@@ -1103,7 +1118,8 @@ class TranscriptionPipeline:
 
         try:
             from frn_archive import add_entry
-            new_id = await add_entry(wav_path, room, callsign, ts, text, confidence, sprecher=sprecher)
+            new_id = await add_entry(wav_path, room, callsign, ts, text, confidence, sprecher=sprecher,
+                                   kontrolle=kontroll_info)
             if new_id:
                 _mark_archived(wav_path)
                 oa = getattr(self, "on_archived", None)

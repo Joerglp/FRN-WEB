@@ -811,6 +811,7 @@ function renderMsg(e, mergeWithId) {
              title="Whisper konnte das nicht verstehen -- Text unbrauchbar, Robert antwortet darauf nicht">unverständlich</span>`
     : "";
   const sprecher = sprecherChip(e);
+  const kontrolle = kontrollZeile(e);
   html += `
   <div class="msg">
     <div class="msg-header">
@@ -820,8 +821,9 @@ function renderMsg(e, mergeWithId) {
       ${unbrauchbar}
       ${sprecher}
     </div>
-    <div class="msg-text"${unbrauchbar ? ' style="opacity:.55;font-style:italic"' : ''}>${
+    <div class="msg-text" data-entry="${e.id}"${unbrauchbar ? ' style="opacity:.55;font-style:italic"' : ''}>${
       esc(e.text) || (unbrauchbar ? "— nicht verstanden, nur Aufnahme —" : "")}</div>
+    ${kontrolle}
     ${(audioTag || dur) ? `<div class="msg-footer">${audioTag}${dur}</div>` : ''}
     <div style="margin-top:6px">
       <button onclick="toggleComments(${e.id})" style="
@@ -868,6 +870,47 @@ function combineDateTime(dateId, timeId) {
   const t = document.getElementById(timeId).value;
   if (!d) return '';
   return t ? `${d}T${t}` : d;
+}
+
+// Kontroll-Lauf je Eintrag (2026-10-13): Whispers zweiter Durchgang mit
+// leicht schnellerem Audio, nur wenn er anders lautete. Ist oft der richtige;
+// Admins koennen ihn per Klick zum Haupttext machen (und zurueck).
+function kontrollZeile(e) {
+  if (!e.kontrolle) return '';
+  let k; try { k = JSON.parse(e.kontrolle); } catch (_) { return ''; }
+  if (!k || !k.text) return '';
+  const f = x => (x == null ? '?' : x.toFixed(2));
+  const tip = `Whisper-Sicherheit (avg_logprob, näher an 0 = sicherer): `
+            + `Haupttext ${f(k.lp)}, ${k.getauscht ? 'ursprünglicher 1. Lauf' : 'Kontroll-Lauf'} ${f(k.lp_k)}`;
+  const knopf = isAdmin ? ` <button onclick="kontrolleTauschen(${e.id}, this)" style="
+      background:transparent;border:1px solid var(--border);color:var(--text-dim);
+      font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:.06em;
+      padding:1px 7px;cursor:pointer;border-radius:2px;text-transform:uppercase;margin-left:4px"
+      title="Diesen Text zum Haupttext machen (nochmal klicken tauscht zurück)">&#8644; übernehmen</button>` : '';
+  return `<div class="msg-kontrolle" data-entry="${e.id}" style="font-size:12px;color:var(--text-dim);margin-top:3px"
+       title="${esc(tip)}">${k.getauscht ? '1. Lauf' : 'Kontrolle'}: <span class="k-text">${esc(k.text)}</span>${knopf}</div>`;
+}
+
+async function kontrolleTauschen(entryId, btn) {
+  btn.disabled = true;
+  try {
+    const r = await adminFetch(`/api/admin/archive/${entryId}/kontrolle`, { method: 'POST' });
+    const d = await r.json();
+    if (d.error) { alert('Fehler: ' + d.error); return; }
+    const haupt = document.querySelector(`.msg-text[data-entry="${entryId}"]`);
+    const zeile = document.querySelector(`.msg-kontrolle[data-entry="${entryId}"]`);
+    if (haupt && zeile) {
+      const alt = haupt.textContent;
+      haupt.textContent = d.text;
+      zeile.querySelector('.k-text').textContent = alt;
+      const lbl = zeile.firstChild;
+      lbl.textContent = lbl.textContent.startsWith('Kontrolle') ? '1. Lauf: ' : 'Kontrolle: ';
+    }
+  } catch (e) {
+    alert('Fehler: ' + e);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // Sprecher-Erkennung je Eintrag (2026-09-29): wie sicher war die Stimme?
