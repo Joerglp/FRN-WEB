@@ -2181,6 +2181,17 @@ class TXServer:
         return max((z.get("last_reply", {}).get(room, 0.0) for z in self._bot_zust.values()),
                    default=0.0)
 
+    def _bot_id_von_name(self, name: str) -> str | None:
+        """Bot-ID zu einem Rufzeichen ("" = Robert), None = kein Bot."""
+        for bid in self._bot_ids():
+            tok = self._bot_im(bid)
+            try:
+                if (self._bot_cfg().get("name") or "Robert") == name:
+                    return bid
+            finally:
+                _BOT_KONTEXT.reset(tok)
+        return None
+
     def _bot_namen_alle(self) -> list[str]:
         namen = []
         for bid in self._bot_ids():
@@ -2229,7 +2240,10 @@ class TXServer:
         """Haengt eine gesendete Antwort an bot_replies.jsonl (eine Zeile je
         Antwort). Fehler hier duerfen den Funkbetrieb nicht stoeren."""
         try:
+            # bot: wer gesendet hat (seit Susi, 2026-10-14) -- aeltere
+            # Zeilen ohne das Feld sind Robert.
             zeile = json.dumps({"ts": round(t0, 3), "ende": round(t1, 3),
+                                "bot": self._bot_cfg().get("name") or "Robert",
                                 "room": room, "text": antwort,
                                 "gehoert": gehoert, "gehoert_ts": round(heard_ts, 3)},
                                ensure_ascii=False)
@@ -7979,21 +7993,24 @@ class TXServer:
         datum = (q.get("date") or "").strip()
         limit = int(self._begrenzt("bot_chats", "limit", q.get("limit", 50) or 50))
         name  = (self._bot_cfg().get("name") or "Robert")
+        # Alle KI-Funker (seit 2026-10-14 auch Susi), nicht nur Robert
+        namen = self._bot_namen_alle()
         loop  = asyncio.get_running_loop()
 
         def _laden():
             import sqlite3
             conn = sqlite3.connect(str(_archive.DB_PATH))
             conn.row_factory = sqlite3.Row
+            platz = ",".join("?" * len(namen))
             if datum:
                 rows = conn.execute(
-                    "SELECT * FROM transmissions WHERE callsign=? "
+                    f"SELECT * FROM transmissions WHERE callsign IN ({platz}) "
                     "AND date(timestamp,'unixepoch','localtime')=? "
-                    "ORDER BY timestamp DESC LIMIT ?", (name, datum, limit)).fetchall()
+                    "ORDER BY timestamp DESC LIMIT ?", (*namen, datum, limit)).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM transmissions WHERE callsign=? "
-                    "ORDER BY timestamp DESC LIMIT ?", (name, limit)).fetchall()
+                    f"SELECT * FROM transmissions WHERE callsign IN ({platz}) "
+                    "ORDER BY timestamp DESC LIMIT ?", (*namen, limit)).fetchall()
             eintraege = [dict(r) for r in rows]
             # Antworten aus dem Protokoll ergaenzen: sie fehlen im Archiv immer
             # dann, wenn Roberts Sendung mit der eines anderen in EINEM
@@ -8012,7 +8029,7 @@ class TXServer:
                                                   - max(x["timestamp"], e["ts"])), default=None)
                 eintraege.append({
                     "id": auf["id"] if auf else None,
-                    "timestamp": e["ts"], "room": e["room"], "callsign": name,
+                    "timestamp": e["ts"], "room": e["room"], "callsign": e.get("bot") or name,
                     "text": e["text"], "duration_s": round(e["ende"] - e["ts"], 1),
                     "audio_file": auf["audio_file"] if auf else None,
                     "confidence": None,
@@ -8083,6 +8100,18 @@ class TXServer:
         rows = await loop.run_in_executor(None, _verlauf)
         if not rows:
             return web.json_response({"error": "kein Gesprächskontext im Archiv"}, status=404)
+        # Mit dem Bot nachspielen, der damals gesendet hat (Susi mit ihrer
+        # Persona); fremde Rufzeichen -> Robert.
+        # body.bot kommt von der Analyse-Seite (Protokoll-Eintraege haengen an
+        # gemischten Aufnahmen mit fremdem Rufzeichen).
+        wer = str(body.get("bot") or eintrag.get("callsign") or "")
+        tok = self._bot_im(self._bot_id_von_name(wer) or "")
+        try:
+            return await self._bot_replay_archiv(eintrag, rows, model, provider)
+        finally:
+            _BOT_KONTEXT.reset(tok)
+
+    async def _bot_replay_archiv(self, eintrag, rows, model, provider):
         name = self._bot_cfg().get("name") or "Robert"
         hist = [(r["timestamp"], f"{name} (du)" if r["callsign"] == name else (r["callsign"] or "Funker"),
                  r["text"]) for r in rows]

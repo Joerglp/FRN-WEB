@@ -2095,9 +2095,9 @@ audio {
 
     <!-- ── Robert-Analyse tab ── -->
     <div id="admin-tab-robert" class="admin-tab-content">
-      <div class="admin-section-title">Robert-Gespräche analysieren</div>
+      <div class="admin-section-title">KI-Funker-Gespräche analysieren</div>
       <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:14px;line-height:1.5">
-        Alle Durchsagen von Robert aus dem Archiv, mit dem Gesprächsverlauf davor
+        Alle Durchsagen von Robert und Susi aus dem Archiv, mit dem Gesprächsverlauf davor
         (was ihn ausgelöst hat) und danach (wie die Runde reagiert hat). Zu jedem
         Gespräch kannst du das Sprachmodell den Stand von damals erneut beantworten
         lassen, und jedes Transkript über andere Whisper-Quellen gegenprüfen.
@@ -4096,6 +4096,7 @@ function renderRobertChat(c, name) {
     ${c.id ? `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <select class="rb-model" style="font-size:.7rem"></select>
       <button class="btn-save" style="padding:2px 8px;font-size:.66rem"
+              data-bot="${esc(c.callsign || "")}"
               onclick="replayArchive(${c.id}, this)">MODELL ERNEUT FRAGEN</button>
       <span class="rb-replay" style="font-size:.78rem"></span>
     </div>` : ""}</div>`;
@@ -4109,7 +4110,8 @@ async function replayArchive(id, btn) {
   try {
     const r = await adminFetch("/api/admin/bot-replay-archive", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ entry_id: id, model: wahl.model, provider: wahl.provider }),
+      body: JSON.stringify({ entry_id: id, model: wahl.model, provider: wahl.provider,
+                             bot: btn.dataset.bot || "" }),
     });
     const d = await r.json();
     out.innerHTML = (!r.ok || d.error) ? `<span style="color:var(--red)">${esc(d.error || r.status)}</span>`
