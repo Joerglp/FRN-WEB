@@ -832,6 +832,8 @@ class TXServer:
         self._speaker_enrollments: dict[str, list[list[float]]] = {}
         self._speaker_quellen: dict[str, list[str]] = {}
         self._sprecher_details: dict[str, dict] = {}   # wav_path -> Ergebnis der Erkennung
+        self._rx_zuletzt: dict[str, float] = {}        # Raum -> letztes empfangenes Audiopaket
+        self._nachlegen_zuletzt: dict[str, float] = {} # Raum -> letztes Nachlegen (Robert <-> Susi)
         self._speaker_letzte_pruefung: dict = {}
         self._load_speaker_enrollments()
         self._transcription_cfg: dict = {}   # von main() befuellt (config.ini [transcription])
@@ -3407,6 +3409,7 @@ class TXServer:
     def _bot_vorwaermen_pruefen(self, room_name: str):
         """Je Audiopaket aufgerufen (~alle 40 ms) -- nur billige Pruefungen."""
         now = time.time()
+        self._rx_zuletzt[room_name] = now       # Kanal belegt? (_nachlegen_lauf)
         if now - getattr(self, "_llm_zuletzt", 0.0) < self._VORWAERM_PAUSE_S:
             return
         if getattr(self, "_vorwaerm_laeuft", False):
@@ -3691,8 +3694,71 @@ class TXServer:
         finally:
             self._vorwaerm_laeuft = False
 
+    # Nachlegen (2026-10-14, User-Wunsch): Robert und Susi wohnen zusammen.
+    # Erwaehnt der eine den anderen, geht es im Funkspruch um den anderen oder
+    # waren beide gemeint ("euch"), darf der andere danach EINMAL kurz
+    # nachlegen -- nie als Kette (nachlegen=True loest nichts weiter aus),
+    # hoechstens alle nachlegen_abstand_s je Raum und nur, wenn kein anderer
+    # inzwischen spricht. Das Modell darf mit SKIP verzichten.
+    _NACHLEGEN_EUCH_RE = re.compile(r"\b(euch|ihr\s+(beide|beiden|zwei)|alle\s+beide)\b", re.IGNORECASE)
+    _NACHLEGEN_PAUSE_S = 2.5
+
+    def _nachlegen_pruefen(self, room, room_name: str, gehoert: str, antwort: str, t1: float):
+        if len(self._bot_ids()) < 2:
+            return
+        basis = self.cfg.get("voice", {}).get("bot", {})
+        if not basis.get("nachlegen", True):
+            return
+        if time.time() - self._nachlegen_zuletzt.get(room_name, 0.0) < float(
+                basis.get("nachlegen_abstand_s", 180)):
+            return
+        ich = _BOT_KONTEXT.get()
+        von = self._bot_cfg().get("name") or "Robert"
+        euch = bool(self._NACHLEGEN_EUCH_RE.search(gehoert or ""))
+        for bid in self._bot_ids():
+            if bid == ich:
+                continue
+            tok = self._bot_im(bid)
+            try:
+                b = self._bot_cfg()
+                rooms = b.get("rooms") or []
+                if not b.get("enabled") or (rooms and room_name not in rooms):
+                    continue
+                woerter = {t.lower() for t in b.get("trigger", []) if t.strip()}
+                woerter.add((b.get("name") or "Robert").lower())
+                muster = r"\b(" + "|".join(map(re.escape, sorted(woerter))) + r")\b"
+                if re.search(muster, (antwort or "").lower()):
+                    zusatz = f"{von} hat dich eben erwähnt."
+                elif re.search(muster, (gehoert or "").lower()):
+                    zusatz = f"Eben ging es um dich, geantwortet hat {von}."
+                elif euch:
+                    zusatz = f"Eben wart ihr beide gemeint, {von} hat schon geantwortet."
+                else:
+                    continue
+            finally:
+                _BOT_KONTEXT.reset(tok)
+            zusatz += (" Wenn du etwas Eigenes dazu hast, leg einmal kurz nach; "
+                       "sonst antworte mit SKIP.")
+            self._nachlegen_zuletzt[room_name] = time.time()
+            log.info("[%s] KI-Funker: Nachlegen geplant (%s nach %s)", room_name, bid, von)
+            asyncio.create_task(self._nachlegen_lauf(room, room_name, bid, zusatz, t1))
+            return
+
+    async def _nachlegen_lauf(self, room, room_name: str, bid: str, zusatz: str, t1: float):
+        _BOT_KONTEXT.set(bid)       # gilt nur fuer diesen Task
+        await asyncio.sleep(self._NACHLEGEN_PAUSE_S)
+        if time.time() - self._rx_zuletzt.get(room.name, 0.0) < self._NACHLEGEN_PAUSE_S - 0.5:
+            log.info("[%s] Nachlegen abgebrochen -- Kanal belegt", room_name)
+            return
+        if any(t > t1 and not w.endswith(" (du)") for t, w, _x in self._room_hist.get(room_name, [])):
+            log.info("[%s] Nachlegen abgebrochen -- inzwischen hat jemand gesprochen", room_name)
+            return
+        await self._bot_reply(room, room_name, self._bot_cfg(), trigger_ts=t1,
+                              zusatz=zusatz, nachlegen=True)
+
     async def _bot_reply(self, room: "FRNTXRoom", room_name: str, bot: dict,
-                         search_query: str = "", trigger_ts: float | None = None):
+                         search_query: str = "", trigger_ts: float | None = None,
+                         zusatz: str = "", nachlegen: bool = False):
         """Antwort generieren und senden (höchstens ein Lauf pro Raum)."""
         if room_name in self._bot_busy:
             return
@@ -3710,7 +3776,8 @@ class TXServer:
             # statt nur mit einem getippten Test-Satz ohne echten Kontext.
             self._debug_trace_get(room_name, heard_ts)["hist"] = hist
             answer = await self._bot_ollama(bot, hist, search_query=search_query,
-                                            room_name=room_name, trace_ts=heard_ts)
+                                            room_name=room_name, trace_ts=heard_ts,
+                                            zusatz=zusatz)
             if not answer:
                 fehler = self._debug_trace_get(room_name, heard_ts).get("llm_fehler")
                 if fehler:
@@ -3772,6 +3839,15 @@ class TXServer:
             # Wunsch 2026-09-14): fragt nach einer Stunde wieder jemand "Hallo,
             # ist wer da?", darf Robert sich erneut genauso melden -- vorher
             # blieb die Sperre gegen seine letzte Sendung unbegrenzt aktiv.
+            # Sicherheitsnetz zum Hinweis in _bot_build_prompt: faengt die
+            # Antwort trotzdem mit demselben kurzen Ausruf an wie die letzte
+            # eigene ("Na, ..."), faellt der Ausruf weg.
+            vorige = next((x for _t, w, x in reversed(hist) if w == f"{name} (du)"), "")
+            m = re.match(r"([\wäöüß]{1,5}),\s+(?=\S)", answer)
+            if m and re.match(re.escape(m.group(1)) + r"\b", vorige.strip(), re.IGNORECASE):
+                rest = answer[m.end():]
+                answer = rest[0].upper() + rest[1:]
+                log.info("[%s] KI-Funker: Anfang „%s,“ wie zuletzt -- weggelassen", room_name, m.group(1))
             own_prev = self._bot_own_tx.get(room_name, [])
             # Bittet jemand ausdruecklich um Wiederholung, darf Robert wiederholen
             # (2026-09-25: "Kannst du das nochmal sagen?" -> Modell wiederholte,
@@ -3833,6 +3909,8 @@ class TXServer:
                               (t1, f"{name} (du)", answer),
                               max(4, int(bot.get("history_len", 10))) + 2 * self._PROMPT_BLOCK)
             self._bot_state_merken()
+            if not nachlegen:
+                self._nachlegen_pruefen(room, room_name, gehoert, answer, t1)
             payload = {"type": "voice_autosent", "room": room_name,
                        "from": "KI-Funker", "text": answer, "ok": True,
                        "heard": gehoert or (hist[-1][2] if hist else "")}
@@ -5513,7 +5591,8 @@ class TXServer:
                           search_context: str = "",
                           anker_key: str | None = None,
                           raum: str = "",
-                          jetzt_ts: float | None = None) -> tuple[str, list]:
+                          jetzt_ts: float | None = None,
+                          zusatz: str = "") -> tuple[str, list]:
         """Baut System-Anweisung + Nachrichtenverlauf (provider-neutral).
         Nachrichten: role 'user' (fremde Funksprüche) / 'assistant' (eigene).
         search_context: optionale Websuche-Treffer, werden dem System-Prompt
@@ -5714,6 +5793,17 @@ class TXServer:
                        "wahrscheinlich falsch verschriftet: nimm einzelne Wörter daraus "
                        "nicht wörtlich, wiederhole sie nicht und geh nicht auf "
                        "Einzelheiten daraus ein, als wären sie sicher gesagt.")
+        # Immer derselbe Anfang (2026-10-14: 5 von 11 Antworten "Na, ...")?
+        # Nur dann ein Satz dazu, sonst kostet es nichts.
+        anf = [m.group(0).lower() for _t, w, x in recent if w == own_tag
+               for m in [re.match(r"[\wäöüß]+", (x or "").strip())] if m][-4:]
+        if len(anf) >= 2:
+            oft = max(set(anf), key=anf.count)
+            if anf.count(oft) >= 2:
+                spaet.append(f"Deine letzten Antworten fingen oft mit „{oft.capitalize()}“ "
+                             "an. Fang diesmal anders an.")
+        if zusatz:
+            spaet.append(zusatz)
         hinweis = {"role": "user", "content": "[Hinweis, kein Funkspruch] " + "\n\n".join(spaet)}
         if messages:
             messages.insert(len(messages) - 1, hinweis)
@@ -5806,7 +5896,8 @@ class TXServer:
                           search_query: str = "", room_name: str = "",
                           trace_ts: float | None = None,
                           force_model: bool = False,
-                          jetzt_ts: float | None = None):
+                          jetzt_ts: float | None = None,
+                          zusatz: str = ""):
         """Entscheidung + Antwort des KI-Funkers. Provider laut voice.bot.provider
         (ollama = lokal/eigener Server, gemini = Google-Cloud). Das Modell darf mit
         SKIP schweigen. Liefert "" wenn der Bot nicht antworten soll.
@@ -5836,7 +5927,7 @@ class TXServer:
             search_context = "(SUCHE FEHLGESCHLAGEN: kein Ergebnis, die Suchdienste sind gerade nicht erreichbar. Du hast also KEINE aktuellen Infos dazu. Sag ehrlich und kurz, dass du das gerade nicht nachschauen kannst. Erfinde auf KEINEN Fall Wetter, Nachrichten oder Ergebnisse.)"
         system, messages = self._bot_build_prompt(bot, hist, search_context,
                                                   anker_key=room_name or None,
-                                                  jetzt_ts=jetzt_ts)
+                                                  jetzt_ts=jetzt_ts, zusatz=zusatz)
         provider = (bot.get("provider") or "ollama").strip().lower()
         _t0 = time.time()
         if provider == "gemini":
