@@ -1605,6 +1605,10 @@ audio {
               <label>Nur diese Räume <small>Komma-getrennt, leer = alle</small></label>
               <input type="text" id="bot-rooms" placeholder="quasel" autocomplete="off">
             </div>
+            <div class="form-field">
+              <label>Nicht reagieren auf <small>Rufzeichen/Sprechernamen, Komma-getrennt — gilt für Robert und Susi</small></label>
+              <input type="text" id="bot-ignorieren" placeholder="Idiot" autocomplete="off">
+            </div>
           </div>
           <div class="adm-fields">
             <div class="form-field">
@@ -4727,6 +4731,7 @@ async function loadBotAdmin() {
     document.getElementById("bot-begr-max").value      = d.begruessung_warte_max ?? 10;
     document.getElementById("bot-name").value      = d.name || "";
     document.getElementById("bot-trigger").value   = (d.trigger || []).join(", ");
+    document.getElementById("bot-ignorieren").value = (d.ignorieren || []).join(", ");
     document.getElementById("bot-persona").value   = d.persona || "";
     document.getElementById("bot-system-prompt").value = d.system_prompt || "";
     document.getElementById("bot-speaker").value   = d.speaker || "";
@@ -5117,6 +5122,7 @@ async function saveBotAdmin() {
     begruessung_warte_max: numOderStandard("bot-begr-max", 10),
     name:                  document.getElementById("bot-name").value,
     trigger:               document.getElementById("bot-trigger").value,
+    ignorieren:            document.getElementById("bot-ignorieren").value,
     persona:               document.getElementById("bot-persona").value,
     system_prompt:         document.getElementById("bot-system-prompt").value,
     speaker:               document.getElementById("bot-speaker").value,

@@ -1442,6 +1442,19 @@ class TXServer:
                                       detail=f"Transkript unsicher ({100 * confidence:.0f}% "
                                              "Übereinstimmung) -- keine Antwort", final=True)
                 return
+            # Ignorier-Liste (2026-10-15, User-Wunsch): Sprecher, auf die weder
+            # Robert noch Susi reagieren -- Name wie von der Stimmerkennung
+            # vergeben ("Idiot" ruft seit 29.09. nur "Robert, Robert").
+            # Bewusst auch nicht in den Verlauf, sonst greift das Modell es
+            # spaeter doch auf.
+            ignorieren = {n.strip().lower() for n in
+                          self.cfg.get("voice", {}).get("bot", {}).get("ignorieren", []) if n.strip()}
+            if (callsign or "").strip().lower() in ignorieren:
+                log.info("[%s] KI-Funker: %s steht auf der Ignorier-Liste -- keine Reaktion",
+                         room_name, callsign)
+                self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                      detail=f"{callsign} auf der Ignorier-Liste", final=True)
+                return
             if confidence is not None:
                 kz = self._hist_konfidenz
                 kz[round(ts, 3)] = float(confidence)
@@ -6719,6 +6732,8 @@ class TXServer:
                 bot["control"] = c
             if "rooms" in body:
                 bot["rooms"] = _strlist(body["rooms"])
+            if "ignorieren" in body:
+                bot["ignorieren"] = _strlist(body["ignorieren"])
             if "memory" in body and isinstance(body["memory"], list):
                 mem = []
                 for m in body["memory"]:
