@@ -5026,7 +5026,7 @@ class TXServer:
             return str(eigene[raum]).strip()
         low = raum.lower()
         if "freenet" in low:
-            return ("Dieser Verlauf läuft gerade auf FREENET (149 MHz, Jedermannfunk), "
+            return ("Dieser Verlauf läuft gerade auf FREENET Kanal 3 (149 MHz, Jedermannfunk), "
                     "nicht auf CB-Kanal 74. Die Leute hier hören dich über Freenet; "
                     "sag also nicht, du wärst auf Kanal 74.")
         if "ch74" in low or "kanal74" in low or low.endswith("74"):
