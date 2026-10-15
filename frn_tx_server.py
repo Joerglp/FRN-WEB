@@ -9357,6 +9357,7 @@ class TXServer:
             return re.sub(r"^https?://", "", (url or "").strip()).rstrip("/") \
                    or "—"
 
+        gemini = (bot.get("provider") or "ollama").strip().lower() == "gemini"
         groups = [
             {"title": "KI-Funker (Robert)", "tab": "bot", "icon": "🤖",
              "items": [
@@ -9364,13 +9365,43 @@ class TXServer:
                                      bool(bot.get("enabled"))),
                 ("Name",             bot.get("name"), None),
                 ("Trigger-Wörter",   ", ".join(bot.get("trigger", [])), None),
-                ("Stimme",           bot.get("speaker"), None),
-                ("KI-Modell",        bot.get("ollama_model"), None),
-                ("KI-Server",        _host(bot.get("ollama_url")), None),
+                ("Stimme",           voice.get("xtts_speaker") or "—", None),
+                ("Stimmung (nur Piper)", bot.get("speaker") or "—", None),
+                ("KI-Modell",        (bot.get("gemini_model") if gemini
+                                      else bot.get("ollama_model")), None),
+                ("KI-Server",        "Gemini" if gemini else _host(bot.get("ollama_url")), None),
                 ("Cooldown",         f"{int(bot.get('cooldown_s', 0))} s", None),
                 ("Gesprächsfenster", f"{int(bot.get('conversation_window_s', 0))} s", None),
                 ("Räume",            ", ".join(bot.get("rooms")) or "alle", None),
+                ("Begrüßung",        "AN" if bot.get("begruessung_enabled", True) else "AUS",
+                                     bool(bot.get("begruessung_enabled", True))),
+                ("Nicht reagieren auf", ", ".join(bot.get("ignorieren") or []) or "—", None),
              ]},
+        ]
+        # Weitere KI-Funker (Susi …): erben alles von Robert, nur das Eigene zeigen
+        for b in voice.get("bots_weitere") or []:
+            if not isinstance(b, dict) or not b.get("id"):
+                continue
+            groups.append(
+            {"title": f"KI-Funkerin/-Funker ({b.get('name') or b['id']})", "tab": "bot",
+             "icon": "🤖",
+             "items": [
+                ("Aktiv",          "AN" if b.get("enabled") else "AUS", bool(b.get("enabled"))),
+                ("Trigger-Wörter", ", ".join(b.get("trigger") or []) or "—", None),
+                ("Stimme",         b.get("xtts_speaker") or "—", None),
+                ("Alles andere",   f"wie {bot.get('name') or 'Robert'} (Modell, Räume, Bremsen)",
+                                   None),
+             ]})
+        if len(groups) > 1:
+            groups.append(
+            {"title": "Zusammenspiel der KI-Funker", "tab": "bot", "icon": "🔁",
+             "items": [
+                ("Nachlegen", "AN" if bot.get("nachlegen", True) else "AUS",
+                              bool(bot.get("nachlegen", True))),
+                ("Nachlegen höchstens alle",
+                              f"{int(bot.get('nachlegen_abstand_s', 180))} s je Raum", None),
+             ]})
+        groups += [
             {"title": "Roberts Quellen", "tab": "bot", "icon": "📰",
              "items": [
                 ("Tagesprogramm",   "AN" if bot.get("tagesprogramm_enabled") else "AUS",
@@ -9398,7 +9429,8 @@ class TXServer:
                 ("Aktiv",   "AN" if voice.get("enabled") else "AUS",
                             bool(voice.get("enabled"))),
                 ("Sprache", voice.get("language", "de"), None),
-                ("TTS-Server", _host(voice.get("remote_url")), None),
+                ("Engine",  voice.get("tts_engine") or "—", None),
+                ("TTS-Server", _host(voice.get("remote_url") or voice.get("xtts_url")), None),
              ]},
             {"title": "Transkription & Archiv", "tab": "audio", "icon": "📝",
              "items": [
