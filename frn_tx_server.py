@@ -8168,6 +8168,51 @@ class TXServer:
             return web.json_response({"error": str(e)[:200]}, status=500)
         return web.json_response({"name": name, "chats": chats})
 
+    async def handle_admin_bot_prompt(self, request):
+        """GET /api/admin/bot-prompt?bot=<id>&room=<raum> -- der komplette
+        Prompt, wie er jetzt ans Modell ginge (2026-10-15, User-Wunsch: die
+        im Code angehaengten Teile sind im Panel sonst unsichtbar). Ohne
+        Websuche (die entsteht erst beim konkreten Spruch). Sendet nichts."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        q = request.rel_url.query
+        bots = []
+        for bid in self._bot_ids():
+            tok = self._bot_im(bid)
+            try:
+                bots.append({"id": bid, "name": self._bot_cfg().get("name") or "Robert"})
+            finally:
+                _BOT_KONTEXT.reset(tok)
+        raeume = sorted(self._room_hist)
+        bid = q.get("bot", "")
+        if bid not in self._bot_ids():
+            bid = ""
+        raum = q.get("room", "")
+        if raum not in self._room_hist:
+            raum = raeume[0] if raeume else ""
+        tok = self._bot_im(bid)
+        try:
+            bot = self._bot_cfg()
+            # Anker sichern: der Aufruf darf den Prompt-Cache-Anker des
+            # echten Funkbetriebs nicht verschieben.
+            anker = getattr(self, "_prompt_anker", {})
+            alt = anker.get(raum, None) if raum else None
+            system, messages = self._bot_build_prompt(
+                bot, list(self._room_hist.get(raum, [])), anker_key=raum or None, raum=raum)
+            if raum:
+                if alt is None:
+                    anker.pop(raum, None)
+                else:
+                    anker[raum] = alt
+        finally:
+            _BOT_KONTEXT.reset(tok)
+        return web.json_response({
+            "bots": bots, "raeume": raeume, "bot": bid, "room": raum,
+            "system": system, "messages": messages,
+            "zeichen": len(system) + sum(len(m.get("content") or "") for m in messages),
+        })
+
     async def handle_admin_bot_replay_archive(self, request):
         """POST /api/admin/bot-replay-archive {entry_id, model} — laesst das
         Modell den Gespraechsstand von DAMALS erneut beantworten (aus dem
@@ -10442,6 +10487,7 @@ class TXServer:
         app.router.add_post("/api/admin/tts",       self.handle_admin_tts)
         app.router.add_get ("/api/admin/tts/voices", self.handle_admin_tts_voices)
         app.router.add_get ("/api/admin/bot-chats",  self.handle_admin_bot_chats)
+        app.router.add_get ("/api/admin/bot-prompt", self.handle_admin_bot_prompt)
         app.router.add_get ("/api/admin/notiz-vorschlaege", self.handle_admin_notiz_vorschlaege)
         app.router.add_post("/api/admin/prompt-groesse", self.handle_admin_prompt_groesse)
         app.router.add_post("/api/admin/notiz-vorschlaege", self.handle_admin_notiz_vorschlaege)

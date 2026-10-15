@@ -2121,6 +2121,27 @@ audio {
       </div>
       <div class="admin-msg" id="msg-robert"></div>
       <div id="rb-list" style="font-size:.85rem"></div>
+
+      <div class="admin-section-title" style="margin-top:22px">Prompt ansehen</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.5">
+        Der komplette Prompt, wie er jetzt ans Sprachmodell ginge: Persona, System-Anweisung,
+        alle automatisch angehängten Regeln und der aktuelle Verlauf des Raums. Websuche-Treffer
+        fehlen (die entstehen erst beim konkreten Spruch). Sendet nichts.
+      </div>
+      <div class="form-grid" style="margin-bottom:10px">
+        <div class="form-field" style="flex:0 0 140px">
+          <label>KI-Funker</label>
+          <select id="pp-bot"><option value="">Robert</option></select>
+        </div>
+        <div class="form-field" style="flex:0 0 200px">
+          <label>Raum</label>
+          <select id="pp-room"></select>
+        </div>
+        <div class="form-field" style="flex:0 0 auto;justify-content:flex-end">
+          <button class="btn-save" onclick="promptAnsehen()">ANZEIGEN</button>
+        </div>
+      </div>
+      <div id="pp-out" style="font-size:.78rem"></div>
     </div>
 
     <!-- ── Crosslink tab ── -->
@@ -4053,6 +4074,28 @@ const OGG_SPIELBAR = (() => {
 })();
 function archivAudioUrl(datei) {
   return "/api/archive/audio/" + encodeURIComponent(datei) + (OGG_SPIELBAR ? "" : "?fmt=m4a");
+}
+
+async function promptAnsehen() {
+  const out = document.getElementById("pp-out");
+  const selBot = document.getElementById("pp-bot"), selRaum = document.getElementById("pp-room");
+  out.innerHTML = "<div style='color:var(--muted)'>lädt …</div>";
+  try {
+    const r = await adminFetch(`/api/admin/bot-prompt?bot=${encodeURIComponent(selBot.value)}` +
+                               `&room=${encodeURIComponent(selRaum.value)}`);
+    const d = await r.json();
+    if (!r.ok || d.error) { out.innerHTML = `<span style="color:var(--red)">${esc(d.error || r.status)}</span>`; return; }
+    selBot.innerHTML = d.bots.map(b => `<option value="${esc(b.id)}"${b.id === d.bot ? " selected" : ""}>${esc(b.name)}</option>`).join("");
+    selRaum.innerHTML = d.raeume.map(x => `<option${x === d.room ? " selected" : ""}>${esc(x)}</option>`).join("");
+    const pre = "white-space:pre-wrap;word-break:break-word;margin:0;font-family:inherit";
+    const rolle = {user: "Funk / Hinweis", assistant: "eigene Antwort"};
+    out.innerHTML =
+      `<div style="color:var(--muted);margin-bottom:6px">${d.zeichen} Zeichen (≈ ${Math.round(d.zeichen / 3.5)} Tokens)</div>` +
+      `<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px">
+         <div style="color:var(--accent);font-size:.7rem;margin-bottom:4px">SYSTEM</div><pre style="${pre}">${esc(d.system)}</pre></div>` +
+      d.messages.map(m => `<div style="border-left:3px solid ${m.role === "assistant" ? "var(--accent)" : "var(--border)"};padding:3px 8px;margin-bottom:4px">
+         <span style="color:var(--muted);font-size:.66rem">${esc(rolle[m.role] || m.role)}</span><pre style="${pre}">${esc(m.content)}</pre></div>`).join("");
+  } catch (e) { out.textContent = "Fehler: " + e; }
 }
 
 function rbZeile(x, farbe) {
