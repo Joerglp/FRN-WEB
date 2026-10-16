@@ -5828,6 +5828,12 @@ class TXServer:
             if anf.count(oft) >= 2:
                 spaet.append(f"Die letzten Antworten hier fingen oft mit „{oft.capitalize()}“ "
                              "an. Fang diesmal anders an.")
+        # Auftrag im letzten Spruch? Nur dann die Zusage-Regel (16.10.: stand sie
+        # fest im Prompt, bot Robert bei "kannst Robert ja einkaufen schicken"
+        # von sich aus an, etwas auszurichten -- im Test 2 von 40, so 0 von 40).
+        letzter = next((x for _t, w, x in reversed(recent) if not w.endswith(" (du)")), "")
+        if self._NG_NACHRICHT_RE.search(letzter or "") or self._NG_NOTIZ_RE.search(letzter or ""):
+            spaet.append("Das ist eine Bitte, etwas auszurichten oder dir zu merken: sag einfach zu.")
         if zusatz:
             spaet.append(zusatz)
         hinweis = {"role": "user", "content": "[Hinweis, kein Funkspruch] " + "\n\n".join(spaet)}
