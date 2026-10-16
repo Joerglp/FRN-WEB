@@ -2359,8 +2359,16 @@ class TXServer:
     _ERWAEHNT_NACH = re.compile(r"^\W*(der|wo|welcher)\s+\w+")
     _DU_RE = re.compile(r"\b(du|dir|dich|dein\w*)\b")
 
+    # "Was macht dein Robert?" (16.10., an Susi): Besitzwort vor dem Namen ist
+    # immer Rede UEBER ihn, auch in einer Frage.
+    _BESITZ_VOR_NAME = re.compile(
+        r"\b(?:dein|deine|deinem|deinen|deiner|mein|meine|meinem|meinen|meiner|"
+        r"euer|eure|eurem|euren|unser\w*)\s+$")
+
     def _nur_erwaehnt(self, low: str, m) -> bool:
         anfang = max(low.rfind(z, 0, m.start()) for z in ".!?")
+        if self._BESITZ_VOR_NAME.search(low[anfang + 1:m.start()]):
+            return True
         ende = min([i for i in (low.find(z, m.end()) for z in ".!?") if i >= 0] or [len(low)])
         if ende < len(low) and low[ende] == "?":
             return False
@@ -3253,6 +3261,12 @@ class TXServer:
         echte = sorted([r for r in rufe if r[0] is True], reverse=True)
         if echte:
             return echte[0][2]
+        # Laeuft gerade ein Gespraech mit einem Bot, bleibt es bei ihm, auch wenn
+        # der andere nur erwaehnt wird ("Was macht dein Robert?" an Susi).
+        fenster = float(self.cfg.get("voice", {}).get("bot", {}).get("conversation_window_s", 120))
+        aktiv = [r for r in rufe if r[0] is None and time.time() - r[1] < fenster]
+        if aktiv:
+            return max(aktiv, key=lambda r: r[1])[2]
         sonst = sorted([r for r in rufe if r[0] is False], reverse=True)
         if sonst:
             return sonst[0][2]
@@ -3779,20 +3793,49 @@ class TXServer:
                 _BOT_KONTEXT.reset(tok)
             zusatz += (" Wenn du etwas Eigenes dazu hast, leg einmal kurz nach; "
                        "sonst antworte mit SKIP.")
+            vorher = self._nachlegen_zuletzt.get(room_name, 0.0)
             self._nachlegen_zuletzt[room_name] = time.time()
             log.info("[%s] KI-Funker: Nachlegen geplant (%s nach %s)", room_name, bid, von)
-            asyncio.create_task(self._nachlegen_lauf(room, room_name, bid, zusatz, t1))
+            asyncio.create_task(self._nachlegen_lauf(room, room_name, bid, zusatz, t1, vorher))
             return
 
-    async def _nachlegen_lauf(self, room, room_name: str, bid: str, zusatz: str, t1: float):
+    # Nach Roberts Durchgaengen drueckt auf CH74 regelmaessig ~1.3 s spaeter ein
+    # Client fuer ~1.9 s ohne Sprache (Rauschschwanz des Repeaters?). Daran
+    # scheiterten 3 von 4 Nachlegen (16.10.). Daher: Stille abwarten und nur
+    # abbrechen, wenn laenger gesendet wurde, als so ein Schwanz dauert.
+    _NACHLEGEN_STILLE_S = 1.5
+    _NACHLEGEN_MAX_WARTE_S = 12.0
+    _NACHLEGEN_SPRACHE_S = 3.0
+
+    async def _nachlegen_lauf(self, room, room_name: str, bid: str, zusatz: str, t1: float,
+                              vorher: float = 0.0):
         _BOT_KONTEXT.set(bid)       # gilt nur fuer diesen Task
-        await asyncio.sleep(self._NACHLEGEN_PAUSE_S)
-        if time.time() - self._rx_zuletzt.get(room.name, 0.0) < self._NACHLEGEN_PAUSE_S - 0.5:
-            log.info("[%s] Nachlegen abgebrochen -- Kanal belegt", room_name)
+        start = time.time()
+        belegt = 0.0
+        while True:
+            await asyncio.sleep(0.1)
+            jetzt = time.time()
+            if jetzt - self._rx_zuletzt.get(room.name, 0.0) < 0.2:
+                belegt += 0.1
+            if (jetzt - start >= self._NACHLEGEN_PAUSE_S
+                    and jetzt - self._rx_zuletzt.get(room.name, 0.0) >= self._NACHLEGEN_STILLE_S):
+                break
+            if jetzt - start > self._NACHLEGEN_MAX_WARTE_S:
+                belegt = max(belegt, self._NACHLEGEN_SPRACHE_S + 0.1)
+                break
+        abbruch = ""
+        if belegt > self._NACHLEGEN_SPRACHE_S:
+            abbruch = f"Kanal {belegt:.1f}s belegt"
+        elif any(t > t1 and not w.endswith(" (du)") for t, w, _x in self._room_hist.get(room_name, [])):
+            abbruch = "inzwischen hat jemand gesprochen"
+        if abbruch:
+            # Abstand nicht verbrauchen, wenn gar nicht nachgelegt wurde
+            if self._nachlegen_zuletzt.get(room_name) and vorher < self._nachlegen_zuletzt[room_name]:
+                self._nachlegen_zuletzt[room_name] = vorher
+            log.info("[%s] Nachlegen abgebrochen -- %s", room_name, abbruch)
             return
-        if any(t > t1 and not w.endswith(" (du)") for t, w, _x in self._room_hist.get(room_name, [])):
-            log.info("[%s] Nachlegen abgebrochen -- inzwischen hat jemand gesprochen", room_name)
-            return
+        if belegt:
+            log.info("[%s] Nachlegen: kurzes Signal (%.1fs) abgewartet", room_name, belegt)
         await self._bot_reply(room, room_name, self._bot_cfg(), trigger_ts=t1,
                               zusatz=zusatz, nachlegen=True)
 
