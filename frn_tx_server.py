@@ -27,6 +27,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import secrets
 import signal
@@ -5834,6 +5835,15 @@ class TXServer:
         letzter = next((x for _t, w, x in reversed(recent) if not w.endswith(" (du)")), "")
         if self._NG_NACHRICHT_RE.search(letzter or "") or self._NG_NOTIZ_RE.search(letzter or ""):
             spaet.append("Das ist eine Bitte, etwas auszurichten oder dir zu merken: sag einfach zu.")
+        # Nachfragen dosiert (16.10., User: "ein bisschen was fragen koennten
+        # die aber"). Als fester Prompt-Satz fragte gemma fast immer (Robert
+        # 95 %, Susi 100 % statt 27/55 %) -- daher nur, wenn die letzten zwei
+        # eigenen Antworten keine Frage hatten, und dann mit voice.bot.nachfragen
+        # (Anteil 0..1, Default 0.5). Nicht bei Sonderlaeufen (zusatz).
+        eigene = [x for _t, w, x in recent if w == own_tag][-2:]
+        if (not zusatz and not any("?" in (x or "") for x in eigene)
+                and random.random() < float(bot.get("nachfragen", 0.5))):
+            spaet.append("Frag diesmal ruhig nach.")
         if zusatz:
             spaet.append(zusatz)
         hinweis = {"role": "user", "content": "[Hinweis, kein Funkspruch] " + "\n\n".join(spaet)}
@@ -9395,6 +9405,8 @@ class TXServer:
                 ("Begrüßung",        "AN" if bot.get("begruessung_enabled", True) else "AUS",
                                      bool(bot.get("begruessung_enabled", True))),
                 ("Nicht reagieren auf", ", ".join(bot.get("ignorieren") or []) or "—", None),
+                ("Nachfragen",       f"{round(100 * float(bot.get('nachfragen', 0.5)))} % "
+                                     "(nur wenn zuletzt keine Frage)", None),
              ]},
         ]
         # Weitere KI-Funker (Susi …): erben alles von Robert, nur das Eigene zeigen
