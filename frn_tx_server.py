@@ -3852,15 +3852,15 @@ class TXServer:
             # Wunsch 2026-09-14): fragt nach einer Stunde wieder jemand "Hallo,
             # ist wer da?", darf Robert sich erneut genauso melden -- vorher
             # blieb die Sperre gegen seine letzte Sendung unbegrenzt aktiv.
-            # Sicherheitsnetz zum Hinweis in _bot_build_prompt: faengt die
-            # Antwort trotzdem mit demselben kurzen Ausruf an wie die letzte
-            # eigene ("Na, ..."), faellt der Ausruf weg.
-            vorige = next((x for _t, w, x in reversed(hist) if w == f"{name} (du)"), "")
-            m = re.match(r"([\wäöüß]{1,5}),\s+(?=\S)", answer)
-            if m and re.match(re.escape(m.group(1)) + r"\b", vorige.strip(), re.IGNORECASE):
+            # gemma-Floskel "Na, da hast du mich (voll) erwischt!" (16.10.: in
+            # rund 15 % der Antworten auf "habt ihr den Kaffee schon fertig?",
+            # unabhaengig vom Prompt). Steht danach noch ein richtiger Satz,
+            # faellt sie weg. Das "Na," selbst bleibt erlaubt (User 16.10.).
+            m = self._ERWISCHT_RE.match(answer)
+            if m and len(answer[m.end():].split()) >= 4:
                 rest = answer[m.end():]
                 answer = rest[0].upper() + rest[1:]
-                log.info("[%s] KI-Funker: Anfang „%s,“ wie zuletzt -- weggelassen", room_name, m.group(1))
+                log.info("[%s] KI-Funker: Floskel „%s“ weggelassen", room_name, m.group(0).strip())
             if answer[:1].islower():
                 answer = answer[0].upper() + answer[1:]
             own_prev = self._bot_own_tx.get(room_name, [])
@@ -4996,6 +4996,10 @@ class TXServer:
     # Spruch, und der Verlauf rueckt nur in Bloecken weiter.
     _PROMPT_BLOCK = 10
 
+    _ERWISCHT_RE = re.compile(
+        r"^\W*(?:[\wäöüß]{1,6}[,!]\s+)?da\s+(?:hast\s+du|haste)\s+mich\s+(?:[\wäöüß]+\s+){0,5}?"
+        r"erwischt(?:,\s*[\wäöüß]+)?\s*[!.]\s*", re.I)
+
     _WIEDERHOL_RE = re.compile(
         r"noch ?mal (sagen|wiederholen|kommen)|nochmal\b.*\bsagen|wiederhol|"
         r"was hast du (gesagt|da gesagt)|(hab|habe) (dich|das) nicht (verstanden|mitbekommen)|"
@@ -5818,7 +5822,7 @@ class TXServer:
             m = re.match(r"[\wäöüß]+", x)
             return m.group(0).lower() if m else ""
         anf = [a for _t, w, x in recent if w.endswith(" (du)")
-               for a in [_anfang(x)] if a and a not in ("hallo", "moin", "hier")][-4:]
+               for a in [_anfang(x)] if a and a not in ("hallo", "moin", "hier", "na")][-4:]
         if len(anf) >= 2:
             oft = max(set(anf), key=anf.count)
             if anf.count(oft) >= 2:
