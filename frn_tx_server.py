@@ -3861,6 +3861,8 @@ class TXServer:
                 rest = answer[m.end():]
                 answer = rest[0].upper() + rest[1:]
                 log.info("[%s] KI-Funker: Anfang „%s,“ wie zuletzt -- weggelassen", room_name, m.group(1))
+            if answer[:1].islower():
+                answer = answer[0].upper() + answer[1:]
             own_prev = self._bot_own_tx.get(room_name, [])
             # Bittet jemand ausdruecklich um Wiederholung, darf Robert wiederholen
             # (2026-09-25: "Kannst du das nochmal sagen?" -> Modell wiederholte,
@@ -5807,13 +5809,20 @@ class TXServer:
                        "nicht wörtlich, wiederhole sie nicht und geh nicht auf "
                        "Einzelheiten daraus ein, als wären sie sicher gesagt.")
         # Immer derselbe Anfang (2026-10-14: 5 von 11 Antworten "Na, ...")?
-        # Nur dann ein Satz dazu, sonst kostet es nichts.
-        anf = [m.group(0).lower() for _t, w, x in recent if w == own_tag
-               for m in [re.match(r"[\wäöüß]+", (x or "").strip())] if m][-4:]
+        # Nur dann ein Satz dazu, sonst kostet es nichts. Gezaehlt wird das
+        # erste Wort NACH einem kurzen Ausruf ("Na, da hast du mich erwischt"
+        # -> "da"; 16.10.: ein Viertel aller Antworten fing so an) und ueber
+        # alle KI-Funker im Raum -- Susi uebernimmt Roberts Anfaenge.
+        def _anfang(x: str) -> str:
+            x = re.sub(r"^\W*[\wäöüß]{1,5}[,!]\s+", "", (x or "").strip())
+            m = re.match(r"[\wäöüß]+", x)
+            return m.group(0).lower() if m else ""
+        anf = [a for _t, w, x in recent if w.endswith(" (du)")
+               for a in [_anfang(x)] if a and a not in ("hallo", "moin", "hier")][-4:]
         if len(anf) >= 2:
             oft = max(set(anf), key=anf.count)
             if anf.count(oft) >= 2:
-                spaet.append(f"Deine letzten Antworten fingen oft mit „{oft.capitalize()}“ "
+                spaet.append(f"Die letzten Antworten hier fingen oft mit „{oft.capitalize()}“ "
                              "an. Fang diesmal anders an.")
         if zusatz:
             spaet.append(zusatz)
