@@ -259,6 +259,7 @@ class FRNTXRoom:
         self._keepalive_task: asyncio.Task | None = None
         self._reader_task:    asyncio.Task | None = None
         self._tx_approved     = asyncio.Event()
+        self._rx_letzt        = 0.0  # letztes empfangenes Sprachpaket (request_tx)
         self._encoder         = GSMEncoder()
         self._pcm_buf         = b""
         self._clients: list   = []   # last received MARKER_CLIENTS list
@@ -528,6 +529,7 @@ class FRNTXRoom:
                     elif marker == MARKER_SOUND:            # 0x02 — 1+2+325 = 328 bytes
                         if len(buf) < 328:
                             break
+                        self._rx_letzt = time.time()
                         if self.on_rx_audio:
                             try:
                                 self.on_rx_audio(self.name)
@@ -659,24 +661,48 @@ class FRNTXRoom:
                 dead.add(ws)
         self._chat_clients -= dead
 
+    # Der FRN-Server merkt sich ein TX0 bei belegtem Kanal NICHT (16.10.: seit
+    # 01.10. 59x Freigabe nach < 1 s, 19x nie, keine einzige nach 2-15 s --
+    # obwohl in den Wartefenstern 4-6 s freie Luecken lagen). Daher TX0
+    # wiederholen, sobald der Kanal so lange still ist.
+    _TX_FREI_S = 1.5
+    _TX_WIEDERHOL_S = 2.0   # > laengste beobachtete Freigabe-Verzoegerung (1.1 s)
+
     async def request_tx(self, timeout: float = 30.0) -> bool:
         if not self._connected:
             await self.ensure_connected()
         self._tx_approved.clear()
-        self._writer.write(b"TX0\r\n")
-        await self._writer.drain()
+        ende = time.time() + timeout
+        gesendet = 0.0
         try:
-            await asyncio.wait_for(self._tx_approved.wait(), timeout=timeout)
-            self._pcm_buf = b""
-            return True
+            while True:
+                jetzt = time.time()
+                if jetzt - self._rx_letzt >= self._TX_FREI_S and jetzt - gesendet >= self._TX_WIEDERHOL_S:
+                    if gesendet:
+                        log.info("[%s] TX0 wiederholt (Kanal seit %.1fs frei)",
+                                 self.name, jetzt - self._rx_letzt)
+                    self._writer.write(b"TX0\r\n")
+                    await self._writer.drain()
+                    gesendet = jetzt
+                rest = ende - time.time()
+                if rest <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    await asyncio.wait_for(self._tx_approved.wait(), timeout=min(0.5, rest))
+                    self._pcm_buf = b""
+                    return True
+                except asyncio.TimeoutError:
+                    continue
         except asyncio.TimeoutError:
-            log.warning("[%s] TX approve timeout (%.0fs)", self.name, timeout)
+            log.warning("[%s] TX approve timeout (%.0fs)%s", self.name, timeout,
+                        "" if gesendet else " -- Kanal die ganze Zeit belegt")
             # Send RX0 to cancel the pending TX request on the server side
-            try:
-                self._writer.write(b"RX0\r\n")
-                await self._writer.drain()
-            except Exception:
-                pass
+            if gesendet:
+                try:
+                    self._writer.write(b"RX0\r\n")
+                    await self._writer.drain()
+                except Exception:
+                    pass
             return False
 
     async def send_pcm(self, pcm_chunk: bytes):
