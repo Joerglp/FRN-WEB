@@ -622,7 +622,7 @@ class RoomRecorder:
                 self._buf      = []
                 self._callsign = callsign or ""
                 log.debug("[%s] TX-Session gestartet (%s)", self.room_name, callsign)
-                _sprechbeginn_melden(self.room_name)
+                _sprechbeginn_melden(self.room_name, self._start_ts)
             elif callsign:
                 self._callsign = callsign
 
@@ -711,6 +711,8 @@ class RoomRecorder:
             self._buf     = []
             callsign      = self._callsign
             start_ts      = self._start_ts
+            last_ts       = self._last_ts
+        _sprechende_melden(self.room_name, last_ts)
 
         min_bytes = int(self.MIN_DURATION * self.SAMPLE_RATE) * self.SAMPLE_WIDTH
         if len(pcm_data) < min_bytes:
@@ -921,20 +923,31 @@ class RoomRecorder:
 # Main
 # ---------------------------------------------------------------------------
 
-def _sprechbeginn_melden(room: str):
+def _sprechbeginn_melden(room: str, beginn: float):
     """TX-Server ueber den Beginn einer Durchsage informieren (2026-09-28):
     dort wird das Sprachmodell vorgewaermt, waehrend noch gesprochen wird.
     Eigener Thread + kurzer Timeout -- darf die Aufnahme nie aufhalten."""
+    _intern_melden("sprechbeginn", {"room": room, "beginn": beginn})
+
+
+def _sprechende_melden(room: str, ende: float):
+    """Ende der Durchsage melden (2026-10-19): ohne das sah der TX-Server
+    in diesen Raeumen nur den Beginn und hielt den Kanal fuer frei, waehrend
+    noch gesprochen wurde (Nachlegen mitten in eine Durchsage)."""
+    _intern_melden("sprechende", {"room": room, "ende": ende})
+
+
+def _intern_melden(pfad: str, daten: dict):
     def _senden():
         import urllib.request
         try:
             req = urllib.request.Request(
-                "http://127.0.0.1:8765/api/intern/sprechbeginn",
-                data=json.dumps({"room": room}).encode(),
+                f"http://127.0.0.1:8765/api/intern/{pfad}",
+                data=json.dumps(daten).encode(),
                 headers={"Content-Type": "application/json"}, method="POST")
             urllib.request.urlopen(req, timeout=1).close()
         except Exception as e:
-            log.debug("Sprechbeginn-Meldung fehlgeschlagen: %s", e)
+            log.debug("Meldung %s fehlgeschlagen: %s", pfad, e)
     threading.Thread(target=_senden, daemon=True).start()
 
 

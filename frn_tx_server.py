@@ -861,6 +861,8 @@ class TXServer:
         self._sprecher_details: dict[str, dict] = {}   # wav_path -> Ergebnis der Erkennung
         self._rx_zuletzt: dict[str, float] = {}        # Raum -> letztes empfangenes Audiopaket
         self._nachlegen_zuletzt: dict[str, float] = {} # Raum -> letztes Nachlegen (Robert <-> Susi)
+        self._rx_offen: dict[str, float] = {}          # Raum -> Beginn der laufenden Durchsage (frn_stream)
+        self._rx_ende: dict[str, float] = {}           # Raum -> zuletzt gemeldetes Durchsage-Ende
         self._speaker_letzte_pruefung: dict = {}
         self._load_speaker_enrollments()
         self._transcription_cfg: dict = {}   # von main() befuellt (config.ini [transcription])
@@ -2360,14 +2362,19 @@ class TXServer:
     _DU_RE = re.compile(r"\b(du|dir|dich|dein\w*)\b")
 
     # "Was macht dein Robert?" (16.10., an Susi): Besitzwort vor dem Namen ist
-    # immer Rede UEBER ihn, auch in einer Frage.
+    # Rede UEBER ihn, auch in einer Frage. Ausnahme Kosename: "Na mein Robert,
+    # wie geht's dir?" -- "mein" direkt vor dem Namen und danach Komma oder
+    # Satzende ist Anrede, das entscheiden die normalen Regeln unten.
     _BESITZ_VOR_NAME = re.compile(
         r"\b(?:dein|deine|deinem|deinen|deiner|mein|meine|meinem|meinen|meiner|"
         r"euer|eure|eurem|euren|unser\w*)\s+$")
+    _KOSENAME_NACH = re.compile(r"^\s*[,!?]")
 
     def _nur_erwaehnt(self, low: str, m) -> bool:
         anfang = max(low.rfind(z, 0, m.start()) for z in ".!?")
-        if self._BESITZ_VOR_NAME.search(low[anfang + 1:m.start()]):
+        besitz = self._BESITZ_VOR_NAME.search(low[anfang + 1:m.start()])
+        if besitz and not (besitz.group(0).startswith("mein")
+                           and self._KOSENAME_NACH.match(low[m.end():])):
             return True
         ende = min([i for i in (low.find(z, m.end()) for z in ".!?") if i >= 0] or [len(low)])
         if ende < len(low) and low[ende] == "?":
@@ -3242,7 +3249,9 @@ class TXServer:
         """Welcher Bot entscheidet ueber diesen Spruch: wer beim Namen gerufen
         wird (der zuerst genannte), sonst wessen Name nur erwaehnt/angehaengt
         ist (damit die Spur den Grund zeigt), sonst wer zuletzt gesendet hat."""
-        rufe = []
+        rufe = []       # (Art, -Position, bid)
+        zuletzt = []    # (letzte Antwort, bid, Gespraech laeuft noch)
+        jetzt = time.time()
         for bid in self._bot_ids():
             tok = self._bot_im(bid)
             try:
@@ -3253,24 +3262,33 @@ class TXServer:
                 ruf = self._namensruf(low, trig)
                 if ruf:
                     pos = min(m.start() for t in trig for m in re.finditer(r"\b" + re.escape(t), low))
-                    rufe.append((ruf in ("echt", "kurz"), -pos, bid))
-                zuletzt = self._bot_last_reply.get(room_name, 0.0)
+                    rufe.append((ruf, -pos, bid))
+                letzte = self._bot_last_reply.get(room_name, 0.0)
+                fenster = float(b.get("conversation_window_s", 180))
             finally:
                 _BOT_KONTEXT.reset(tok)
-            rufe.append((None, zuletzt, bid))
-        echte = sorted([r for r in rufe if r[0] is True], reverse=True)
-        if echte:
-            return echte[0][2]
+            zuletzt.append((letzte, bid, jetzt - letzte < fenster))
+
+        def erster(arten):
+            treffer = sorted([r for r in rufe if r[0] in arten], key=lambda r: r[1], reverse=True)
+            return treffer[0][2] if treffer else None
+
+        # Angehaengter Name zieht wie bisher vor dem laufenden Gespraech --
+        # sonst beantwortet Robert "Und was sagst du dazu, Susi." oder den
+        # Spassvogel-Anhang, statt dass Susi ihn per Schutzregel verwirft.
+        for arten in (("echt", "kurz"), ("angehaengt",)):
+            bid = erster(arten)     # Robert hat bid "" -- nicht mit "or" verketten
+            if bid is not None:
+                return bid
         # Laeuft gerade ein Gespraech mit einem Bot, bleibt es bei ihm, auch wenn
         # der andere nur erwaehnt wird ("Was macht dein Robert?" an Susi).
-        fenster = float(self.cfg.get("voice", {}).get("bot", {}).get("conversation_window_s", 120))
-        aktiv = [r for r in rufe if r[0] is None and time.time() - r[1] < fenster]
+        aktiv = [z for z in zuletzt if z[2]]
         if aktiv:
-            return max(aktiv, key=lambda r: r[1])[2]
-        sonst = sorted([r for r in rufe if r[0] is False], reverse=True)
-        if sonst:
-            return sonst[0][2]
-        return max((r for r in rufe if r[0] is None), key=lambda r: r[1])[2]
+            return max(aktiv)[1]
+        bid = erster(("erwaehnt",))
+        if bid is not None:
+            return bid
+        return max(zuletzt)[1]
 
     def _bot_entscheiden(self, room: "FRNTXRoom", room_name: str, text: str,
                          ts: float, low: str):
@@ -3727,11 +3745,39 @@ class TXServer:
         if request.remote not in ("127.0.0.1", "::1"):
             return web.json_response({"error": "forbidden"}, status=403)
         try:
-            room = str((await request.json()).get("room") or "")
+            daten = await request.json()
+            room = str(daten.get("room") or "")
+            beginn = float(daten.get("beginn") or 0.0) or time.time()
         except Exception:
             return web.json_response({"error": "bad request"}, status=400)
         if room:
+            # Meldungen laufen in eigenen Threads und koennen sich ueberholen:
+            # ein Beginn, dessen Ende schon da ist, oeffnet nichts mehr.
+            if beginn > self._rx_ende.get(room, 0.0):
+                self._rx_offen[room] = beginn
             self._bot_vorwaermen_pruefen(room)
+        return web.json_response({"ok": True})
+
+    async def handle_intern_sprechende(self, request):
+        """POST {room, ende} von frn_stream.py, wenn eine Durchsage zu Ende
+        ist (ende = letztes Tonpaket). Gegenstueck zu sprechbeginn -- erst
+        damit sieht _nachlegen_lauf, wie lange dort gesprochen wurde."""
+        if request.remote not in ("127.0.0.1", "::1"):
+            return web.json_response({"error": "forbidden"}, status=403)
+        try:
+            daten = await request.json()
+            room = str(daten.get("room") or "")
+            ende = float(daten.get("ende") or 0.0)
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        if room:
+            ende = min(ende, time.time()) if ende > 0 else time.time()
+            # Nur die eigene Durchsage schliessen, nicht die des naechsten
+            # Sprechers, falls dessen Beginn-Meldung schneller war.
+            if self._rx_offen.get(room, ende + 1) <= ende:
+                self._rx_offen.pop(room, None)
+            self._rx_ende[room] = max(self._rx_ende.get(room, 0.0), ende)
+            self._rx_zuletzt[room] = max(self._rx_zuletzt.get(room, 0.0), ende)
         return web.json_response({"ok": True})
 
     async def _bot_vorwaermen(self, bot: dict, room_name: str):
@@ -3794,9 +3840,11 @@ class TXServer:
             zusatz += (" Wenn du etwas Eigenes dazu hast, leg einmal kurz nach; "
                        "sonst antworte mit SKIP.")
             vorher = self._nachlegen_zuletzt.get(room_name, 0.0)
-            self._nachlegen_zuletzt[room_name] = time.time()
+            stempel = time.time()
+            self._nachlegen_zuletzt[room_name] = stempel
             log.info("[%s] KI-Funker: Nachlegen geplant (%s nach %s)", room_name, bid, von)
-            asyncio.create_task(self._nachlegen_lauf(room, room_name, bid, zusatz, t1, vorher))
+            asyncio.create_task(self._nachlegen_lauf(room, room_name, bid, zusatz, t1,
+                                                     vorher, stempel))
             return
 
     # Nach Roberts Durchgaengen drueckt auf CH74 regelmaessig ~1.3 s spaeter ein
@@ -3806,38 +3854,68 @@ class TXServer:
     _NACHLEGEN_STILLE_S = 1.5
     _NACHLEGEN_MAX_WARTE_S = 12.0
     _NACHLEGEN_SPRACHE_S = 3.0
+    # Ein kurzes Signal kann auch eine knappe Antwort sein ("Ja danke, Robert").
+    # Deren Transkript kommt erst nach Stille-Ende + Whisper -- so lange warten.
+    _NACHLEGEN_TRANSKRIPT_S = 6.0
+
+    def _rx_letztes(self, room_name: str, jetzt: float) -> float:
+        """Letztes empfangenes Audio. Raeume, die nur frn_stream mithoert,
+        melden Beginn und Ende der Durchsage statt jedes Pakets -- dazwischen
+        gilt der Kanal als belegt (laengstens 5 min, falls das Ende ausbleibt)."""
+        beginn = self._rx_offen.get(room_name)
+        if beginn is not None and jetzt - beginn < 300:
+            return jetzt
+        return self._rx_zuletzt.get(room_name, 0.0)
 
     async def _nachlegen_lauf(self, room, room_name: str, bid: str, zusatz: str, t1: float,
-                              vorher: float = 0.0):
+                              vorher: float = 0.0, stempel: float = 0.0):
         _BOT_KONTEXT.set(bid)       # gilt nur fuer diesen Task
-        start = time.time()
+
+        def jemand_sprach():
+            return any(t > t1 and not w.endswith(" (du)")
+                       for t, w, _x in self._room_hist.get(room_name, []))
+
+        start = davor = time.time()
         belegt = 0.0
+        abbruch = ""
         while True:
             await asyncio.sleep(0.1)
             jetzt = time.time()
-            if jetzt - self._rx_zuletzt.get(room.name, 0.0) < 0.2:
-                belegt += 0.1
+            if jetzt - self._rx_letztes(room.name, jetzt) < 0.2:
+                belegt += jetzt - davor     # echte Zeit, die Schleife kann nachhinken
+            davor = jetzt
             if (jetzt - start >= self._NACHLEGEN_PAUSE_S
-                    and jetzt - self._rx_zuletzt.get(room.name, 0.0) >= self._NACHLEGEN_STILLE_S):
+                    and jetzt - self._rx_letztes(room.name, jetzt) >= self._NACHLEGEN_STILLE_S):
                 break
             if jetzt - start > self._NACHLEGEN_MAX_WARTE_S:
-                belegt = max(belegt, self._NACHLEGEN_SPRACHE_S + 0.1)
+                abbruch = f"keine Stille in {self._NACHLEGEN_MAX_WARTE_S:.0f}s"
                 break
-        abbruch = ""
-        if belegt > self._NACHLEGEN_SPRACHE_S:
+        if not abbruch and belegt > self._NACHLEGEN_SPRACHE_S:
             abbruch = f"Kanal {belegt:.1f}s belegt"
-        elif any(t > t1 and not w.endswith(" (du)") for t, w, _x in self._room_hist.get(room_name, [])):
+        if not abbruch and belegt:
+            # Rauschschwanz oder kurze Antwort? Auf ein Transkript warten.
+            bis = time.time() + self._NACHLEGEN_TRANSKRIPT_S
+            while time.time() < bis and not jemand_sprach():
+                await asyncio.sleep(0.2)
+            jetzt = time.time()
+            if not jemand_sprach() and jetzt - self._rx_letztes(room.name, jetzt) < self._NACHLEGEN_STILLE_S:
+                abbruch = "Kanal wieder belegt"
+        if not abbruch and jemand_sprach():
             abbruch = "inzwischen hat jemand gesprochen"
-        if abbruch:
-            # Abstand nicht verbrauchen, wenn gar nicht nachgelegt wurde
-            if self._nachlegen_zuletzt.get(room_name) and vorher < self._nachlegen_zuletzt[room_name]:
-                self._nachlegen_zuletzt[room_name] = vorher
-            log.info("[%s] Nachlegen abgebrochen -- %s", room_name, abbruch)
-            return
-        if belegt:
-            log.info("[%s] Nachlegen: kurzes Signal (%.1fs) abgewartet", room_name, belegt)
-        await self._bot_reply(room, room_name, self._bot_cfg(), trigger_ts=t1,
-                              zusatz=zusatz, nachlegen=True)
+        if not abbruch:
+            if belegt:
+                log.info("[%s] Nachlegen: kurzes Signal (%.1fs) abgewartet", room_name, belegt)
+            gesendet = self._bot_last_reply.get(room_name, 0.0)
+            await self._bot_reply(room, room_name, self._bot_cfg(), trigger_ts=t1,
+                                  zusatz=zusatz, nachlegen=True)
+            if self._bot_last_reply.get(room_name, 0.0) != gesendet:
+                return
+            abbruch = "nichts gesendet (SKIP, belegt oder Fehler)"
+        # Abstand nicht verbrauchen, wenn gar nicht nachgelegt wurde -- aber nur
+        # den eigenen Stempel zuruecknehmen, nie einen neueren.
+        if self._nachlegen_zuletzt.get(room_name) == stempel:
+            self._nachlegen_zuletzt[room_name] = vorher
+        log.info("[%s] Nachlegen abgebrochen -- %s", room_name, abbruch)
 
     async def _bot_reply(self, room: "FRNTXRoom", room_name: str, bot: dict,
                          search_query: str = "", trigger_ts: float | None = None,
@@ -10613,6 +10691,7 @@ class TXServer:
         app.router.add_post("/api/admin/bot/test",  self.handle_admin_bot_test)
         app.router.add_post("/api/admin/bot/probe", self.handle_admin_bot_probe)
         app.router.add_post("/api/intern/sprechbeginn", self.handle_intern_sprechbeginn)
+        app.router.add_post("/api/intern/sprechende", self.handle_intern_sprechende)
         app.router.add_get("/status",                self.handle_status_page)
         app.router.add_get("/api/admin/dienste",     self.handle_admin_dienste)
         app.router.add_get ("/api/admin/tts",       self.handle_admin_tts)
