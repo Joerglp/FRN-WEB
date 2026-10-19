@@ -39,6 +39,7 @@ PORT      = int(os.environ.get("VOICE_PORT", 9002))
 DEVICE    = os.environ.get("VOICE_DEVICE", "cpu")   # cpu | cuda | cuda-ondemand
 REF_WAV   = os.environ.get("VOICE_REF", "/ref/joerg.wav")
 DEF_LANG  = os.environ.get("VOICE_LANG", "de")
+UPLOAD_TOKEN = os.environ.get("VOICE_TOKEN", "")   # leer = Uploads ohne Schluessel (wie bisher)
 MODEL_ID  = "tts_models/multilingual/multi-dataset/xtts_v2"
 
 # Geräte-Logik:
@@ -282,6 +283,10 @@ async def handle_speaker_upload(request: web.Request) -> web.Response:
 
     Ersetzt ein evtl. vorhandenes Sample und invalidiert den Latents-Cache.
     """
+    # Optionaler Schluessel: der Dienst lauscht auf 0.0.0.0, ohne ihn konnte
+    # jeder im Netz fremde Stimmen ersetzen (2026-10-19 Review-Fund)
+    if UPLOAD_TOKEN and request.headers.get("X-Voice-Token", "") != UPLOAD_TOKEN:
+        return web.json_response({"error": "forbidden"}, status=403)
     name = request.match_info["name"].strip().lower()
     if not SPEAKER_RE.match(name):
         return web.json_response({"error": "ungültiger Sprecher-Name"}, status=400)
@@ -311,8 +316,11 @@ async def handle_speaker_upload(request: web.Request) -> web.Response:
         tmp.unlink(missing_ok=True)
         return web.json_response(
             {"error": f"Sample zu kurz ({dur:.1f}s) — mindestens 5 s"}, status=400)
-    tmp.replace(dest)
-    _latents.pop(name, None)   # Cache invalidieren → nächste Synthese rechnet neu
+    # Unter der Synthese-Sperre tauschen: eine gerade laufende Synthese
+    # haette sonst die alte Stimme wieder in den Cache geschrieben
+    async with _synth_lock:
+        tmp.replace(dest)
+        _latents.pop(name, None)   # Cache invalidieren → nächste Synthese rechnet neu
     log.info("Sprecher '%s': neues Sample gespeichert (%.1fs)", name, dur)
     return web.json_response({"ok": True, "speaker": name,
                               "duration_s": round(dur, 1)})
