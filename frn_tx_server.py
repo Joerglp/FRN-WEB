@@ -132,6 +132,8 @@ class GSMEncoder:
 
     def encode_packet(self, pcm_bytes: bytes) -> bytes:
         """Encode 3200 bytes PCM s16le (1600 samples @ 8 kHz) → 325 bytes WAV49."""
+        if not self.handle:   # nach close(): libgsm mit NULL = Segfault des ganzen Servers
+            raise RuntimeError("GSM-Encoder geschlossen")
         if len(pcm_bytes) < PCM_PACKET_BYTES:
             pcm_bytes = pcm_bytes + b"\x00" * (PCM_PACKET_BYTES - len(pcm_bytes))
         else:
@@ -212,6 +214,8 @@ class GSMDecoder:
         Note: the encoder stores 32 bytes for the even half and 33 for the odd half,
         but the first byte of the odd region is the 33rd byte consumed by the even decode.
         """
+        if not self.handle:
+            raise RuntimeError("GSM-Decoder geschlossen")
         if len(wav49) < 325:
             wav49 = bytes(wav49) + b"\x00" * (325 - len(wav49))
         out = bytearray(3200)
@@ -258,6 +262,7 @@ class FRNTXRoom:
         self._writer: asyncio.StreamWriter | None = None
         self._connected       = False
         self._tx_lock         = asyncio.Lock()
+        self._connect_lock    = asyncio.Lock()
         self._keepalive_task: asyncio.Task | None = None
         self._reader_task:    asyncio.Task | None = None
         self._tx_approved     = asyncio.Event()
@@ -277,46 +282,78 @@ class FRNTXRoom:
             self._gsm_dec = None
 
     async def ensure_connected(self):
+        """Verbinden und einloggen. Serialisiert und erst nach erfolgreichem
+        Login als verbunden markiert (2026-10-19 Review-Funde): vorher stand
+        _connected schon vor dem Handshake auf True -- brach der ab (Timeout,
+        wait_for-Abbruch, AL!=OK), blieb der Raum ohne Leser "verbunden" und
+        jedes PTT lief bis zum Neustart ins Leere. Parallele Aufrufer bauten
+        zudem doppelte Logins auf, und Leser/Keepalive einer alten Verbindung
+        ueberlebten den Neuaufbau."""
         if self._connected:
             return
-        log.info("[%s] Connecting to %s:%d …", self.name, self.server, self.port)
-        self._reader, self._writer = await asyncio.open_connection(
-            self.server, self.port)
-        self._connected = True
+        async with self._connect_lock:
+            if self._connected:
+                return
+            await self._alte_verbindung_abbauen()
+            # disconnect() gibt die GSM-Handles frei -- fuer Wiederverbindung neu
+            if not self._encoder.handle:
+                self._encoder = GSMEncoder()
+            if self._gsm_dec is not None and not self._gsm_dec.handle:
+                self._gsm_dec = GSMDecoder()
+            log.info("[%s] Connecting to %s:%d …", self.name, self.server, self.port)
+            reader, writer = await asyncio.open_connection(self.server, self.port)
+            try:
+                ct = (
+                    f"CT:"
+                    f"<VX>{FRN_PROTO_VERSION}</VX>"
+                    f"<EA>{self.email}</EA>"
+                    f"<PW>{self.password}</PW>"
+                    f"<ON>{self.callsign}</ON>"
+                    f"<CL>{FRN_TYPE_PC_ONLY}</CL>"
+                    f"<BC>0</BC>"
+                    f"<DS>WebTX</DS>"
+                    f"<NN>DE</NN>"
+                    f"<CT>Stream</CT>"
+                    f"<NT>{self.name}</NT>"
+                    f"\r\n"
+                )
+                writer.write(ct.encode())
+                await writer.drain()
 
-        ct = (
-            f"CT:"
-            f"<VX>{FRN_PROTO_VERSION}</VX>"
-            f"<EA>{self.email}</EA>"
-            f"<PW>{self.password}</PW>"
-            f"<ON>{self.callsign}</ON>"
-            f"<CL>{FRN_TYPE_PC_ONLY}</CL>"
-            f"<BC>0</BC>"
-            f"<DS>WebTX</DS>"
-            f"<NN>DE</NN>"
-            f"<CT>Stream</CT>"
-            f"<NT>{self.name}</NT>"
-            f"\r\n"
-        )
-        self._writer.write(ct.encode())
-        await self._writer.drain()
+                version    = await asyncio.wait_for(reader.readline(), timeout=10)
+                result_raw = await asyncio.wait_for(reader.readline(), timeout=10)
+                result     = result_raw.decode(errors="replace")
+                m  = re.search(r"<AL>(.*?)</AL>", result)
+                al = m.group(1) if m else "?"
+                if al not in ("OK", "ADMIN", "OWNER", "NETOWNER"):
+                    raise ConnectionError(f"FRN login failed: AL={al}")
+                log.info("[%s] FRN login OK (AL=%s)", self.name, al)
 
-        version    = await asyncio.wait_for(self._reader.readline(), timeout=10)
-        result_raw = await asyncio.wait_for(self._reader.readline(), timeout=10)
-        result     = result_raw.decode(errors="replace")
-        m  = re.search(r"<AL>(.*?)</AL>", result)
-        al = m.group(1) if m else "?"
-        if al not in ("OK", "ADMIN", "OWNER", "NETOWNER"):
-            self._connected = False
-            raise ConnectionError(f"FRN login failed: AL={al}")
-        log.info("[%s] FRN login OK (AL=%s)", self.name, al)
+                writer.write(b"RX0\r\n")
+                await writer.drain()
+            except BaseException:
+                writer.close()   # kein haengender Socket bei Fehler/Abbruch
+                raise
 
-        self._writer.write(b"RX0\r\n")
-        await self._writer.drain()
+            self._reader, self._writer = reader, writer
+            self._connected = True
+            self._tx_approved.clear()
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+            self._reader_task    = asyncio.create_task(self._reader_loop())
 
-        self._tx_approved.clear()
-        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
-        self._reader_task    = asyncio.create_task(self._reader_loop())
+    async def _alte_verbindung_abbauen(self):
+        for t in (self._keepalive_task, self._reader_task):
+            if t and not t.done():
+                t.cancel()
+        self._keepalive_task = None
+        self._reader_task    = None
+        if self._writer:
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+        self._writer = None
+        self._reader = None
 
     async def disconnect(self):
         self._connected = False
@@ -506,12 +543,14 @@ class FRNTXRoom:
 
     async def _reader_loop(self):
         buf = b""
+        reader = self._reader
         try:
-            while self._connected and self._reader:
-                data = await self._reader.read(4096)
+            while self._connected and self._reader is reader and reader:
+                data = await reader.read(4096)
                 if not data:
                     log.warning("[%s] FRN server closed connection", self.name)
-                    self._connected = False
+                    if self._reader is reader:
+                        self._connected = False
                     break
                 buf += data
 
@@ -548,9 +587,11 @@ class FRNTXRoom:
                                 if self._rx_clients:
                                     asyncio.create_task(self._broadcast_rx(pcm))
                                 if self._recorder:
+                                    # Position in der Client-Liste, gezaehlt ab 1
+                                    # (verifiziert, siehe frn_stream.py/README)
                                     client_idx = struct.unpack(">H", buf[1:3])[0]
-                                    if 0 <= client_idx < len(self._clients):
-                                        speaker = self._clients[client_idx].get("ON", "")
+                                    if 1 <= client_idx <= len(self._clients):
+                                        speaker = self._clients[client_idx - 1].get("ON", "")
                                     else:
                                         speaker = next(
                                             (c.get("ON", "") for c in self._clients
@@ -699,6 +740,15 @@ class FRNTXRoom:
                     return True
                 except asyncio.TimeoutError:
                     continue
+        except asyncio.CancelledError:
+            # PTT losgelassen, bevor die Genehmigung kam: TX0 zuruecknehmen,
+            # sonst haengt die Anfrage beim Server (2026-10-19 Review-Fund)
+            if gesendet and self._writer:
+                try:
+                    self._writer.write(b"RX0\r\n")
+                except Exception:
+                    pass
+            raise
         except asyncio.TimeoutError:
             log.warning("[%s] TX approve timeout (%.0fs)%s", self.name, timeout,
                         "" if gesendet else " -- Kanal die ganze Zeit belegt")

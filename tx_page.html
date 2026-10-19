@@ -2462,6 +2462,8 @@ let authToken = localStorage.getItem("frn_token")    || null;
 let callsign  = localStorage.getItem("frn_callsign") || "";
 let isAdmin   = localStorage.getItem("frn_is_admin") === "true";
 let ws = null, audioCtx = null, micSource = null;
+let micStream = null;   // getUserMedia-Stream -- Tracks in stopAudio() beenden
+let _pttGen = 0;        // je Druck/Loslassen +1: erkennt Loslassen waehrend pttStart wartet
 let workletNode = null, analyser = null;
 let txActive = false, levelTimer = null;
 let clientPollTimer = null;
@@ -3352,6 +3354,15 @@ async function pttStart(e) {
   txActive = true;
   _applyRxGain();      // sofort stumm schalten (kein Echo durch eigene Stimme)
   setStatus("Verbinde...", "");
+  // Losgelassen, waehrend unten noch auf Mikrofon/WS/Worklet gewartet wird?
+  // Dann NICHT mehr PTT_START senden -- sonst sendete das offene Mikro bis
+  // zur TOT-Grenze, ohne dass jemand drueckt (2026-10-19 Review-Fund).
+  const gen = ++_pttGen;
+  const losgelassen = () => {
+    if (gen === _pttGen) return false;
+    txActive = false; _applyRxGain(); stopAudio(); setStatus("BEREIT", "");
+    return true;
+  };
 
   let stream;
   try {
@@ -3367,6 +3378,8 @@ async function pttStart(e) {
     txActive = false; _applyRxGain();
     setStatus("Mikrofon-Fehler: " + err.message, "error"); return;
   }
+  micStream = stream;
+  if (losgelassen()) return;
 
   // AudioContext ohne feste Rate — der Server resampelt sowieso von beliebiger Rate auf 8 kHz.
   audioCtx = new AudioContext();
@@ -3391,14 +3404,16 @@ async function pttStart(e) {
     });
     if (!wsReady) return;
   }
+  if (losgelassen()) return;
 
   try {
     await audioCtx.audioWorklet.addModule(`${TX_BASE}/tx_processor.js`);
   } catch(err) {
     txActive = false; _applyRxGain();
     setStatus("AudioWorklet-Fehler: " + err.message, "error");
-    ws.close(); return;
+    stopAudio(); ws.close(); return;
   }
+  if (losgelassen()) return;
 
   micSource   = audioCtx.createMediaStreamSource(stream);
   workletNode = new AudioWorkletNode(audioCtx, "tx-processor");
@@ -3416,6 +3431,7 @@ async function pttStart(e) {
 
 function pttStop(e) {
   if (e) e.preventDefault();
+  _pttGen++;
   if (!txActive && !clipActive) { stopAudio(); return; }
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ cmd: "PTT_STOP" }));
@@ -3439,6 +3455,9 @@ function stopAudio() {
   if (micSource)   { micSource.disconnect();   micSource   = null; }
   if (analyser)    { analyser.disconnect();     analyser    = null; }
   if (audioCtx)    { audioCtx.close();          audioCtx    = null; }
+  // Mikrofon wirklich freigeben -- sonst bleibt die Mikro-Anzeige an und iOS
+  // im Aufnahme-Modus (leisere Wiedergabe)
+  if (micStream)   { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
 }
 
 function onWsMessage(evt) {
