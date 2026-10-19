@@ -1250,13 +1250,20 @@ class TXServer:
     @staticmethod
     def _speaker_id(username: str) -> str:
         """Benutzername → Sprecher-ID für den Voice-Server (a-z0-9_-)."""
-        return re.sub(r"[^a-z0-9_\-]", "_", username.lower())[:40]
+        # Ersetzte Zeichen machten verschiedene Namen gleich (joerg_k@gmx.de
+        # und joerg.k@gmx.de -> joerg_k_gmx_de) -- dann eindeutiger Anhang
+        name = username.lower()
+        spk = re.sub(r"[^a-z0-9_\-]", "_", name)
+        if spk == name and len(spk) <= 40:
+            return spk
+        return f"{spk[:31]}_{hashlib.sha1(name.encode()).hexdigest()[:8]}"
 
     def _user_speaker(self, username: str) -> str:
         """Sprecher-ID des Users, wenn er ein eigenes Sample hat, sonst default."""
         info = self.users.get((username or "").lower())
         if info and info.get("voice", {}).get("sample"):
-            return self._speaker_id(username)
+            # ID steht im gespeicherten Pfad (voices/<id>.wav)
+            return Path(info["voice"]["sample"]).stem
         return "default"
 
     _GTTS_MAX_CHARS = 180  # Sicherheitsmarge unter dem ~200-Zeichen-Limit des
@@ -6623,6 +6630,12 @@ class TXServer:
                      "aktiviert" if ar["enabled"] else "deaktiviert")
         return web.json_response({"enabled": bool(ar.get("enabled", False))})
 
+    def _voice_server_hdrs(self) -> dict:
+        """Optionaler Schluessel fuer Uploads an den Voice-Server
+        (voice.voice_server_token = VOICE_TOKEN dort)."""
+        tok = str(self.cfg.get("voice", {}).get("voice_server_token") or "")
+        return {"X-Voice-Token": tok} if tok else {}
+
     def _voice_server_base(self) -> str:
         """Basis-URL des XTTS-Voice-Servers (xtts_url ohne /tts) fuer den
         Stimm-Sample-Upload -- IMMER XTTS, unabhaengig davon welche Engine
@@ -6695,10 +6708,15 @@ class TXServer:
         if len(raw) < 10000:
             return web.json_response({"error": "Aufnahme zu kurz"}, status=400)
 
-        spk        = self._speaker_id(uname)
+        # Vorhandene ID behalten (Voice-Server kennt sie schon)
+        alt        = (user.get("voice") or {}).get("sample")
+        spk        = Path(alt).stem if alt else self._speaker_id(uname)
         voices_dir = Path(__file__).parent / "voices"
         voices_dir.mkdir(exist_ok=True)
-        wav_path   = voices_dir / f"{spk}.wav"
+        ziel_path  = voices_dir / f"{spk}.wav"
+        # Erst in eine Zwischendatei: ein zu kurzer Upload ueberschrieb und
+        # loeschte sonst die gute vorhandene Probe (2026-10-19 Review-Fund)
+        wav_path   = voices_dir / f".{spk}-{uuid.uuid4().hex[:8]}.wav"
 
         # Browser-Audio (webm/opus/wav) → 24 kHz mono s16, normalisiert
         ffm = await asyncio.create_subprocess_exec(
@@ -6712,6 +6730,7 @@ class TXServer:
         )
         await ffm.communicate(input=raw)
         if ffm.returncode != 0 or not wav_path.exists():
+            wav_path.unlink(missing_ok=True)
             return web.json_response({"error": "Audio-Konvertierung fehlgeschlagen"},
                                      status=400)
         import wave as _wave
@@ -6730,20 +6749,25 @@ class TXServer:
         # An Voice-Server übertragen
         base = self._voice_server_base()
         if not base:
+            wav_path.unlink(missing_ok=True)
             return web.json_response({"error": "Voice-Server nicht konfiguriert"},
                                      status=503)
         try:
             timeout = aiohttp.ClientTimeout(total=30)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
                 async with sess.post(f"{base}/speaker/{spk}",
-                                     data=wav_path.read_bytes()) as resp:
+                                     data=wav_path.read_bytes(),
+                                     headers=self._voice_server_hdrs()) as resp:
                     rdata = await resp.json()
                     if resp.status != 200:
+                        wav_path.unlink(missing_ok=True)
                         return web.json_response(
                             {"error": rdata.get("error", "Voice-Server-Fehler")},
                             status=502)
         except Exception as e:
+            wav_path.unlink(missing_ok=True)
             return web.json_response({"error": f"Voice-Server: {e}"}, status=502)
+        os.replace(wav_path, ziel_path)
 
         user.setdefault("voice", {})["sample"] = f"voices/{spk}.wav"
         self._save_users()
@@ -8175,17 +8199,18 @@ class TXServer:
                     {"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
             # Dienst passend zum enabled-Flag schalten
             try:
-                if cl.get("enabled"):
-                    subprocess.run(["systemctl", "enable", "--now", "frn-crosslink"],
-                                   capture_output=True, timeout=15)
-                else:
-                    subprocess.run(["systemctl", "disable", "--now", "frn-crosslink"],
-                                   capture_output=True, timeout=15)
+                # In einem Thread: bis zu 15 s haette sonst der ganze Server
+                # gestanden (PTT, Bot, alle Seiten)
+                aktion = "enable" if cl.get("enabled") else "disable"
+                await asyncio.to_thread(
+                    subprocess.run, ["systemctl", aktion, "--now", "frn-crosslink"],
+                    capture_output=True, timeout=15)
             except Exception as e:
                 log.warning("Crosslink-Dienst konnte nicht umgeschaltet werden: %s", e)
 
-        r = subprocess.run(["systemctl", "is-active", "frn-crosslink"],
-                          capture_output=True, text=True, timeout=10)
+        r = await asyncio.to_thread(
+            subprocess.run, ["systemctl", "is-active", "frn-crosslink"],
+            capture_output=True, text=True, timeout=10)
         active = r.stdout.strip() == "active"
         out = dict(cl)
         out["password"] = self._CROSSLINK_MASK if cl.get("password") else ""
@@ -9478,6 +9503,9 @@ class TXServer:
 
         if not username:
             return web.json_response({"error": "username required"}, status=400)
+        if username in self.users:
+            # Vorher still ueberschrieben -- samt Stimme und Einstellungen
+            return web.json_response({"error": "Benutzer existiert bereits"}, status=409)
         if not frn_only:
             if not password:
                 return web.json_response({"error": "password required"}, status=400)
@@ -9954,7 +9982,7 @@ class TXServer:
 
             mx_hosts = []
             try:
-                mx_hosts = _dns_mx(email_domain)
+                mx_hosts = await asyncio.to_thread(_dns_mx, email_domain)
             except Exception:
                 pass
             if not mx_hosts:
@@ -9962,8 +9990,9 @@ class TXServer:
             has_ipv4 = False
             for mx in mx_hosts:
                 try:
-                    if _socket.getaddrinfo(mx.rstrip('.'), 25, family=_socket.AF_INET,
-                                           type=_socket.SOCK_STREAM):
+                    if await asyncio.get_running_loop().getaddrinfo(
+                            mx.rstrip('.'), 25, family=_socket.AF_INET,
+                            type=_socket.SOCK_STREAM):
                         has_ipv4 = True
                         break
                 except Exception:
@@ -10590,8 +10619,8 @@ class TXServer:
         if not _ARCHIVE_AVAILABLE:
             return web.json_response({"error": "archive not available"}, status=503)
         q      = request.rel_url.query
-        limit  = min(int(q.get("limit",  100)), 500)
-        offset = int(q.get("offset", 0))
+        limit  = self._int_param(q, "limit", 100, 1, 500)
+        offset = self._int_param(q, "offset", 0, 0, 10**9)
         room   = q.get("room",   "")
         search = q.get("search", "")
         date_from = q.get("from", "")
@@ -10616,7 +10645,7 @@ class TXServer:
     async def handle_archive_stats(self, request):
         if not _ARCHIVE_AVAILABLE:
             return web.json_response({"error": "archive not available"}, status=503)
-        days = int(request.rel_url.query.get("days", 30))
+        days = self._int_param(request.rel_url.query, "days", 30, 1, 3650)
         loop = asyncio.get_running_loop()
         stats = await loop.run_in_executor(None, _archive.get_stats, days)
         return web.json_response(stats)
@@ -10652,8 +10681,8 @@ class TXServer:
         if not _ARCHIVE_AVAILABLE:
             return web.json_response({"error": "archive not available"}, status=503)
         q      = request.rel_url.query
-        limit  = min(int(q.get("limit", 100)), 500)
-        offset = int(q.get("offset", 0))
+        limit  = self._int_param(q, "limit", 100, 1, 500)
+        offset = self._int_param(q, "offset", 0, 0, 10**9)
         room   = q.get("room",   "")
         search = q.get("search", "")
         loop = asyncio.get_running_loop()
@@ -10673,6 +10702,8 @@ class TXServer:
     # umgewandelt.
     _M4A_CACHE_MAX = 3000        # Dateien; darueber fliegen die aeltesten raus
 
+    _m4a_sperren: dict = {}
+
     def _m4a_pfad(self, opus_path: Path) -> Path:
         d = _archive.AUDIO_DIR.parent / "audio-m4a"
         d.mkdir(parents=True, exist_ok=True)
@@ -10685,6 +10716,16 @@ class TXServer:
                 f.unlink()
             except OSError:
                 pass
+
+    @staticmethod
+    def _int_param(q, name: str, standard: int, mini: int, maxi: int) -> int:
+        """Zahl aus der Query, begrenzt. limit=-1 hiess fuer SQLite "alles"
+        (ganzes Archiv ohne Anmeldung), limit=abc gab einen 500 (2026-10-19)."""
+        try:
+            wert = int(q.get(name, standard))
+        except (TypeError, ValueError):
+            wert = standard
+        return max(mini, min(maxi, wert))
 
     async def handle_archive_audio(self, request):
         if not _ARCHIVE_AVAILABLE:
@@ -10699,29 +10740,40 @@ class TXServer:
 
         if request.query.get("fmt") == "m4a":
             ziel = self._m4a_pfad(audio_path)
-            if not ziel.exists() or ziel.stat().st_size == 0:
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y", "-loglevel", "error", "-i", str(audio_path),
-                    "-c:a", "aac", "-b:a", "48k", "-movflags", "+faststart",
-                    str(ziel),
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.PIPE)
-                try:
-                    _, err = await asyncio.wait_for(proc.communicate(), timeout=60.0)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    err = b"Zeitueberschreitung"
-                if proc.returncode != 0 or not ziel.exists() or ziel.stat().st_size == 0:
-                    log.warning("AAC-Umwandlung fehlgeschlagen (%s): %.200s",
-                                filename, (err or b"").decode("utf-8", "replace"))
+            # Je Datei nur eine Umwandlung; Safari schickt beim Abspielen
+            # mehrere Bereichsanfragen parallel. Die zweite wartete nicht und
+            # lieferte die halb geschriebene Datei, oder ein zweites ffmpeg -y
+            # kuerzte sie unter der ersten weg (2026-10-19 Review-Fund).
+            if len(self._m4a_sperren) > 500:   # nur belegte behalten
+                self._m4a_sperren = {k: v for k, v in self._m4a_sperren.items() if v.locked()}
+            sperre = self._m4a_sperren.setdefault(ziel.name, asyncio.Lock())
+            async with sperre:
+                # Aelter als das Original = Cache eines frueheren Eintrags mit
+                # demselben (wiederverwendeten) Dateinamen -> neu umwandeln
+                veraltet = (not ziel.exists() or ziel.stat().st_size == 0
+                            or ziel.stat().st_mtime < audio_path.stat().st_mtime)
+                if veraltet:
+                    tmp = ziel.with_name(f".{ziel.stem}-{uuid.uuid4().hex[:8]}.m4a")
+                    proc = await asyncio.create_subprocess_exec(
+                        "ffmpeg", "-y", "-loglevel", "error", "-i", str(audio_path),
+                        "-c:a", "aac", "-b:a", "48k", "-movflags", "+faststart",
+                        str(tmp),
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.PIPE)
                     try:
-                        ziel.unlink()
-                    except OSError:
-                        pass
-                    # Lieber das Original ausliefern als gar nichts
-                    return web.FileResponse(audio_path,
-                                            headers={"Content-Type": "audio/ogg"})
-                self._m4a_aufraeumen(ziel.parent)
+                        _, err = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        err = b"Zeitueberschreitung"
+                    if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+                        log.warning("AAC-Umwandlung fehlgeschlagen (%s): %.200s",
+                                    filename, (err or b"").decode("utf-8", "replace"))
+                        tmp.unlink(missing_ok=True)
+                        # Lieber das Original ausliefern als gar nichts
+                        return web.FileResponse(audio_path,
+                                                headers={"Content-Type": "audio/ogg"})
+                    os.replace(tmp, ziel)   # erst fertig, dann sichtbar
+                    self._m4a_aufraeumen(ziel.parent)
             # FileResponse beherrscht Bereichsanfragen -- die braucht Safari.
             return web.FileResponse(ziel, headers={"Content-Type": "audio/mp4"})
 

@@ -594,6 +594,9 @@ def delete_entry(entry_id: int) -> bool:
     if entry.get("audio_file"):
         try:
             (AUDIO_DIR / entry["audio_file"]).unlink(missing_ok=True)
+            # iOS-Cache (frn_tx_server._m4a_pfad) mit -- der Dateiname wird
+            # wiederverwendet, sonst spielte ein neuer Eintrag den alten Ton
+            (AUDIO_DIR.parent / "audio-m4a" / (Path(entry["audio_file"]).stem + ".m4a")).unlink(missing_ok=True)
         except OSError as e:
             log.warning("Audio-Datei nicht geloescht (%s): %s", entry["audio_file"], e)
     return True

@@ -18,6 +18,7 @@ Umgebungsvariablen:
     CONFIG          Pfad zu config.json (für initial_prompt, default: ./config/config.json)
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -64,6 +65,9 @@ model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE)
 log.info("Modell geladen. Whisper API auf Port %d", PORT)
 
 
+_modell_sperre = asyncio.Lock()   # ein Modell, eine Rechnung zur Zeit
+
+
 async def handle_transcribe(request: web.Request) -> web.Response:
     reader = await request.multipart()
     wav_data = None
@@ -85,8 +89,12 @@ async def handle_transcribe(request: web.Request) -> web.Response:
     try:
         initial_prompt = _load_initial_prompt()
         t0 = time.time()
-        segments, info = model.transcribe(
-            tmp_path,
+        # Im Thread: transcribe blockiert Sekunden lang, solange standen alle
+        # anderen Anfragen (auch /health) -- inkl. Segment-Auswertung, die
+        # bei faster-whisper erst beim Iterieren rechnet
+        def _rechnen():
+            segs, inf = model.transcribe(
+                tmp_path,
             language=language,
             beam_size=5,
             best_of=3,
@@ -98,7 +106,10 @@ async def handle_transcribe(request: web.Request) -> web.Response:
             log_prob_threshold=-1.0,
             no_speech_threshold=0.8,
             temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-        )
+            )
+            return list(segs), inf
+        async with _modell_sperre:
+            segments, info = await asyncio.to_thread(_rechnen)
         parts = [s.text.strip() for s in segments
                  if getattr(s, "no_speech_prob", 0.0) <= 0.8
                  and s.text.strip().lower() not in HALLUCINATIONS]
