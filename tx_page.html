@@ -3766,9 +3766,9 @@ function renderClips(clips) {
     <div class="clip-item">
       <button class="clip-btn${c.has_recording ? " has-recording" : ""}"
         data-id="${esc(c.id)}" data-label="${esc(c.label)}"
-        onclick="sendClip('${esc(c.id)}','${esc(c.label)}')">${esc(c.label)}</button>
-      <button class="clip-rec-btn" title="Eigene Aufnahme"
-        onclick="openRecordModal('${esc(c.id)}','${esc(c.label)}',${c.has_recording})">🎙</button>
+        onclick="sendClip(${escJs(c.id)},${escJs(c.label)})">${esc(c.label)}</button>
+      ${isAdmin ? `<button class="clip-rec-btn" title="Eigene Aufnahme"
+        onclick="openRecordModal(${escJs(c.id)},${escJs(c.label)},${c.has_recording})">🎙</button>` : ""}
     </div>`).join("");
 }
 
@@ -4335,7 +4335,7 @@ async function loadUsers() {
         <button class="btn-icon edit" style="margin-right:4px"
           onclick="toggleUserEdit(this)">✎</button>
         <button class="btn-icon"
-          onclick="deleteUser('${esc(u.username)}')">✕</button>
+          onclick="deleteUser(${escJs(u.username)})">✕</button>
       </td>`;
     tbody.appendChild(tr);
 
@@ -4454,7 +4454,7 @@ async function loadRooms() {
       <td>${esc(room.name)}</td>
       <td><small>${esc(room.callsign)}</small></td>
       <td><small>${esc(room.frn_server)}:${room.frn_port}</small></td>
-      <td><button class="btn-icon" onclick="deleteRoom('${esc(room.mount)}')">✕</button></td>`;
+      <td><button class="btn-icon" onclick="deleteRoom(${escJs(room.mount)})">✕</button></td>`;
     tbody.appendChild(tr);
   });
 }
@@ -4926,9 +4926,9 @@ async function loadNotizVorschlaege(antwort) {
         <pre style="white-space:pre-wrap;margin:4px 0">${esc(v.quelle || "")}</pre></details>
       <div style="display:flex;gap:6px;margin-top:6px">
         <button class="btn-save" style="padding:3px 10px;font-size:.7rem"
-                onclick="notizVorschlag('${esc(v.id)}','uebernehmen',this)">ÜBERNEHMEN</button>
+                onclick="notizVorschlag(${escJs(v.id)},'uebernehmen',this)">ÜBERNEHMEN</button>
         <button class="btn-save" style="padding:3px 10px;font-size:.7rem;background:none;border:1px solid var(--dim);color:var(--muted)"
-                onclick="notizVorschlag('${esc(v.id)}','verwerfen',this)">VERWERFEN</button>
+                onclick="notizVorschlag(${escJs(v.id)},'verwerfen',this)">VERWERFEN</button>
       </div></div>`;
   }).join("");
 }
@@ -5792,7 +5792,7 @@ async function loadSpeakerIdSettings() {
       list.innerHTML = d.enrollments.map(e => `
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.82rem">
           <span style="flex:1">${esc(e.name)} <span style="color:var(--muted)">(${e.samples} Beispiel${e.samples === 1 ? "" : "e"})</span></span>
-          <button type="button" onclick="deleteSpeakerEnrollment('${esc(e.name)}', this)"
+          <button type="button" onclick="deleteSpeakerEnrollment(${escJs(e.name)}, this)"
                   style="background:none;border:1px solid var(--dim);color:var(--muted);
                          border-radius:6px;padding:3px 8px;cursor:pointer;font-size:.78rem">✕ löschen</button>
         </div>`).join("");
@@ -5865,7 +5865,7 @@ function renderSprecherUebersicht() {
                 : z.schwach ? '<span class="sid-tag sid-schwach">schwach</span>' : "";
       const datei = (z.quelle.match(/\S+\.opus$/) || [])[0];
       const play = datei ? `<button type="button" class="sid-knopf" title="Aufnahme anhören"
-                    onclick="sidAnhoeren(this, '${esc(datei)}')">▶</button>` : "";
+                    onclick="sidAnhoeren(this, ${escJs(datei)})">▶</button>` : "";
       const quelle = z.archiv_id ? `Archiv #${z.archiv_id}` : (z.quelle ? esc(z.quelle) : "unbekannt");
       return `<tr class="${z.grenzwertig ? "sid-zeile-grenz" : ""}">
         <td class="sid-zahl">#${z.index + 1}</td>
@@ -5874,11 +5874,11 @@ function renderSprecherUebersicht() {
         <td>${z.fremd ? `${esc(z.fremd)} <span class="sid-zahl">${sidZahl(z.fremd_sim)}</span>` : "–"}</td>
         <td>${tag}</td>
         <td style="text-align:right"><button type="button" class="sid-knopf sid-loeschen"
-            onclick="sidProbeLoeschen(this, '${esc(p.name)}', ${z.index}, '${z.fp}')">löschen</button></td>
+            onclick="sidProbeLoeschen(this, ${escJs(p.name)}, ${z.index}, '${z.fp}')">löschen</button></td>
       </tr>`;
     }).join("");
     const alleKnopf = probl ? `<button type="button" class="sid-knopf sid-loeschen" style="margin-top:6px"
-        onclick="sidGrenzLoeschen(this, '${esc(p.name)}')">Alle ${probl} grenzwertigen löschen</button>` : "";
+        onclick="sidGrenzLoeschen(this, ${escJs(p.name)})">Alle ${probl} grenzwertigen löschen</button>` : "";
     html += `<details class="sid-person" ${probl ? "open" : ""}>
       <summary><b>${esc(p.name)}</b> <span class="sid-kopf">${kopf}</span></summary>
       <div style="overflow-x:auto"><table class="sid-tabelle">
@@ -5968,7 +5968,7 @@ async function loadDebugTraces() {
         const playable = !!s.audio;
         const stepCls = "dbg-step" + (playable ? " dbg-playable" : "");
         const stepId = playable ? ` id="dbg-step-${esc(s.audio)}"` : "";
-        const click = playable ? ` onclick="playDebugAudio('${esc(s.audio)}', this)"` : "";
+        const click = playable ? ` onclick="playDebugAudio(${escJs(s.audio)}, this)"` : "";
         const playIcon = playable ? `<span title="abspielen">▶</span> ` : "";
         return `<div class="${stepCls}"${stepId}${click}>
                   <span class="dbg-dot ${cls}"></span>
@@ -5989,7 +5989,7 @@ async function loadDebugTraces() {
                     style="flex:0 0 220px;background:var(--bg);color:var(--text);border:1px solid var(--border);
                            border-radius:6px;padding:5px 8px;font-size:.78rem">${dbgModelOptions()}</select>
              <button class="btn-save" style="padding:5px 10px;font-size:.78rem"
-                     onclick="replayTrace('${esc(tr.room)}', ${tr.ts}, this)">Nochmal testen</button>
+                     onclick="replayTrace(${escJs(tr.room)}, ${tr.ts}, this)">Nochmal testen</button>
              <div class="dbg-replay-result" style="display:none;font-size:.8rem;flex-basis:100%"></div>
            </div>`
         : "";
@@ -6000,7 +6000,7 @@ async function loadDebugTraces() {
                     style="flex:0 0 200px;background:var(--bg);color:var(--text);border:1px solid var(--border);
                            border-radius:6px;padding:5px 8px;font-size:.78rem">
              <button class="btn-save" style="padding:5px 10px;font-size:.78rem"
-                     onclick="enrollSpeaker('${esc(audioStep.audio)}', this)">Als Sprecher einlernen</button>
+                     onclick="enrollSpeaker(${escJs(audioStep.audio)}, this)">Als Sprecher einlernen</button>
              <div class="dbg-enroll-result" style="display:none;font-size:.8rem;flex-basis:100%"></div>
            </div>`
         : "";
@@ -6028,7 +6028,14 @@ function showMsg(id, text, cls) {
 function esc(s) {
   return String(s ?? "")
     .replace(/&/g,"&amp;").replace(/</g,"&lt;")
-    .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+// Wert als JS-String-Literal fuer onclick="f(${escJs(x)})". esc() allein
+// reicht dort nicht: der Browser dekodiert &#39; vor dem JS zurueck zu ' und
+// "Wie geht's" brach den Aufruf -- oder ein praeparierter Name fuehrte
+// Skript aus (2026-10-19 Review-Fund).
+function escJs(s) {
+  return esc(JSON.stringify(String(s ?? "")));
 }
 </script>
 </body>

@@ -360,7 +360,7 @@ async function loadSpeakerIdSettings() {
       list.innerHTML = d.enrollments.map(e => `
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.82rem">
           <span style="flex:1">${esc(e.name)} <span style="color:var(--muted)">(${e.samples} Beispiel${e.samples === 1 ? "" : "e"})</span></span>
-          <button type="button" onclick="deleteSpeakerEnrollment('${esc(e.name)}')"
+          <button type="button" onclick="deleteSpeakerEnrollment(${escJs(e.name)})"
                   style="background:none;border:1px solid var(--dim);color:var(--muted);
                          border-radius:6px;padding:3px 8px;cursor:pointer;font-size:.78rem">✕ löschen</button>
         </div>`).join("");
@@ -418,7 +418,7 @@ async function loadDebugTraces() {
         const playable = !!s.audio;
         const stepCls = "dbg-step" + (playable ? " dbg-playable" : "");
         const stepId = playable ? ` id="dbg-step-${esc(s.audio)}"` : "";
-        const click = playable ? ` onclick="playDebugAudio('${esc(s.audio)}', this)"` : "";
+        const click = playable ? ` onclick="playDebugAudio(${escJs(s.audio)}, this)"` : "";
         const playIcon = playable ? `<span title="abspielen">▶</span> ` : "";
         return `<div class="${stepCls}"${stepId}${click}>
                   <span class="dbg-dot ${cls}"></span>
@@ -439,7 +439,7 @@ async function loadDebugTraces() {
                     style="flex:0 0 220px;background:var(--bg);color:var(--text);border:1px solid var(--border);
                            border-radius:6px;padding:5px 8px;font-size:.78rem">${dbgModelOptions()}</select>
              <button class="btn-save" style="padding:5px 10px;font-size:.78rem"
-                     onclick="replayTrace('${esc(tr.room)}', ${tr.ts}, this)">Nochmal testen</button>
+                     onclick="replayTrace(${escJs(tr.room)}, ${tr.ts}, this)">Nochmal testen</button>
              <div class="dbg-replay-result" style="display:none;font-size:.8rem;flex-basis:100%"></div>
            </div>`
         : "";
@@ -450,7 +450,7 @@ async function loadDebugTraces() {
                     style="flex:0 0 200px;background:var(--bg);color:var(--text);border:1px solid var(--border);
                            border-radius:6px;padding:5px 8px;font-size:.78rem">
              <button class="btn-save" style="padding:5px 10px;font-size:.78rem"
-                     onclick="enrollSpeaker('${esc(audioStep.audio)}', this)">Als Sprecher einlernen</button>
+                     onclick="enrollSpeaker(${escJs(audioStep.audio)}, this)">Als Sprecher einlernen</button>
              <div class="dbg-enroll-result" style="display:none;font-size:.8rem;flex-basis:100%"></div>
            </div>`
         : "";
@@ -506,7 +506,14 @@ function showMsg(id, text, cls) {
 function esc(s) {
   return String(s ?? "")
     .replace(/&/g,"&amp;").replace(/</g,"&lt;")
-    .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+// Wert als JS-String-Literal fuer onclick="f(${escJs(x)})". esc() allein
+// reicht dort nicht: der Browser dekodiert &#39; vor dem JS zurueck zu ' und
+// "Wie geht's" brach den Aufruf -- oder ein praeparierter Name fuehrte
+// Skript aus (2026-10-19 Review-Fund).
+function escJs(s) {
+  return esc(JSON.stringify(String(s ?? "")));
 }
 
 tryStoredToken().then(() => {

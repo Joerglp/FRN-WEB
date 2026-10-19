@@ -23,7 +23,9 @@ import bisect
 from datetime import datetime, timedelta
 import difflib
 import hashlib
+import hmac
 import io
+import ipaddress
 import json
 import logging
 import os
@@ -351,6 +353,10 @@ class FRNTXRoom:
         """Send a text message to the FRN room."""
         if not self._writer or self._writer.is_closing():
             return
+        # Zeilenumbrueche und Tag-Klammern raus: der Text landet roh in der
+        # Protokollzeile, ein \r\n darin schleuste sonst beliebige FRN-Befehle
+        # (TX0, Sperren) ueber unsere Verbindung ein (2026-10-19 Review-Fund).
+        text = re.sub(r"[\r\n]+", " ", str(text)).replace("<", "‹").replace(">", "›")
         try:
             msg = f"TM:\r\n1\r\n<ON>{self.callsign}</ON><TM>{text}</TM>\r\n"
             self._writer.write(msg.encode())
@@ -1021,35 +1027,14 @@ class TXServer:
             if room:
                 await room.send_text(msg)
 
+        # Benutzerverwaltung per Funk-Text ist raus (2026-10-19 Review-Fund):
+        # Absender ist nur das <ON>-Feld, das sich jeder beim FRN-Login frei
+        # gibt -- adduser/deluser liessen sich so faelschen, und "users"
+        # schrieb alle E-Mail-Adressen in den Raum. Nur noch Lesebefehle.
         if cmd == "help":
-            await reply("Befehle: help | users | adduser <email> <cs> | deluser <email> | rooms | status")
-        elif cmd == "users":
-            entries = [f"{u}({v.get('callsign','?')})" + ("[A]" if v.get("is_admin") else "")
-                       for u, v in self.users.items()]
-            await reply("User: " + (", ".join(entries) if entries else "—"))
-        elif cmd == "adduser":
-            if len(parts) < 4:
-                await reply("Verwendung: !web adduser <email> <callsign>")
-                return
-            email, callsign = parts[2].lower(), parts[3]
-            if email in self.users:
-                await reply(f"{email} existiert bereits.")
-                return
-            self.users[email] = {"callsign": callsign, "is_admin": False,
-                                 "frn_only": True, "default_room": ""}
-            self._save_users()
-            await reply(f"Benutzer {email} ({callsign}) angelegt.")
-        elif cmd == "deluser":
-            if len(parts) < 3:
-                await reply("Verwendung: !web deluser <email>")
-                return
-            email = parts[2].lower()
-            if email not in self.users:
-                await reply(f"{email} nicht gefunden.")
-                return
-            del self.users[email]
-            self._save_users()
-            await reply(f"Benutzer {email} gelöscht.")
+            await reply("Befehle: help | rooms | status  (Benutzer: nur ueber die Weboberflaeche)")
+        elif cmd in ("users", "adduser", "deluser"):
+            await reply("Benutzerverwaltung nur noch ueber die Weboberflaeche.")
         elif cmd == "rooms":
             entries = [f"{m}={r.name}" for m, r in self.rooms.items()]
             await reply("Räume: " + (", ".join(entries) if entries else "—"))
@@ -1130,6 +1115,13 @@ class TXServer:
     # ── Token management ───────────────────────────────────────────────────
 
     TOKEN_LIFETIME = 86400   # 24 Stunden
+
+    def _tokens_widerrufen(self, username: str, ausser: str = ""):
+        weg = [t for t, v in self.tokens.items() if v.get("user") == username and t != ausser]
+        for t in weg:
+            del self.tokens[t]
+        if weg:
+            self._save_tokens()
 
     def _token_for(self, username: str) -> str:
         token = secrets.token_hex(24)
@@ -6479,10 +6471,13 @@ class TXServer:
         return ""
 
     async def handle_voice_auto_reply(self, request):
-        """GET: Automatik-Status; POST {enabled}: ein/aus (persistiert)."""
+        """GET: Automatik-Status; POST {enabled}: ein/aus (persistiert, nur Admin)."""
         token = self._token_from(request)
-        if not self._validate_token(token):
+        info = self._validate_token(token)
+        if not info:
             return web.json_response({"error": "unauthorized"}, status=401)
+        if request.method == "POST" and not info.get("is_admin"):
+            return web.json_response({"error": "forbidden"}, status=403)
         ar = self.cfg.setdefault("voice", {}).setdefault("auto_reply", {})
         if request.method == "POST":
             try:
@@ -8765,6 +8760,15 @@ class TXServer:
             del self.tokens[token]
             self._save_tokens()
             return None
+        # Geloeschte Nutzer verlieren den Zugang, herabgestufte Admins die
+        # Admin-Rechte -- auch mit Tokens von vor der Aenderung (2026-10-19).
+        user = self.users.get(info.get("user", ""))
+        if user is None:
+            del self.tokens[token]
+            self._save_tokens()
+            return None
+        if info.get("is_admin") and not user.get("is_admin"):
+            info["is_admin"] = False
         # Sliding window — Token bei jeder Nutzung verlängern
         info["expires"] = time.time() + self.TOKEN_LIFETIME
         return info
@@ -8789,11 +8793,20 @@ class TXServer:
 
     def _client_ip(self, request) -> str:
         """Echte Client-IP: hinter Traefik ist request.remote nur die
-        Docker-Gateway-IP — die echte IP steht in X-Forwarded-For."""
+        Docker-Gateway-IP — die echte IP steht in X-Forwarded-For. Nur dem
+        LETZTEN Eintrag trauen (den haengt Traefik an) und nur, wenn die
+        Anfrage aus dem eigenen Netz kommt -- den ersten Eintrag setzt der
+        Client selbst (2026-10-19 Review-Fund: Rate-Limit umgehbar)."""
+        remote = request.remote or "?"
         xff = request.headers.get("X-Forwarded-For", "")
         if xff:
-            return xff.split(",")[0].strip()
-        return request.remote or "?"
+            try:
+                intern = ipaddress.ip_address(remote).is_private
+            except ValueError:
+                intern = False
+            if intern:
+                return xff.split(",")[-1].strip() or remote
+        return remote
 
     def _mqtt_cfg(self) -> dict | None:
         """MQTT-Zugangsdaten aus config.ini [transcription] (gleiche Quelle wie
@@ -9088,10 +9101,15 @@ class TXServer:
             log.info("FRN auth for %s: AL=%s", email, al)
             if al in ("OK", "ADMIN", "OWNER", "NETOWNER"):
                 return True
-            # AL=BLOCK kann bedeuten dass wir selbst noch verbunden sind —
-            # eigene persistente Verbindung gilt als Beweis gültiger Credentials
+            # AL=BLOCK kann bedeuten dass wir selbst noch verbunden sind. Die
+            # laufende Verbindung beweist aber nur, dass DEREN Passwort stimmt
+            # -- ohne Vergleich kam jeder mit beliebigem Passwort rein, solange
+            # das Opfer gerade verbunden war (2026-10-19 Review-Fund).
             if al == "BLOCK":
-                own_conn = any(k[0] == email for k in self._user_tx_conns)
+                own_conn = any(
+                    k[0] == email and hmac.compare_digest(
+                        str(c.password).encode(), password.encode())
+                    for k, c in self._user_tx_conns.items())
                 if own_conn:
                     log.info("FRN auth %s: AL=BLOCK, aber eigene Verbindung aktiv — OK", email)
                     return True
@@ -9173,6 +9191,16 @@ class TXServer:
             return web.json_response(
                 {"error": "Zu viele Fehlversuche — bitte eine Minute warten"},
                 status=429)
+        # Versuch VOR der (langsamen) Pruefung zaehlen, sonst kommen parallele
+        # Anfragen alle an der Grenze vorbei; Erfolg nimmt ihn wieder zurueck.
+        versuch = time.time()
+        fails.append(versuch)
+
+        def _erfolg():
+            try:
+                self._login_fails.get(ip, []).remove(versuch)
+            except ValueError:
+                pass
 
         # ── 1. Lokale Authentifizierung ──────────────────────────────────
         if auth_mode in ("local", "both"):
@@ -9183,6 +9211,7 @@ class TXServer:
                     user["password_hash"] = hash_password(password)
                     self._save_users()
                     log.info("Passwort-Hash für '%s' auf PBKDF2 migriert", username)
+                _erfolg()
                 token = self._token_for(username)
                 rooms = [{"mount": m, "name": r.name} for m, r in self.rooms.items()]
                 return web.json_response({
@@ -9216,6 +9245,7 @@ class TXServer:
                 return web.json_response({"error": "Ungültige Zeichen in Zugangsdaten"}, status=400)
             ok = await self._try_frn_auth(username, password, callsign)
             if ok:
+                _erfolg()
                 # Präferenzen aus gespeichertem FRN-Eintrag laden (falls vorhanden)
                 prefs = self.users.get(username, {})
                 if prefs.get("frn_only"):
@@ -9252,7 +9282,6 @@ class TXServer:
                     "rooms":        rooms,
                 })
 
-        self._login_fails[ip].append(time.time())
         await asyncio.sleep(1)
         return web.json_response(
             {"error": "Ungültiger Benutzername oder Passwort"}, status=401)
@@ -9347,7 +9376,7 @@ class TXServer:
         return web.json_response({"ok": True})
 
     async def handle_admin_users_update(self, request):
-        _, err = await self._require_admin(request)
+        info, err = await self._require_admin(request)
         if err:
             return err
         username = request.match_info["username"].lower()
@@ -9365,6 +9394,8 @@ class TXServer:
             if len(body["password"]) < 4:
                 return web.json_response({"error": "password too short"}, status=400)
             u["password_hash"] = hash_password(body["password"])
+            # Neues Passwort = alte Sitzungen raus (die eigene bleibt)
+            self._tokens_widerrufen(username, ausser=self._token_from(request))
         if "is_admin" in body:
             u["is_admin"] = bool(body["is_admin"])
         if "default_room" in body:
@@ -9386,10 +9417,7 @@ class TXServer:
         if username not in self.users:
             return web.json_response({"error": "not found"}, status=404)
         del self.users[username]
-        # invalidate any active tokens for this user
-        to_del = [t for t, v in self.tokens.items() if v["user"] == username]
-        for t in to_del:
-            del self.tokens[t]
+        self._tokens_widerrufen(username)   # auch auf Disk, sonst nach Neustart wieder gueltig
         self._save_users()
         log.info("Admin: deleted user '%s'", username)
         return web.json_response({"ok": True})
@@ -9869,9 +9897,10 @@ class TXServer:
     async def handle_clip_recording_upload(self, request):
         """POST /api/clips/{id}/recording — save custom audio for a clip."""
         import re as _re
-        token = self._token_from(request)
-        if not self._validate_token(token):
-            return web.json_response({"error": "unauthorized"}, status=401)
+        # Clips sind fuer alle gleich -- aendern nur Admins (2026-10-19)
+        _, err = await self._require_admin(request)
+        if err:
+            return err
 
         clip_id = request.match_info["id"]
         if not _re.match(r'^[a-z0-9_]{1,40}$', clip_id):
@@ -9916,9 +9945,10 @@ class TXServer:
     async def handle_clip_recording_delete(self, request):
         """DELETE /api/clips/{id}/recording — remove custom recording, fall back to TTS."""
         import re as _re
-        token = self._token_from(request)
-        if not self._validate_token(token):
-            return web.json_response({"error": "unauthorized"}, status=401)
+        # Clips sind fuer alle gleich -- aendern nur Admins (2026-10-19)
+        _, err = await self._require_admin(request)
+        if err:
+            return err
 
         clip_id = request.match_info["id"]
         if not _re.match(r'^[a-z0-9_]{1,40}$', clip_id):
