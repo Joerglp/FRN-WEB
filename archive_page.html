@@ -1123,10 +1123,22 @@ function onAutoReloadToggle() {
   }
 }
 
+function _archivBeschaeftigt() {
+  const main = document.getElementById('main-content');
+  if ([...main.querySelectorAll('audio')].some(a => !a.paused)) return true;
+  const fokus = document.activeElement;
+  if (fokus && main.contains(fokus) && /^(INPUT|SELECT|TEXTAREA)$/.test(fokus.tagName)) return true;
+  if ([...main.querySelectorAll('input[type=text], textarea')].some(i => i.value.trim())) return true;
+  return offset > LIMIT;
+}
+
 function scheduleRefresh() {
   cancelRefresh();
   if (!autoReloadEnabled()) return;
   refreshTimer = setTimeout(() => {
+    // Laeuft eine Wiedergabe, wird getippt oder ist mehr als die erste Seite
+    // geladen, nicht alles neu aufbauen -- spaeter nochmal (2026-10-19)
+    if (_archivBeschaeftigt()) { scheduleRefresh(); return; }
     const search = document.getElementById('f-search').value.trim();
     const room   = document.getElementById('f-room').value;
     const dfrom  = combineDateTime('f-from', 'f-from-time');

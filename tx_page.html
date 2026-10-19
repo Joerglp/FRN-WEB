@@ -2791,7 +2791,7 @@ document.addEventListener("visibilitychange", () => {
       connectRxWs(mount);
       // Haupt-/Chat-WS ebenfalls neu verbinden — sie reißt im Standby ab und
       // der setTimeout-Reconnect greift bei eingefrorenen Hintergrund-Tabs nicht.
-      connectChatWs(mount);
+      reconnectChatWs(mount);
     }
   }
 });
@@ -2956,9 +2956,7 @@ function connectRxWs(mount) {
     // Code 4001 = Token abgelaufen → neu einloggen
     if (evt.code === 4001) {
       console.warn("Token abgelaufen — logout");
-      authToken = null;
-      localStorage.removeItem("frn_token");
-      showLogin();
+      doLogout();   // (frueher showLogin() -- gab es nicht, ReferenceError)
       return;
     }
 
@@ -3107,9 +3105,15 @@ function connectChatWs(room) {
   ws.binaryType = "arraybuffer";
   ws.onmessage = onWsMessage;
   ws.onerror   = () => {};
-  ws.onclose   = () => {
+  ws.onclose   = (evt) => {
+    if (evt.code === 4001) { doLogout(); return; }   // Token abgelaufen
     stopAudio();
+    if (clipActive) {   // Clip/Sprachnachricht lief ueber diese Verbindung
+      setClipButtonsSending(null);
+      window._voiceSending = false; _voiceBtnReset();
+    }
     txActive = false; clipActive = false;
+    updateClipButtons();
     _applyRxGain();
     document.getElementById("ptt-btn").classList.remove("active");
     document.getElementById("led-tx").className = "led";
@@ -3118,6 +3122,29 @@ function connectChatWs(room) {
       _chatWsReconnectTimer = setTimeout(() => connectChatWs(_chatWsRoom), 5000);
     }
   };
+}
+
+// Clip und Sprachnachricht senden ueber die Chat-Verbindung, statt eine
+// zweite zu oeffnen: die verwaiste zweite lieferte jede Chatzeile doppelt,
+// und ihr spaeteres onclose beendete fremde PTTs (2026-10-19 Review-Fund).
+async function _chatWsBereit(room) {
+  connectChatWs(room);
+  return await new Promise(res => {
+    const t0 = Date.now();
+    const check = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN && _chatWsRoom === room) { clearInterval(check); res(true); }
+      else if (Date.now() - t0 > 5000) { clearInterval(check); res(false); }
+    }, 50);
+  });
+}
+
+// Nach Standby: halb toten Socket nicht weiterbenutzen (readyState bleibt
+// OPEN, obwohl die TCP-Verbindung laengst weg ist) -- immer neu aufbauen.
+function reconnectChatWs(room) {
+  if (txActive || clipActive) { connectChatWs(room); return; }
+  clearTimeout(_chatWsReconnectTimer);
+  if (ws) { const old = ws; ws = null; _chatWsRoom = null; old.onclose = null; old.close(); }
+  connectChatWs(room);
 }
 
 async function loadRoomClients(mount) {
@@ -3817,32 +3844,10 @@ async function sendClip(id, label) {
   setClipButtonsSending(id);
   setStatus("⏳ Verbinde für Clip...", "");
 
-  // Öffne frische WS-Verbindung (kein Audio-Worklet nötig)
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(room)}`,
-                   ["frn", "frn.token." + authToken]);
-  ws.binaryType = "arraybuffer";
-  ws.onmessage  = onWsMessage;
-  ws.onerror    = () => {
-    clipActive = false; setClipButtonsSending(null); updateClipButtons();
-    setStatus("WebSocket-Fehler", "error");
-  };
-  ws.onclose    = () => {
-    if (clipActive) {
-      clipActive = false; setClipButtonsSending(null); updateClipButtons();
-      setStatus("BEREIT", "");
-    }
-    document.getElementById("led-tx").className = "led";
-  };
-
-  const ok = await new Promise(res => {
-    ws.onopen = () => res(true);
-    setTimeout(() => res(false), 5000);
-  });
+  const ok = await _chatWsBereit(room);
   if (!ok) {
     clipActive = false; setClipButtonsSending(null); updateClipButtons();
     setStatus("Verbindungsfehler", "error");
-    ws.close();
     return;
   }
 
@@ -3914,7 +3919,7 @@ async function voicePreview() {
     }
     setStatus("🎧 Hörprobe …", "");
     const buf = await r.arrayBuffer();
-    const ctx = rxAudioCtx || new AudioContext();
+    const ctx = _tonCtx(rxAudioCtx);
     const audio = await ctx.decodeAudioData(buf);
     const src = ctx.createBufferSource();
     src.buffer = audio;
@@ -3952,31 +3957,10 @@ async function sendVoice() {
   if (btn) { btn.classList.add("sending"); btn.disabled = true; }
   setStatus("🎙 Verbinde…", "");
 
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(room)}`,
-                   ["frn", "frn.token." + authToken]);
-  ws.binaryType = "arraybuffer";
-  ws.onmessage  = onWsMessage;
-  ws.onerror    = () => {
-    clipActive = false; window._voiceSending = false; _voiceBtnReset(); updateClipButtons();
-    setStatus("WebSocket-Fehler", "error");
-  };
-  ws.onclose    = () => {
-    if (clipActive) {
-      clipActive = false; window._voiceSending = false; _voiceBtnReset(); updateClipButtons();
-      setStatus("BEREIT", "");
-    }
-    document.getElementById("led-tx").className = "led";
-  };
-
-  const ok = await new Promise(res => {
-    ws.onopen = () => res(true);
-    setTimeout(() => res(false), 5000);
-  });
+  const ok = await _chatWsBereit(room);
   if (!ok) {
     clipActive = false; window._voiceSending = false; _voiceBtnReset(); updateClipButtons();
     setStatus("Verbindungsfehler", "error");
-    ws.close();
     return;
   }
 
@@ -4010,9 +3994,17 @@ async function saveVoiceSample() {
   }
 }
 
+// Ein gemeinsamer Context fuer Pieptoene/Hoerprobe, wenn sonst keiner offen
+// ist -- je Ton ein neuer stiess an das iOS-Limit, danach blieb auch RX stumm.
+let _beepCtx = null;
+function _tonCtx(bevorzugt) {
+  if (bevorzugt && bevorzugt.state !== "closed") return bevorzugt;
+  if (!_beepCtx || _beepCtx.state === "closed") _beepCtx = new AudioContext();
+  return _beepCtx;
+}
 function playBeep() {
   try {
-    const ctx = audioCtx || new AudioContext();
+    const ctx = _tonCtx(audioCtx);
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
@@ -5633,7 +5625,18 @@ function startDebugAutoRefresh() {
   stopDebugAutoRefresh();
   const cb = document.getElementById("dbg-autorefresh");
   if (!cb || !cb.checked) return;
-  dbgTimer = setInterval(loadDebugTraces, 5000);
+  dbgTimer = setInterval(() => { if (!_dbgBeschaeftigt()) loadDebugTraces(); }, 5000);
+}
+// Nicht neu aufbauen, solange der Admin dort arbeitet: Eingabe im Fokus,
+// eingetippter Sprechername, Modellauswahl oder ein angezeigtes Replay-
+// Ergebnis -- das Neuladen alle 5 s verwarf sonst alles (2026-10-19).
+function _dbgBeschaeftigt() {
+  const box = document.getElementById("debug-traces");
+  if (!box) return false;
+  const fokus = document.activeElement;
+  if (fokus && box.contains(fokus) && /^(INPUT|SELECT|TEXTAREA)$/.test(fokus.tagName)) return true;
+  if ([...box.querySelectorAll(".dbg-enroll-name")].some(i => i.value.trim())) return true;
+  return [...box.querySelectorAll(".dbg-replay-result")].some(r => r.style.display !== "none" && r.textContent.trim());
 }
 function stopDebugAutoRefresh() {
   if (dbgTimer) { clearInterval(dbgTimer); dbgTimer = null; }

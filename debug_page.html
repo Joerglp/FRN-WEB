@@ -360,7 +360,7 @@ async function loadSpeakerIdSettings() {
       list.innerHTML = d.enrollments.map(e => `
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.82rem">
           <span style="flex:1">${esc(e.name)} <span style="color:var(--muted)">(${e.samples} Beispiel${e.samples === 1 ? "" : "e"})</span></span>
-          <button type="button" onclick="deleteSpeakerEnrollment(${escJs(e.name)})"
+          <button type="button" onclick="deleteSpeakerEnrollment(${escJs(e.name)}, this)"
                   style="background:none;border:1px solid var(--dim);color:var(--muted);
                          border-radius:6px;padding:3px 8px;cursor:pointer;font-size:.78rem">✕ löschen</button>
         </div>`).join("");
@@ -381,7 +381,18 @@ async function saveSpeakerIdSettings() {
     showMsg("msg-debug", "Fehler: " + e, "error");
   }
 }
-async function deleteSpeakerEnrollment(name) {
+// Zweistufig wie in tx_page.html: erster Klick fragt, zweiter loescht
+// (vorher ein Klick = alle Proben der Person weg, 2026-10-19 Review-Fund)
+function sidErstNachfragen(btn, text) {
+  if (btn.dataset.sicher === "1") return true;
+  btn.dataset.sicher = "1";
+  const alt = btn.textContent;
+  btn.textContent = text;
+  setTimeout(() => { btn.dataset.sicher = ""; btn.textContent = alt; }, 4000);
+  return false;
+}
+async function deleteSpeakerEnrollment(name, btn) {
+  if (btn && !sidErstNachfragen(btn, `Alle Proben von ${name} löschen?`)) return;
   try {
     await adminFetch(`/api/admin/speaker-id/enrollments/${encodeURIComponent(name)}`,
       { method: "DELETE" });
@@ -493,7 +504,18 @@ function startDebugAutoRefresh() {
   stopDebugAutoRefresh();
   const cb = document.getElementById("dbg-autorefresh");
   if (!cb || !cb.checked) return;
-  dbgTimer = setInterval(loadDebugTraces, 5000);
+  dbgTimer = setInterval(() => { if (!_dbgBeschaeftigt()) loadDebugTraces(); }, 5000);
+}
+// Nicht neu aufbauen, solange der Admin dort arbeitet: Eingabe im Fokus,
+// eingetippter Sprechername, Modellauswahl oder ein angezeigtes Replay-
+// Ergebnis -- das Neuladen alle 5 s verwarf sonst alles (2026-10-19).
+function _dbgBeschaeftigt() {
+  const box = document.getElementById("debug-traces");
+  if (!box) return false;
+  const fokus = document.activeElement;
+  if (fokus && box.contains(fokus) && /^(INPUT|SELECT|TEXTAREA)$/.test(fokus.tagName)) return true;
+  if ([...box.querySelectorAll(".dbg-enroll-name")].some(i => i.value.trim())) return true;
+  return [...box.querySelectorAll(".dbg-replay-result")].some(r => r.style.display !== "none" && r.textContent.trim());
 }
 function stopDebugAutoRefresh() {
   if (dbgTimer) { clearInterval(dbgTimer); dbgTimer = null; }
