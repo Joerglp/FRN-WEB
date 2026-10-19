@@ -130,5 +130,12 @@ fuer Robert"); Stimmungen gibt es dort nicht, die Stimmungsregel wird dann
 automatisch aus dem Prompt genommen.
 
 Einspielen: Datei kopieren, dann `sudo systemctl restart voice-api`.
+
+**Upload-Schluessel (seit 2026-10-19):** `POST /speaker/{name}` verlangt den
+Header `X-Voice-Token`, sobald die Unit `VOICE_TOKEN` setzt -- vorher konnte
+jeder im Netz fremde Stimmproben ersetzen. Der Wert steht auf der Box in
+`/etc/systemd/system/voice-api.service.d/20-token.conf` (root, 0600) und auf
+dem Pi in `config.json` unter `voice.voice_server_token`; beide muessen gleich
+sein. Ohne `VOICE_TOKEN` nimmt der Dienst Uploads wie frueher ohne Schluessel.
 Beim Aufraeumen von Testinstanzen `pkill` NIE mit einem Muster, das im
 eigenen ssh-Befehl vorkommt (trifft die eigene Shell).
