@@ -3056,6 +3056,12 @@ class TXServer:
         nm = re.escape((name or "robert").lower())
         if not re.search(rf"\b{nm}\b", low):
             return None
+        # "Hier ist Robert aus Erwitte", "der Robert aus Lippstadt hat ..." --
+        # Vorstellung bzw. Erwaehnung ist kein Befehl. Robert schaltete sich
+        # sonst selbst ab und speicherte das (2026-10-19 Review-Fund).
+        if re.match(self._VORSTELLUNG_RE.format(name=nm), low) \
+                or self._namensruf(low, [(name or "robert").lower()]) == "erwaehnt":
+            return None
 
         def _hit(words) -> bool:
             for w in words:
@@ -3064,9 +3070,15 @@ class TXServer:
                     continue
                 gap = self._BOT_CMD_TIGHT_GAP.get(w_raw, self._BOT_CMD_DEFAULT_GAP)
                 w = re.escape(w_raw)
+                # Kurze Woerter ("aus", "an") nur am Satzende bzw. vor
+                # bitte/jetzt/mal -- "aus Erwitte", "an alle" sind keine Befehle
+                if w_raw in self._BOT_CMD_TIGHT_GAP:
+                    w = rf"{w}(?!\w)(?!\s+(?!bitte\b|jetzt\b|mal\b)\w)"
+                else:
+                    w = rf"{w}\b"
                 # Name … Kommandowort ODER Kommandowort … Name, max `gap` Zeichen
-                if re.search(rf"\b{nm}\b.{{0,{gap}}}?\b{w}\b", low) or \
-                   re.search(rf"\b{w}\b.{{0,{gap}}}?\b{nm}\b", low):
+                if re.search(rf"\b{nm}\b.{{0,{gap}}}?\b{w}", low) or \
+                   re.search(rf"\b{w}.{{0,{gap}}}?\b{nm}\b", low):
                     return True
             return False
 
@@ -3109,8 +3121,20 @@ class TXServer:
             txt = (ctl.get("reply_on") if turn_on else ctl.get("reply_off")) or ""
             if txt:
                 try:
-                    await self._auto_send_voice(
+                    t0 = time.time()
+                    ok = await self._auto_send_voice(
                         room, txt, bot.get("speaker") or "default")
+                    t1 = time.time()
+                    if ok:
+                        # Als eigene Sendung verbuchen -- sonst haelt die
+                        # Echo-Erkennung die Quittung fuer einen fremden
+                        # Funkspruch, und Susi antwortet darauf (2026-10-19)
+                        wer = bot.get("name") or "Robert"
+                        self._bot_tx_merken(room_name, t0, t1, txt, wer)
+                        self._hist_insert(self._room_hist.setdefault(room_name, []),
+                                          (t1, f"{wer} (du)", txt),
+                                          max(4, int(bot.get("history_len", 10))) + 2 * self._PROMPT_BLOCK)
+                        self._bot_state_merken()
                 except Exception as e:
                     log.warning("[%s] Steuerungs-Quittung: %s", room_name, e)
 
@@ -3187,9 +3211,19 @@ class TXServer:
                  if isinstance(e, list) and len(e) == 3 and float(e[1]) >= grenze]
             if o:
                 self._bot_own_tx[room] = o
-        for room, t in (d.get("last_reply") or {}).items():
-            if isinstance(t, (int, float)):
-                self._bot_last_reply[room] = float(t)
+        # last_reply je Bot (2026-10-19); aeltere Dateien kennen nur Robert
+        je_bot = d.get("last_reply_bots") or {"": d.get("last_reply") or {}}
+        for bid, werte in je_bot.items():
+            ziel = self._bot_zust.setdefault(bid, {}).setdefault("last_reply", {})
+            for room, t in (werte or {}).items():
+                if isinstance(t, (int, float)):
+                    ziel[room] = float(t)
+        for t0, wer in (d.get("tx_wer") or {}).items():
+            try:
+                if float(t0) >= grenze:
+                    self._bot_tx_wer[float(t0)] = str(wer)
+            except ValueError:
+                pass
         n = sum(len(v) for v in self._room_hist.values())
         if n:
             log.info("KI-Funker-Gedächtnis geladen: %d Durchsagen in %d Räumen",
@@ -3202,8 +3236,12 @@ class TXServer:
         pfad = getattr(self, "_bot_state_path", None)
         if pfad is None:
             return
+        # Nicht self._bot_last_reply: das haengt am _BOT_KONTEXT des Aufrufers
+        # (call_later kopiert ihn) -- Susis Zeiten landeten so bei Robert.
+        je_bot = {bid: z.get("last_reply", {}) for bid, z in self._bot_zust.items()}
         daten = {"hist": self._room_hist, "own_tx": self._bot_own_tx,
-                 "last_reply": self._bot_last_reply}
+                 "last_reply_bots": je_bot,
+                 "tx_wer": {str(t0): wer for t0, wer in self._bot_tx_wer.items()}}
         tmp = pfad.with_name(pfad.name + ".tmp")
         try:
             fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -3307,9 +3345,14 @@ class TXServer:
                     rufe.append((ruf, -pos, bid))
                 letzte = self._bot_last_reply.get(room_name, 0.0)
                 fenster = float(b.get("conversation_window_s", 180))
+                an = bool(b.get("enabled"))
             finally:
                 _BOT_KONTEXT.reset(tok)
-            zuletzt.append((letzte, bid, jetzt - letzte < fenster))
+            # Ausgeschaltete Bots nur per Namensruf ("Robert start"), nie als
+            # Rueckfall -- sonst landeten allgemeine Rufe beim stummen Robert
+            # und Susi antwortete nie (2026-10-19 Review-Fund)
+            if an:
+                zuletzt.append((letzte, bid, jetzt - letzte < fenster))
 
         def erster(arten):
             treffer = sorted([r for r in rufe if r[0] in arten], key=lambda r: r[1], reverse=True)
@@ -3330,7 +3373,7 @@ class TXServer:
         bid = erster(("erwaehnt",))
         if bid is not None:
             return bid
-        return max(zuletzt)[1]
+        return max(zuletzt)[1] if zuletzt else ""
 
     def _bot_entscheiden(self, room: "FRNTXRoom", room_name: str, text: str,
                          ts: float, low: str):
@@ -4958,9 +5001,10 @@ class TXServer:
             await asyncio.sleep(self._MITSCHREIBER_WARTE_S)
             self._mitschreiber_aufrufe.append(time.time())
             basis = self._bot_cfg()
-            own_tag = f"{basis.get('name') or 'Robert'} (du)"
+            # Zeilen ALLER Bots raus (auch "Susi (du)") -- sonst werden
+            # erfundene Bot-Aussagen zu Notizen
             ausschnitt = [(t, w, x) for t, w, x in self._room_hist.get(room_name, [])
-                          if treffer_ts - 150 <= t and w != own_tag]
+                          if treffer_ts - 150 <= t and not w.endswith(" (du)")]
             if not ausschnitt:
                 return
             zeilen = "\n".join(f"{w}: {x}" for _t, w, x in ausschnitt)
@@ -5625,7 +5669,6 @@ class TXServer:
                 satz = satz.replace("Joerg", "Jörg")
                 satz = re.sub(rf"^{re.escape(an)}\W+", "", satz)
                 satz = satz[:1].upper() + satz[1:]
-                satz = satz[:1].upper() + satz[1:]
                 if not re.fullmatch(r"[A-Za-zÄÖÜäöüß\- ]{2,30}", an) or len(satz) < 3 \
                         or an.lower() in ("funker", "jemand", "alle", "runde"):
                     continue
@@ -5676,7 +5719,17 @@ class TXServer:
         """Ist ein Empfaenger offener Nachrichten gerade auf dem Kanal?"""
         if time.time() - ts < self._BEGRUESSUNG_RUECKSTAU_S:
             self._raum_eingang[room_name] = time.time()
-        if not (bot.get("enabled") and bot.get("nachrichten_enabled", True)):
+        # Zustellen darf der Bot, der die Nachricht angenommen hat (n["bot"]) --
+        # nicht nur, wenn Robert an ist (2026-10-19 Review-Fund)
+        aktiv = set()
+        for bid in self._bot_ids():
+            tok = self._bot_im(bid)
+            try:
+                if self._bot_cfg().get("enabled"):
+                    aktiv.add(bid)
+            finally:
+                _BOT_KONTEXT.reset(tok)
+        if not (aktiv and bot.get("nachrichten_enabled", True)):
             return
         rooms = bot.get("rooms") or []
         if rooms and room_name not in rooms:
@@ -5698,19 +5751,25 @@ class TXServer:
                 continue
             if jetzt < n.get("naechster", 0):
                 continue
+            nbid = n.get("bot") or ""
+            if (nbid if nbid in self._bot_ids() else "") not in aktiv:
+                continue
             an = self._namen_norm(n["an"])
             sicher = (cs == an
                       or re.search(rf"\b(?:hier\s+(?:ist|spricht|sitzt)\s+(?:der\s+|die\s+)?|"
                                    rf"ich\s+bin(?:'?s)?\s+(?:der\s+|die\s+)?){re.escape(an)}\b", low)
                       or re.search(rf"\b{re.escape(an)}\s+hier\b", low))
-            if sicher:
-                n["plan"] = True
+            gruss = re.search(rf"\b{self._GRUSS_AN}\W+(?:\w+\W+)?{re.escape(an)}\b", low)
+            if sicher or (not gruss and n.get("gegruesst") and ts - n["gegruesst"] < 120):
+                # Alle offenen Nachrichten an diese Person als geplant markieren:
+                # _nachricht_zustellen nimmt sie gesammelt mit. Sonst startete je
+                # Nachricht ein eigener Lauf und sagte alles doppelt (2026-10-19).
+                for m in self._nachrichten:
+                    if not m.get("zugestellt") and self._namen_norm(m["an"]) == an:
+                        m["plan"] = True
                 asyncio.create_task(self._nachricht_zustellen(room, room_name, n["an"]))
-            elif re.search(rf"\b{self._GRUSS_AN}\W+(?:\w+\W+)?{re.escape(an)}\b", low):
+            elif gruss:
                 n["gegruesst"] = ts      # begruesst -- ist er da, antwortet er gleich
-            elif n.get("gegruesst") and ts - n["gegruesst"] < 120:
-                n["plan"] = True
-                asyncio.create_task(self._nachricht_zustellen(room, room_name, n["an"]))
 
     async def _nachricht_zustellen(self, room, room_name: str, an: str):
         offen = [n for n in self._nachrichten
@@ -6162,7 +6221,7 @@ class TXServer:
         provider = (bot.get("provider") or "ollama").strip().lower()
         _t0 = time.time()
         if provider == "gemini":
-            raw = await self._llm_gemini(bot, system, messages)
+            raw = await self._llm_gemini(bot, system, messages, room_name, trace_ts)
         else:
             # Schon automatisch gesucht UND etwas gefunden? Dann das Such-
             # werkzeug nicht nochmal anbieten (2026-09-24): das Modell suchte
@@ -6417,13 +6476,17 @@ class TXServer:
                 async with sess.post(f"{url}/api/chat", json=body2,
                                      headers=hdrs) as resp:
                     if resp.status != 200:
+                        fehler = (await resp.text())[:120]
                         log.warning("KI-Funker Ollama (nach Tool-Call) HTTP %d: %s",
-                                    resp.status, (await resp.text())[:120])
+                                    resp.status, fehler)
+                        self._llm_fehler_merken(room_name, trace_ts,
+                                                f"nach Websuche HTTP {resp.status}: {fehler}")
                         return ""
                     data2 = await resp.json()
         except Exception as e:
             log.warning("KI-Funker: Ollama nicht erreichbar (Tool-Call-Folgeanfrage, %s): %s",
                        url, e)
+            self._llm_fehler_merken(room_name, trace_ts, f"nach Websuche nicht erreichbar: {e}")
             return ""
         return ((data2.get("message") or {}).get("content") or "").strip()
 
@@ -6473,7 +6536,13 @@ class TXServer:
                 kette.append(n)
         return kette[:self._GEMINI_MAX_VERSUCHE] or [eigenes]
 
-    async def _llm_gemini(self, bot: dict, system: str, messages: list) -> str:
+    def _llm_fehler_merken(self, room_name: str, trace_ts, text: str) -> None:
+        """Fuer _bot_reply: leere Antwort war ein Fehler, kein SKIP."""
+        if room_name and trace_ts is not None:
+            self._debug_trace_get(room_name, trace_ts)["llm_fehler"] = text
+
+    async def _llm_gemini(self, bot: dict, system: str, messages: list,
+                          room_name: str = "", trace_ts: float | None = None) -> str:
         """Chat-Aufruf an Google Gemini (generateContent). Liefert rohen
         Antworttext ("" bei Fehler). Websuche/Grounding braucht bezahltes
         Kontingent und ist daher hier nicht aktiviert. Faellt das Modell aus
@@ -6481,6 +6550,7 @@ class TXServer:
         key = (bot.get("gemini_api_key") or "").strip()
         if not key:
             log.warning("KI-Funker: Gemini gewählt, aber kein gemini_api_key gesetzt")
+            self._llm_fehler_merken(room_name, trace_ts, "kein gemini_api_key")
             return ""
         contents = [{"role": "model" if m["role"] == "assistant" else "user",
                      "parts": [{"text": m["content"]}]} for m in messages]
@@ -6517,7 +6587,9 @@ class TXServer:
             if status == 404:
                 self._gemini_tot[model] = time.time()
             if status not in self._GEMINI_WEITER:
+                self._llm_fehler_merken(room_name, trace_ts, f"Gemini HTTP {status}: {msg[:120]}")
                 return ""    # Key/Anfrage falsch -- ein anderes Modell hilft nicht
+        self._llm_fehler_merken(room_name, trace_ts, "Gemini: kein Modell der Ausweich-Kette erreichbar")
         return ""
 
     async def handle_voice_auto_reply(self, request):
