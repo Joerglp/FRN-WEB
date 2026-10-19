@@ -263,6 +263,7 @@ class FRNTXRoom:
         self._connected       = False
         self._tx_lock         = asyncio.Lock()
         self._connect_lock    = asyncio.Lock()
+        self._trenn_nr        = 0     # +1 je disconnect(): erkennt Trennen waehrend des Logins
         self._keepalive_task: asyncio.Task | None = None
         self._reader_task:    asyncio.Task | None = None
         self._tx_approved     = asyncio.Event()
@@ -295,6 +296,7 @@ class FRNTXRoom:
             if self._connected:
                 return
             await self._alte_verbindung_abbauen()
+            trenn_nr = self._trenn_nr
             # disconnect() gibt die GSM-Handles frei -- fuer Wiederverbindung neu
             if not self._encoder.handle:
                 self._encoder = GSMEncoder()
@@ -331,6 +333,11 @@ class FRNTXRoom:
 
                 writer.write(b"RX0\r\n")
                 await writer.drain()
+                # Waehrend des Logins getrennt (Raum geloescht, Logout)? Dann
+                # nicht doch noch "verbunden" -- mit geschlossenem Encoder und
+                # verwaister FRN-Anmeldung (2026-10-19 Review-Fund)
+                if self._trenn_nr != trenn_nr:
+                    raise ConnectionError("waehrend des Logins getrennt")
             except BaseException:
                 writer.close()   # kein haengender Socket bei Fehler/Abbruch
                 raise
@@ -356,6 +363,7 @@ class FRNTXRoom:
         self._reader = None
 
     async def disconnect(self):
+        self._trenn_nr += 1
         self._connected = False
         for t in (self._keepalive_task, self._reader_task):
             if t:
@@ -919,6 +927,7 @@ class TXServer:
         self._nachlegen_zuletzt: dict[str, float] = {} # Raum -> letztes Nachlegen (Robert <-> Susi)
         self._rx_offen: dict[str, float] = {}          # Raum -> Beginn der laufenden Durchsage (frn_stream)
         self._rx_ende: dict[str, float] = {}           # Raum -> zuletzt gemeldetes Durchsage-Ende
+        self._rx_puls: dict[str, float] = {}           # Raum -> letzte Meldung "laeuft noch" (frn_stream)
         self._speaker_letzte_pruefung: dict = {}
         self._load_speaker_enrollments()
         self._transcription_cfg: dict = {}   # von main() befuellt (config.ini [transcription])
@@ -3842,11 +3851,19 @@ class TXServer:
             beginn = float(daten.get("beginn") or 0.0) or time.time()
         except Exception:
             return web.json_response({"error": "bad request"}, status=400)
+        if room and daten.get("puls"):
+            # Nur Lebenszeichen "laeuft noch" -- kein Vorwaermen, kein
+            # _rx_zuletzt (das traf sonst auch das Echo der Bots selbst)
+            if beginn > self._rx_ende.get(room, 0.0):
+                self._rx_offen[room] = beginn
+                self._rx_puls[room] = time.time()
+            return web.json_response({"ok": True})
         if room:
             # Meldungen laufen in eigenen Threads und koennen sich ueberholen:
             # ein Beginn, dessen Ende schon da ist, oeffnet nichts mehr.
             if beginn > self._rx_ende.get(room, 0.0):
                 self._rx_offen[room] = beginn
+                self._rx_puls[room] = time.time()   # frn_stream wiederholt die Meldung alle 2 s
             self._bot_vorwaermen_pruefen(room)
         return web.json_response({"ok": True})
 
@@ -3950,12 +3967,17 @@ class TXServer:
     # Deren Transkript kommt erst nach Stille-Ende + Whisper -- so lange warten.
     _NACHLEGEN_TRANSKRIPT_S = 6.0
 
-    def _rx_letztes(self, room_name: str, jetzt: float) -> float:
+    def _rx_letztes(self, room_name: str, jetzt: float, ab: float = 0.0) -> float:
         """Letztes empfangenes Audio. Raeume, die nur frn_stream mithoert,
         melden Beginn und Ende der Durchsage statt jedes Pakets -- dazwischen
-        gilt der Kanal als belegt (laengstens 5 min, falls das Ende ausbleibt)."""
+        gilt der Kanal als belegt. Nur Durchsagen, die nach `ab` begannen:
+        frn_stream hoert auch die Bots selbst, und deren eigene Sendung zaehlte
+        sonst beim Nachlegen als Kanal belegt (2026-10-19 Review-Fund). Ohne
+        Lebenszeichen (frn_stream meldet alle 2 s) gilt sie nach 5 s als
+        beendet -- eine verlorene Ende-Meldung sperrte sonst 5 Minuten."""
         beginn = self._rx_offen.get(room_name)
-        if beginn is not None and jetzt - beginn < 300:
+        if (beginn is not None and beginn > ab
+                and jetzt - self._rx_puls.get(room_name, beginn) < 5.0):
             return jetzt
         return self._rx_zuletzt.get(room_name, 0.0)
 
@@ -3973,11 +3995,11 @@ class TXServer:
         while True:
             await asyncio.sleep(0.1)
             jetzt = time.time()
-            if jetzt - self._rx_letztes(room.name, jetzt) < 0.2:
+            if jetzt - self._rx_letztes(room.name, jetzt, t1) < 0.2:
                 belegt += jetzt - davor     # echte Zeit, die Schleife kann nachhinken
             davor = jetzt
             if (jetzt - start >= self._NACHLEGEN_PAUSE_S
-                    and jetzt - self._rx_letztes(room.name, jetzt) >= self._NACHLEGEN_STILLE_S):
+                    and jetzt - self._rx_letztes(room.name, jetzt, t1) >= self._NACHLEGEN_STILLE_S):
                 break
             if jetzt - start > self._NACHLEGEN_MAX_WARTE_S:
                 abbruch = f"keine Stille in {self._NACHLEGEN_MAX_WARTE_S:.0f}s"
@@ -3990,7 +4012,7 @@ class TXServer:
             while time.time() < bis and not jemand_sprach():
                 await asyncio.sleep(0.2)
             jetzt = time.time()
-            if not jemand_sprach() and jetzt - self._rx_letztes(room.name, jetzt) < self._NACHLEGEN_STILLE_S:
+            if not jemand_sprach() and jetzt - self._rx_letztes(room.name, jetzt, t1) < self._NACHLEGEN_STILLE_S:
                 abbruch = "Kanal wieder belegt"
         if not abbruch and jemand_sprach():
             abbruch = "inzwischen hat jemand gesprochen"
@@ -5771,8 +5793,13 @@ class TXServer:
                 # Alle offenen Nachrichten an diese Person als geplant markieren:
                 # _nachricht_zustellen nimmt sie gesammelt mit. Sonst startete je
                 # Nachricht ein eigener Lauf und sagte alles doppelt (2026-10-19).
+                # Nur die, deren Bot an ist -- eine von Robert (aus) angenommene
+                # liess sonst die ganze Zustellung als Robert scheitern, und
+                # Susis Nachricht kam nie an (2026-10-19 Review-Fund)
                 for m in self._nachrichten:
-                    if not m.get("zugestellt") and self._namen_norm(m["an"]) == an:
+                    mbid = m.get("bot") or ""
+                    if (not m.get("zugestellt") and self._namen_norm(m["an"]) == an
+                            and (mbid if mbid in self._bot_ids() else "") in aktiv):
                         m["plan"] = True
                 asyncio.create_task(self._nachricht_zustellen(room, room_name, n["an"]))
             elif gruss:
@@ -5780,7 +5807,8 @@ class TXServer:
 
     async def _nachricht_zustellen(self, room, room_name: str, an: str):
         offen = [n for n in self._nachrichten
-                 if not n.get("zugestellt") and self._namen_norm(n["an"]) == self._namen_norm(an)]
+                 if not n.get("zugestellt") and n.get("plan")
+                 and self._namen_norm(n["an"]) == self._namen_norm(an)]
         if not offen:
             return
         saetze = " Und: ".join(n["satz"].rstrip(".!") + "." for n in offen)
@@ -10208,7 +10236,7 @@ class TXServer:
         """
         token = self._token_from(request)
         if not self._validate_token(token):
-            return web.Response(status=401, text="Unauthorized")
+            return await self._ws_abweisen(request)
 
         mount = request.rel_url.query.get("room", "")
         room  = self.rooms.get(mount)
@@ -10243,11 +10271,22 @@ class TXServer:
 
     # ── WebSocket ──────────────────────────────────────────────────────────
 
+    async def _ws_abweisen(self, request):
+        """Ungueltiger/widerrufener Token: WS annehmen und mit 4001 schliessen.
+        Ein HTTP-401 vor dem Upgrade sieht der Browser nur als 1006 -- die
+        Seite versuchte es dann alle 5 s neu, statt zum Login zu wechseln."""
+        ws = web.WebSocketResponse(protocols=("frn",))
+        if not ws.can_prepare(request).ok:
+            return web.Response(status=401, text="Unauthorized")
+        await ws.prepare(request)
+        await ws.close(code=4001, message=b"unauthorized")
+        return ws
+
     async def handle_ws(self, request):
         token = self._token_from(request)
         info  = self._validate_token(token)
         if not info:
-            return web.Response(status=401, text="Unauthorized")
+            return await self._ws_abweisen(request)
 
         mount = request.rel_url.query.get("room", "")
         room  = self.rooms.get(mount)

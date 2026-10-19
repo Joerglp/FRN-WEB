@@ -2464,6 +2464,7 @@ let isAdmin   = localStorage.getItem("frn_is_admin") === "true";
 let ws = null, audioCtx = null, micSource = null;
 let micStream = null;   // getUserMedia-Stream -- Tracks in stopAudio() beenden
 let _pttGen = 0;        // je Druck/Loslassen +1: erkennt Loslassen waehrend pttStart wartet
+let _pttWartet = false; // pttStart laeuft, PTT_START noch nicht gesendet
 let workletNode = null, analyser = null;
 let txActive = false, levelTimer = null;
 let clientPollTimer = null;
@@ -3106,7 +3107,8 @@ function connectChatWs(room) {
   ws.onmessage = onWsMessage;
   ws.onerror   = () => {};
   ws.onclose   = (evt) => {
-    if (evt.code === 4001) { doLogout(); return; }   // Token abgelaufen
+    if (evt.code === 4001) { doLogout(); return; }   // Token abgelaufen/widerrufen
+    _pttGen++; _pttWartet = false;   // wartenden pttStart abbrechen
     stopAudio();
     if (clipActive) {   // Clip/Sprachnachricht lief ueber diese Verbindung
       setClipButtonsSending(null);
@@ -3384,14 +3386,21 @@ async function pttStart(e) {
   // Losgelassen, waehrend unten noch auf Mikrofon/WS/Worklet gewartet wird?
   // Dann NICHT mehr PTT_START senden -- sonst sendete das offene Mikro bis
   // zur TOT-Grenze, ohne dass jemand drueckt (2026-10-19 Review-Fund).
+  // Mikrofon und AudioContext bleiben lokal, bis feststeht, dass dieser Druck
+  // noch gilt: ein neuer Druck nach schnellem Loslassen hat sonst seine
+  // eigenen Objekte vom alten, abbrechenden Lauf abgeraeumt bekommen.
   const gen = ++_pttGen;
-  const losgelassen = () => {
-    if (gen === _pttGen) return false;
-    txActive = false; _applyRxGain(); stopAudio(); setStatus("BEREIT", "");
-    return true;
+  _pttWartet = true;
+  let stream = null, ctx = null;
+  const aufgeben = (fehler) => {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (ctx) ctx.close().catch(() => {});
+    if (gen !== _pttGen) return;   // losgelassen: pttStop hat den Zustand schon zurueckgesetzt
+    _pttWartet = false;
+    txActive = false; _applyRxGain();
+    setStatus(fehler || "BEREIT", fehler ? "error" : "");
   };
 
-  let stream;
   try {
     // sampleRate als "ideal" (nicht exakt) — viele Browser/ALSA ignorieren exact-Constraints
     stream = await navigator.mediaDevices.getUserMedia({
@@ -3402,46 +3411,33 @@ async function pttStart(e) {
       }
     });
   } catch(err) {
-    txActive = false; _applyRxGain();
-    setStatus("Mikrofon-Fehler: " + err.message, "error"); return;
+    aufgeben("Mikrofon-Fehler: " + err.message); return;
   }
-  micStream = stream;
-  if (losgelassen()) return;
+  if (gen !== _pttGen) { aufgeben(); return; }
 
   // AudioContext ohne feste Rate — der Server resampelt sowieso von beliebiger Rate auf 8 kHz.
-  audioCtx = new AudioContext();
-  const sampleRate = audioCtx.sampleRate;
+  ctx = new AudioContext();
+  const sampleRate = ctx.sampleRate;
 
   const room = document.getElementById("room-select").value;
 
   // WS wiederverwenden wenn bereits verbunden (Chat-WS), sonst neu aufbauen
   if (!ws || ws.readyState !== WebSocket.OPEN || _chatWsRoom !== room) {
-    connectChatWs(room);
-    const wsReady = await new Promise((res, rej) => {
-      const check = setInterval(() => {
-        if (!ws) { clearInterval(check); rej(new Error("WS fehlt")); return; }
-        if (ws.readyState === WebSocket.OPEN)   { clearInterval(check); res(true); }
-        if (ws.readyState > WebSocket.OPEN)     { clearInterval(check); rej(new Error("WS geschlossen")); }
-      }, 50);
-      setTimeout(() => { clearInterval(check); rej(new Error("WS timeout")); }, 5000);
-    }).catch(err => {
-      txActive = false; _applyRxGain();
-      setStatus("Verbindungsfehler: " + err.message, "error");
-      stopAudio(); return false;
-    });
-    if (!wsReady) return;
+    if (!await _chatWsBereit(room)) { aufgeben("Verbindungsfehler: keine Verbindung zum Server"); return; }
   }
-  if (losgelassen()) return;
+  if (gen !== _pttGen) { aufgeben(); return; }
 
   try {
-    await audioCtx.audioWorklet.addModule(`${TX_BASE}/tx_processor.js`);
+    await ctx.audioWorklet.addModule(`${TX_BASE}/tx_processor.js`);
   } catch(err) {
-    txActive = false; _applyRxGain();
-    setStatus("AudioWorklet-Fehler: " + err.message, "error");
-    stopAudio(); ws.close(); return;
+    aufgeben("AudioWorklet-Fehler: " + err.message); return;
   }
-  if (losgelassen()) return;
+  if (gen !== _pttGen) { aufgeben(); return; }
 
+  // Ab hier gilt der Druck: Objekte global machen (stopAudio raeumt sie ab)
+  _pttWartet = false;
+  audioCtx  = ctx;
+  micStream = stream;
   micSource   = audioCtx.createMediaStreamSource(stream);
   workletNode = new AudioWorkletNode(audioCtx, "tx-processor");
   analyser    = audioCtx.createAnalyser();
@@ -3459,15 +3455,24 @@ async function pttStart(e) {
 function pttStop(e) {
   if (e) e.preventDefault();
   _pttGen++;
+  if (_pttWartet) {
+    // pttStart wartet noch, PTT_START ist nicht raus: nur den Zustand
+    // zuruecksetzen (damit ein neuer Druck sofort geht) -- pttStart raeumt
+    // Mikrofon und AudioContext selbst ab. Die Chat-Verbindung bleibt; frueher
+    // wurde sie hier abgeschossen und kam nicht wieder.
+    _pttWartet = false;
+    txActive = false; _applyRxGain(); setStatus("BEREIT", "");
+    return;
+  }
   if (!txActive && !clipActive) { stopAudio(); return; }
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ cmd: "PTT_STOP" }));
   } else {
-    // WS noch nicht geöffnet oder bereits zu — sofort abbrechen
+    // Verbindung schon zu: lokal beenden; ihr onclose verbindet neu
     txActive = false;
     _applyRxGain();
     stopAudio();
-    if (ws) { const old = ws; ws = null; old.onclose = null; old.close(); }
+    if (!ws) connectChatWs(document.getElementById("room-select").value);
   }
 }
 
@@ -5627,16 +5632,23 @@ function startDebugAutoRefresh() {
   if (!cb || !cb.checked) return;
   dbgTimer = setInterval(() => { if (!_dbgBeschaeftigt()) loadDebugTraces(); }, 5000);
 }
-// Nicht neu aufbauen, solange der Admin dort arbeitet: Eingabe im Fokus,
-// eingetippter Sprechername, Modellauswahl oder ein angezeigtes Replay-
-// Ergebnis -- das Neuladen alle 5 s verwarf sonst alles (2026-10-19).
+// Nicht neu aufbauen, solange der Admin dort arbeitet: Eingabe im Fokus, kurz
+// nach einer Eingabe/Auswahl (30 s) oder nach "Nochmal testen" (60 s, damit
+// das Ergebnis lesbar bleibt) -- das Neuladen alle 5 s verwarf sonst alles.
+// Zeitlich begrenzt, sonst blieb die Liste nach einem einzigen Replay oder
+// Einlernen fuer immer stehen (2026-10-19 Review-Fund).
+let _dbgPauseBis = 0;
+for (const typ of ["input", "change"]) {
+  document.addEventListener(typ, e => {
+    if (e.target.closest && e.target.closest("#debug-traces")) _dbgPauseBis = Date.now() + 30000;
+  });
+}
 function _dbgBeschaeftigt() {
   const box = document.getElementById("debug-traces");
   if (!box) return false;
   const fokus = document.activeElement;
   if (fokus && box.contains(fokus) && /^(INPUT|SELECT|TEXTAREA)$/.test(fokus.tagName)) return true;
-  if ([...box.querySelectorAll(".dbg-enroll-name")].some(i => i.value.trim())) return true;
-  return [...box.querySelectorAll(".dbg-replay-result")].some(r => r.style.display !== "none" && r.textContent.trim());
+  return Date.now() < _dbgPauseBis;
 }
 function stopDebugAutoRefresh() {
   if (dbgTimer) { clearInterval(dbgTimer); dbgTimer = null; }
@@ -5716,6 +5728,7 @@ function replayAuswahl(wert) {
                                  : { provider: v ? "ollama" : "", model: v };
 }
 async function replayTrace(room, ts, btn) {
+  _dbgPauseBis = Date.now() + 60000;   // Ergebnis lesbar lassen
   const wrap  = btn.closest(".dbg-replay");
   const model = wrap.querySelector(".dbg-replay-model").value.trim();
   const out   = wrap.querySelector(".dbg-replay-result");

@@ -259,6 +259,7 @@ function fillDebugModelSelect(sel) {
 }
 
 async function replayTrace(room, ts, btn) {
+  _dbgPauseBis = Date.now() + 60000;   // Ergebnis lesbar lassen
   const wrap  = btn.closest(".dbg-replay");
   const model = wrap.querySelector(".dbg-replay-model").value.trim();
   const out   = wrap.querySelector(".dbg-replay-result");
@@ -506,16 +507,23 @@ function startDebugAutoRefresh() {
   if (!cb || !cb.checked) return;
   dbgTimer = setInterval(() => { if (!_dbgBeschaeftigt()) loadDebugTraces(); }, 5000);
 }
-// Nicht neu aufbauen, solange der Admin dort arbeitet: Eingabe im Fokus,
-// eingetippter Sprechername, Modellauswahl oder ein angezeigtes Replay-
-// Ergebnis -- das Neuladen alle 5 s verwarf sonst alles (2026-10-19).
+// Nicht neu aufbauen, solange der Admin dort arbeitet: Eingabe im Fokus, kurz
+// nach einer Eingabe/Auswahl (30 s) oder nach "Nochmal testen" (60 s, damit
+// das Ergebnis lesbar bleibt) -- das Neuladen alle 5 s verwarf sonst alles.
+// Zeitlich begrenzt, sonst blieb die Liste nach einem einzigen Replay oder
+// Einlernen fuer immer stehen (2026-10-19 Review-Fund).
+let _dbgPauseBis = 0;
+for (const typ of ["input", "change"]) {
+  document.addEventListener(typ, e => {
+    if (e.target.closest && e.target.closest("#debug-traces")) _dbgPauseBis = Date.now() + 30000;
+  });
+}
 function _dbgBeschaeftigt() {
   const box = document.getElementById("debug-traces");
   if (!box) return false;
   const fokus = document.activeElement;
   if (fokus && box.contains(fokus) && /^(INPUT|SELECT|TEXTAREA)$/.test(fokus.tagName)) return true;
-  if ([...box.querySelectorAll(".dbg-enroll-name")].some(i => i.value.trim())) return true;
-  return [...box.querySelectorAll(".dbg-replay-result")].some(r => r.style.display !== "none" && r.textContent.trim());
+  return Date.now() < _dbgPauseBis;
 }
 function stopDebugAutoRefresh() {
   if (dbgTimer) { clearInterval(dbgTimer); dbgTimer = null; }

@@ -57,6 +57,7 @@ _tts  = None
 _xtts = None
 # Sprecher-Latents-Cache: name -> (gpt_cond_latent, speaker_embedding)
 _latents: dict = {}
+_sample_nr: dict = {}   # Sprecher -> Versionsnummer der Probe (Upload +1)
 
 SPEAKER_DIR = Path(os.environ.get("VOICE_REF_DIR", str(Path(REF_WAV).parent)))
 SPEAKER_RE  = re.compile(r"^[a-z0-9_\-]{1,40}$")
@@ -118,6 +119,7 @@ def _get_latents(speaker: str):
     des XTTS-Modells zurück."""
     if speaker in _latents:
         return _latents[speaker]
+    nr = _sample_nr.get(speaker, 0)   # Stand der Probe VOR dem Rechnen
     wav = _speaker_wav(speaker)
     if not wav.exists():
         built = _builtin_latents(speaker)
@@ -130,8 +132,9 @@ def _get_latents(speaker: str):
     gpt, emb = _xtts.get_conditioning_latents(
         audio_path=[str(wav)], gpt_cond_len=30, max_ref_length=60,
     )
-    _latents[speaker] = (gpt, emb)
-    return _latents[speaker]
+    if _sample_nr.get(speaker, 0) == nr:   # inzwischen neue Probe? dann nicht cachen
+        _latents[speaker] = (gpt, emb)
+    return gpt, emb
 
 
 def _infer(dev: str, text: str, language: str, speed: float, speaker: str):
@@ -316,11 +319,13 @@ async def handle_speaker_upload(request: web.Request) -> web.Response:
         tmp.unlink(missing_ok=True)
         return web.json_response(
             {"error": f"Sample zu kurz ({dur:.1f}s) — mindestens 5 s"}, status=400)
-    # Unter der Synthese-Sperre tauschen: eine gerade laufende Synthese
-    # haette sonst die alte Stimme wieder in den Cache geschrieben
-    async with _synth_lock:
-        tmp.replace(dest)
-        _latents.pop(name, None)   # Cache invalidieren → nächste Synthese rechnet neu
+    # Versionsnummer statt Sperre: eine gerade laufende Synthese, die noch die
+    # alte Probe gelesen hat, legt ihr Ergebnis dann nicht mehr im Cache ab.
+    # Unter _synth_lock zu warten dauerte bei langer Synthese ueber 30 s, und
+    # der TX-Server meldete einen Fehler, obwohl die Probe ankam (2026-10-19).
+    tmp.replace(dest)
+    _sample_nr[name] = _sample_nr.get(name, 0) + 1
+    _latents.pop(name, None)   # Cache invalidieren → nächste Synthese rechnet neu
     log.info("Sprecher '%s': neues Sample gespeichert (%.1fs)", name, dur)
     return web.json_response({"ok": True, "speaker": name,
                               "duration_s": round(dur, 1)})

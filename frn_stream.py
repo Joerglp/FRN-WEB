@@ -599,6 +599,7 @@ class RoomRecorder:
         self._start_ts  = 0.0
         self._last_ts   = 0.0
         self._active    = False
+        self._puls_ts   = 0.0   # letzte "laeuft noch"-Meldung an den TX-Server
         self._lock      = threading.Lock()
         self._timer: threading.Timer | None = None
 
@@ -623,8 +624,15 @@ class RoomRecorder:
                 self._callsign = callsign or ""
                 log.debug("[%s] TX-Session gestartet (%s)", self.room_name, callsign)
                 _sprechbeginn_melden(self.room_name, self._start_ts)
+                self._puls_ts = time.time()
             elif callsign:
                 self._callsign = callsign
+            # Alle 2 s Lebenszeichen: geht die Ende-Meldung verloren (Neustart,
+            # Zeitueberschreitung), gibt der TX-Server den Kanal nach 5 s frei
+            if time.time() - self._puls_ts >= 2.0:
+                self._puls_ts = time.time()
+                _intern_melden("sprechbeginn", {"room": self.room_name,
+                                                "beginn": self._start_ts, "puls": True})
 
             self._buf.append(pcm)
             self._last_ts = time.time()

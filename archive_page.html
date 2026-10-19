@@ -1128,7 +1128,9 @@ function _archivBeschaeftigt() {
   if ([...main.querySelectorAll('audio')].some(a => !a.paused)) return true;
   const fokus = document.activeElement;
   if (fokus && main.contains(fokus) && /^(INPUT|SELECT|TEXTAREA)$/.test(fokus.tagName)) return true;
-  if ([...main.querySelectorAll('input[type=text], textarea')].some(i => i.value.trim())) return true;
+  // Nur vom Nutzer GEAENDERTE Felder zaehlen -- die Rufzeichen-Felder der
+  // Admin-Ansicht sind vorbelegt, sonst lud das Archiv fuer Admins nie neu
+  if ([...main.querySelectorAll('input[type=text], textarea')].some(i => i.value !== i.defaultValue)) return true;
   return offset > LIMIT;
 }
 
