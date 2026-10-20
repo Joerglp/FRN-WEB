@@ -259,7 +259,7 @@ function fillDebugModelSelect(sel) {
 }
 
 async function replayTrace(room, ts, btn) {
-  _dbgPauseBis = Date.now() + 60000;   // Ergebnis lesbar lassen
+  _dbgPauseBis = Infinity;   // waehrend des Laufs nie neu laden (ein Modell braucht auch mal > 60 s)
   const wrap  = btn.closest(".dbg-replay");
   const model = wrap.querySelector(".dbg-replay-model").value.trim();
   const out   = wrap.querySelector(".dbg-replay-result");
@@ -290,6 +290,7 @@ async function replayTrace(room, ts, btn) {
     out.textContent = "Fehler: " + e;
   } finally {
     btn.disabled = false;
+    _dbgPauseBis = Date.now() + 60000;   // Ergebnis 60 s lesbar lassen
   }
 }
 
@@ -344,6 +345,7 @@ async function enrollSpeaker(audio, btn) {
     out.textContent = "Fehler: " + e;
   } finally {
     btn.disabled = false;
+    _dbgPauseBis = Date.now() + 30000;
   }
 }
 async function loadSpeakerIdSettings() {
@@ -515,7 +517,10 @@ function startDebugAutoRefresh() {
 let _dbgPauseBis = 0;
 for (const typ of ["input", "change"]) {
   document.addEventListener(typ, e => {
-    if (e.target.closest && e.target.closest("#debug-traces")) _dbgPauseBis = Date.now() + 30000;
+    if (!(e.target.closest && e.target.closest("#debug-traces"))) return;
+    // Ein eingetippter Sprechername ueberlebt 5 min, sonst 30 s
+    const dauer = e.target.classList.contains("dbg-enroll-name") ? 300000 : 30000;
+    _dbgPauseBis = Math.max(_dbgPauseBis, Date.now() + dauer);
   });
 }
 function _dbgBeschaeftigt() {

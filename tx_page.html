@@ -3101,14 +3101,21 @@ function connectChatWs(room) {
   clearTimeout(_chatWsReconnectTimer);
   _chatWsRoom = room;
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(room)}`,
+  const sock = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(room)}`,
                    ["frn", "frn.token." + authToken]);
+  ws = sock;
   ws.binaryType = "arraybuffer";
   ws.onmessage = onWsMessage;
   ws.onerror   = () => {};
   ws.onclose   = (evt) => {
+    // Nur die AKTUELLE Verbindung -- das spaete onclose einer abgeloesten
+    // brach sonst den PTT auf der neuen ab (2026-10-19 Review-Fund)
+    if (ws !== sock) return;
     if (evt.code === 4001) { doLogout(); return; }   // Token abgelaufen/widerrufen
-    _pttGen++; _pttWartet = false;   // wartenden pttStart abbrechen
+    if (_pttWartet) {   // wartenden pttStart abbrechen -- und das auch anzeigen
+      _pttGen++; _pttWartet = false;
+      setStatus("Verbindung verloren", "error");
+    }
     stopAudio();
     if (clipActive) {   // Clip/Sprachnachricht lief ueber diese Verbindung
       setClipButtonsSending(null);
@@ -3135,7 +3142,9 @@ async function _chatWsBereit(room) {
     const t0 = Date.now();
     const check = setInterval(() => {
       if (ws && ws.readyState === WebSocket.OPEN && _chatWsRoom === room) { clearInterval(check); res(true); }
-      else if (Date.now() - t0 > 5000) { clearInterval(check); res(false); }
+      // Gerade aufgebaute Verbindung schon wieder zu (Server nicht erreichbar)
+      // -> sofort melden statt 5 s zu warten
+      else if (!ws || ws.readyState > WebSocket.OPEN || Date.now() - t0 > 5000) { clearInterval(check); res(false); }
     }, 50);
   });
 }
@@ -3433,6 +3442,12 @@ async function pttStart(e) {
     aufgeben("AudioWorklet-Fehler: " + err.message); return;
   }
   if (gen !== _pttGen) { aufgeben(); return; }
+  // Raum gewechselt oder Verbindung weg, waehrend gewartet wurde? Dann nicht
+  // im falschen Raum bzw. auf einen nicht offenen Socket senden (2026-10-19)
+  if (!ws || ws.readyState !== WebSocket.OPEN || _chatWsRoom !== room
+      || document.getElementById("room-select").value !== room) {
+    aufgeben("Raum gewechselt oder Verbindung weg — bitte erneut drücken"); return;
+  }
 
   // Ab hier gilt der Druck: Objekte global machen (stopAudio raeumt sie ab)
   _pttWartet = false;
@@ -5640,7 +5655,10 @@ function startDebugAutoRefresh() {
 let _dbgPauseBis = 0;
 for (const typ of ["input", "change"]) {
   document.addEventListener(typ, e => {
-    if (e.target.closest && e.target.closest("#debug-traces")) _dbgPauseBis = Date.now() + 30000;
+    if (!(e.target.closest && e.target.closest("#debug-traces"))) return;
+    // Ein eingetippter Sprechername ueberlebt 5 min, sonst 30 s
+    const dauer = e.target.classList.contains("dbg-enroll-name") ? 300000 : 30000;
+    _dbgPauseBis = Math.max(_dbgPauseBis, Date.now() + dauer);
   });
 }
 function _dbgBeschaeftigt() {
@@ -5728,7 +5746,7 @@ function replayAuswahl(wert) {
                                  : { provider: v ? "ollama" : "", model: v };
 }
 async function replayTrace(room, ts, btn) {
-  _dbgPauseBis = Date.now() + 60000;   // Ergebnis lesbar lassen
+  _dbgPauseBis = Infinity;   // waehrend des Laufs nie neu laden (ein Modell braucht auch mal > 60 s)
   const wrap  = btn.closest(".dbg-replay");
   const model = wrap.querySelector(".dbg-replay-model").value.trim();
   const out   = wrap.querySelector(".dbg-replay-result");
@@ -5759,6 +5777,7 @@ async function replayTrace(room, ts, btn) {
     out.textContent = "Fehler: " + e;
   } finally {
     btn.disabled = false;
+    _dbgPauseBis = Date.now() + 60000;   // Ergebnis 60 s lesbar lassen
   }
 }
 async function enrollSpeaker(audio, btn) {
@@ -5798,6 +5817,7 @@ async function enrollSpeaker(audio, btn) {
     out.textContent = "Fehler: " + e;
   } finally {
     btn.disabled = false;
+    _dbgPauseBis = Date.now() + 30000;
   }
 }
 async function loadSpeakerIdSettings() {

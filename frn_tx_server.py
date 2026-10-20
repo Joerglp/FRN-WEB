@@ -363,36 +363,39 @@ class FRNTXRoom:
         self._reader = None
 
     async def disconnect(self):
+        # Alles, was zur Verbindung gehoert, SOFORT (vor dem ersten await)
+        # abhaengen und erst danach in Ruhe schliessen. Vorher wurden Felder
+        # nach den awaits zurueckgesetzt und die Encoder am Ende ein zweites
+        # Mal freigegeben -- verband sich der Raum in dieser Luecke neu, traf
+        # das die NEUE Verbindung und ihren Encoder (2026-10-19 Review-Fund).
         self._trenn_nr += 1
         self._connected = False
+        # Native GSM-Codec-Handles (gsm_create()) freigeben -- werden vom
+        # Python-GC NICHT automatisch verwaltet (2026-08-19 Review-Fund).
+        # ensure_connected legt sie beim naechsten Verbinden neu an.
+        self._encoder.close()
+        if self._gsm_dec:
+            self._gsm_dec.close()
         for t in (self._keepalive_task, self._reader_task):
             if t:
                 t.cancel()
         self._keepalive_task = None
         self._reader_task    = None
-        if self._writer:
+        writer, self._writer, self._reader = self._writer, None, None
+        rx_clients = list(self._rx_clients)
+        self._rx_clients.clear()
+        if writer:
             try:
-                self._writer.close()
-                await self._writer.wait_closed()
+                writer.close()
+                await writer.wait_closed()
             except Exception:
                 pass
-        self._writer = None
-        self._reader = None
         # Close all RX WebSocket listeners
-        for ws in list(self._rx_clients):
+        for ws in rx_clients:
             try:
                 await ws.close()
             except Exception:
                 pass
-        self._rx_clients.clear()
-        # Native GSM-Codec-Handles (gsm_create()) freigeben -- werden vom
-        # Python-GC NICHT automatisch verwaltet. Ohne diesen Aufruf leckt
-        # jede beendete Verbindung (Raumwechsel, Logout) zwei native
-        # Handles fuer die Lebensdauer des Prozesses (2026-08-19 Review-
-        # Fund).
-        self._encoder.close()
-        if self._gsm_dec:
-            self._gsm_dec.close()
 
     async def send_text(self, text: str):
         """Send a text message to the FRN room."""
@@ -3860,15 +3863,17 @@ class TXServer:
             return web.json_response({"error": "bad request"}, status=400)
         if room and daten.get("puls"):
             # Nur Lebenszeichen "laeuft noch" -- kein Vorwaermen, kein
-            # _rx_zuletzt (das traf sonst auch das Echo der Bots selbst)
-            if beginn > self._rx_ende.get(room, 0.0):
+            # _rx_zuletzt (das traf sonst auch das Echo der Bots selbst).
+            # Meldungen koennen sich ueberholen: eine verspaetete der VORIGEN
+            # Durchsage darf die laufende nicht verdraengen.
+            if beginn > self._rx_ende.get(room, 0.0) and beginn >= self._rx_offen.get(room, 0.0):
                 self._rx_offen[room] = beginn
                 self._rx_puls[room] = time.time()
             return web.json_response({"ok": True})
         if room:
             # Meldungen laufen in eigenen Threads und koennen sich ueberholen:
             # ein Beginn, dessen Ende schon da ist, oeffnet nichts mehr.
-            if beginn > self._rx_ende.get(room, 0.0):
+            if beginn > self._rx_ende.get(room, 0.0) and beginn >= self._rx_offen.get(room, 0.0):
                 self._rx_offen[room] = beginn
                 self._rx_puls[room] = time.time()   # frn_stream wiederholt die Meldung alle 2 s
             self._bot_vorwaermen_pruefen(room)
@@ -3974,19 +3979,33 @@ class TXServer:
     # Deren Transkript kommt erst nach Stille-Ende + Whisper -- so lange warten.
     _NACHLEGEN_TRANSKRIPT_S = 6.0
 
-    def _rx_letztes(self, room_name: str, jetzt: float, ab: float = 0.0) -> float:
+    def _rx_letztes(self, room_name: str, jetzt: float, tx_raum: str = "") -> float:
         """Letztes empfangenes Audio. Raeume, die nur frn_stream mithoert,
         melden Beginn und Ende der Durchsage statt jedes Pakets -- dazwischen
-        gilt der Kanal als belegt. Nur Durchsagen, die nach `ab` begannen:
-        frn_stream hoert auch die Bots selbst, und deren eigene Sendung zaehlte
-        sonst beim Nachlegen als Kanal belegt (2026-10-19 Review-Fund). Ohne
-        Lebenszeichen (frn_stream meldet alle 2 s) gilt sie nach 5 s als
-        beendet -- eine verlorene Ende-Meldung sperrte sonst 5 Minuten."""
+        gilt der Kanal als belegt. Ohne Lebenszeichen (frn_stream meldet alle
+        2 s) gilt sie nach 5 s als beendet -- eine verlorene Ende-Meldung
+        sperrte sonst 5 Minuten.
+
+        frn_stream hoert auch die Bots selbst. Mit tx_raum zaehlt eine
+        Durchsage, die waehrend einer eigenen Bot-Sendung begann, nur dann,
+        wenn danach noch Lebenszeichen kommen: dann hat jemand direkt
+        angeschlossen und frn_stream beides in einer Aufnahme (2026-10-19
+        Review-Fund -- "Beginn vor t1" uebersah genau diesen Menschen)."""
         beginn = self._rx_offen.get(room_name)
-        if (beginn is not None and beginn > ab
-                and jetzt - self._rx_puls.get(room_name, beginn) < 5.0):
-            return jetzt
+        puls = self._rx_puls.get(room_name, beginn or 0.0)
+        if beginn is not None and jetzt - puls < 5.0:
+            echo_ende = self._bot_echo_ende(tx_raum, beginn) if tx_raum else None
+            if echo_ende is None or puls > echo_ende + 1.0:
+                return jetzt
         return self._rx_zuletzt.get(room_name, 0.0)
+
+    def _bot_echo_ende(self, room_name: str, beginn: float) -> float | None:
+        """Ende der eigenen Bot-Sendung, waehrend der eine Durchsage begann
+        (= deren Echo), sonst None."""
+        for t0, t1, _x in self._bot_own_tx.get(room_name, []):
+            if t0 - 1.0 <= beginn <= t1 + 0.5:
+                return t1
+        return None
 
     async def _nachlegen_lauf(self, room, room_name: str, bid: str, zusatz: str, t1: float,
                               vorher: float = 0.0, stempel: float = 0.0):
@@ -4002,11 +4021,11 @@ class TXServer:
         while True:
             await asyncio.sleep(0.1)
             jetzt = time.time()
-            if jetzt - self._rx_letztes(room.name, jetzt, t1) < 0.2:
+            if jetzt - self._rx_letztes(room.name, jetzt, room_name) < 0.2:
                 belegt += jetzt - davor     # echte Zeit, die Schleife kann nachhinken
             davor = jetzt
             if (jetzt - start >= self._NACHLEGEN_PAUSE_S
-                    and jetzt - self._rx_letztes(room.name, jetzt, t1) >= self._NACHLEGEN_STILLE_S):
+                    and jetzt - self._rx_letztes(room.name, jetzt, room_name) >= self._NACHLEGEN_STILLE_S):
                 break
             if jetzt - start > self._NACHLEGEN_MAX_WARTE_S:
                 abbruch = f"keine Stille in {self._NACHLEGEN_MAX_WARTE_S:.0f}s"
@@ -4019,7 +4038,7 @@ class TXServer:
             while time.time() < bis and not jemand_sprach():
                 await asyncio.sleep(0.2)
             jetzt = time.time()
-            if not jemand_sprach() and jetzt - self._rx_letztes(room.name, jetzt, t1) < self._NACHLEGEN_STILLE_S:
+            if not jemand_sprach() and jetzt - self._rx_letztes(room.name, jetzt, room_name) < self._NACHLEGEN_STILLE_S:
                 abbruch = "Kanal wieder belegt"
         if not abbruch and jemand_sprach():
             abbruch = "inzwischen hat jemand gesprochen"
@@ -5494,6 +5513,10 @@ class TXServer:
         try:
             d = json.loads(self._nachrichten_pfad.read_text(encoding="utf-8"))
             self._nachrichten = [n for n in d.get("nachrichten", []) if isinstance(n, dict)]
+            # "plan" gilt nur fuer einen laufenden Zustell-Lauf -- nach einem
+            # Neustart haengte eine Nachricht sonst fuer immer (2026-10-19)
+            for n in self._nachrichten:
+                n.pop("plan", None)
         except Exception:
             self._nachrichten = []
 
@@ -5790,6 +5813,8 @@ class TXServer:
             nbid = n.get("bot") or ""
             if (nbid if nbid in self._bot_ids() else "") not in aktiv:
                 continue
+            if not self._bot_raum_ok(nbid if nbid in self._bot_ids() else "", room_name):
+                continue
             an = self._namen_norm(n["an"])
             sicher = (cs == an
                       or re.search(rf"\b(?:hier\s+(?:ist|spricht|sitzt)\s+(?:der\s+|die\s+)?|"
@@ -5803,25 +5828,40 @@ class TXServer:
                 # Nur die, deren Bot an ist -- eine von Robert (aus) angenommene
                 # liess sonst die ganze Zustellung als Robert scheitern, und
                 # Susis Nachricht kam nie an (2026-10-19 Review-Fund)
+                # Gleiche Pruefungen wie oben und nur derselbe Bot -- sonst
+                # liefen Wartezeit/Raumgrenze ins Leere und eine fremde
+                # Nachricht ging mit falscher Stimme raus (2026-10-19)
+                zbid = nbid if nbid in self._bot_ids() else ""
                 for m in self._nachrichten:
                     mbid = m.get("bot") or ""
-                    if (not m.get("zugestellt") and self._namen_norm(m["an"]) == an
-                            and (mbid if mbid in self._bot_ids() else "") in aktiv):
+                    if (not m.get("zugestellt") and not m.get("plan")
+                            and self._namen_norm(m["an"]) == an
+                            and (mbid if mbid in self._bot_ids() else "") == zbid
+                            and ts >= m.get("ts", 0) + 20 and jetzt >= m.get("naechster", 0)):
                         m["plan"] = True
-                asyncio.create_task(self._nachricht_zustellen(room, room_name, n["an"]))
+                asyncio.create_task(self._nachricht_zustellen(room, room_name, n["an"], zbid))
             elif gruss:
                 n["gegruesst"] = ts      # begruesst -- ist er da, antwortet er gleich
 
-    async def _nachricht_zustellen(self, room, room_name: str, an: str):
+    def _bot_raum_ok(self, bid: str, room_name: str) -> bool:
+        """Darf dieser Bot in dem Raum sprechen (voice.bot/bots_weitere rooms)?"""
+        tok = self._bot_im(bid)
+        try:
+            rooms = self._bot_cfg().get("rooms") or []
+        finally:
+            _BOT_KONTEXT.reset(tok)
+        return not rooms or room_name in rooms
+
+    async def _nachricht_zustellen(self, room, room_name: str, an: str, bid: str = ""):
         offen = [n for n in self._nachrichten
                  if not n.get("zugestellt") and n.get("plan")
-                 and self._namen_norm(n["an"]) == self._namen_norm(an)]
+                 and self._namen_norm(n["an"]) == self._namen_norm(an)
+                 and ((n.get("bot") or "") if (n.get("bot") or "") in self._bot_ids() else "") == bid]
         if not offen:
             return
         saetze = " Und: ".join(n["satz"].rstrip(".!") + "." for n in offen)
         text = f"{an}, ich soll dir was ausrichten: {saetze}"
-        bid = offen[0].get("bot") or ""
-        tok = self._bot_im(bid if bid in self._bot_ids() else "")
+        tok = self._bot_im(bid)
         try:
             ok = await self._spontan_senden(room, room_name, text, "(Nachricht zugestellt)", 300)
         finally:

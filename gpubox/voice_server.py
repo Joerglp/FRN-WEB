@@ -125,7 +125,8 @@ def _get_latents(speaker: str):
         built = _builtin_latents(speaker)
         if built is not None:
             log.info("Sprecher '%s': eingebauter XTTS-Studio-Sprecher", speaker)
-            _latents[speaker] = built
+            if _sample_nr.get(speaker, 0) == nr:   # nicht ueber eine frische Probe legen
+                _latents[speaker] = built
             return built
         raise FileNotFoundError(f"Kein Stimm-Sample für Sprecher '{speaker}'")
     log.info("Berechne Sprecher-Latents für '%s' aus %s …", speaker, wav)

@@ -1123,14 +1123,20 @@ function onAutoReloadToggle() {
   }
 }
 
+let _archivEingabeBis = 0;
+document.addEventListener('input', e => {
+  if (e.target.closest && e.target.closest('#main-content')) _archivEingabeBis = Date.now() + 120000;
+});
+
 function _archivBeschaeftigt() {
   const main = document.getElementById('main-content');
   if ([...main.querySelectorAll('audio')].some(a => !a.paused)) return true;
   const fokus = document.activeElement;
   if (fokus && main.contains(fokus) && /^(INPUT|SELECT|TEXTAREA)$/.test(fokus.tagName)) return true;
-  // Nur vom Nutzer GEAENDERTE Felder zaehlen -- die Rufzeichen-Felder der
-  // Admin-Ansicht sind vorbelegt, sonst lud das Archiv fuer Admins nie neu
-  if ([...main.querySelectorAll('input[type=text], textarea')].some(i => i.value !== i.defaultValue)) return true;
+  // Kurz nach einer Eingabe (2 min) nicht neu laden. Feldinhalte selbst
+  // taugen nicht: Rufzeichen sind vorbelegt bzw. bleiben nach dem Speichern
+  // stehen -- dann lud das Archiv fuer Admins nie wieder neu (2026-10-19)
+  if (Date.now() < _archivEingabeBis) return true;
   return offset > LIMIT;
 }
 
