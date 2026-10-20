@@ -2476,6 +2476,13 @@ class TXServer:
         """Besteht der Spruch fast nur aus Whisper-Hotwords? ("Ciao, Robert, Eddie,
         Eickelborn, Lippstadt." am 07.10. -- Whisper erfindet bei unklarem Ton gern
         eine Aufzaehlung aus seiner Hotword-Liste; 12 Faelle seit 20.09.)"""
+        # Oft verstuemmelt Whisper die Hotwords dabei ("80er, 80er, Oelsteine,
+        # Lippen, Susi, Oelsteine." am 20.10.) -- dann zaehlt die Form: mind. 5
+        # Bruchstuecke zu je hoechstens 2 Woertern, keine Frage.
+        stuecke = [f for f in re.split(r"[,.!;]+", low) if re.search(r"\w", f)]
+        if ("?" not in low and len(stuecke) >= 5
+                and all(len(re.findall(r"\w+", f)) <= 2 for f in stuecke)):
+            return True
         hot = str((self.cfg.get("whisper") or {}).get("hotwords") or "").lower()
         hw = set(re.findall(r"\w+", hot))
         worte = re.findall(r"\w+", low)
