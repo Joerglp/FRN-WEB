@@ -2323,8 +2323,12 @@ class TXServer:
         Aufnahmezeit fällt in ein eigenes Sendefenster ODER der Text ähnelt
         stark dem zuletzt selbst Gesagten."""
         low = text.lower()
+        # Fenster endet mit dem Sendeschluss (20.10.): mit +3s galt eine
+        # schnelle Antwort ("Man kann zufrieden sein." 2,6s danach) als Echo,
+        # landete als eigener Satz im Verlauf und loeste nichts aus -- 75
+        # fremde Sprueche seit 10.09. Was nach t1 anfaengt, ist nicht von ihm.
         for t0, t1, sent in self._bot_own_tx.get(room_name, []):
-            if t0 - 3.0 <= ts <= t1 + 3.0:
+            if t0 - 3.0 <= ts <= t1:
                 return True
             if sent and difflib.SequenceMatcher(
                     None, low, sent.lower(), autojunk=False).ratio() > 0.7:
