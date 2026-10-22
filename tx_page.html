@@ -1916,6 +1916,31 @@ audio {
           </div>
 
           <div class="form-field" style="flex:1 1 300px">
+            <label>Neue XTTS-Stimme <span style="color:var(--muted)">— aus einer Stimmprobe</span></label>
+            <label style="font-size:.7rem;color:var(--muted);margin-top:2px">Name (a–z, 0–9, _ und -)
+              <input type="text" id="stimme-name" placeholder="z. B. susi2" maxlength="40"
+                     style="width:100%" autocomplete="off"></label>
+            <label style="font-size:.7rem;color:var(--muted);margin-top:4px">Datei (WAV, MP3, M4A, OGG …)
+              <input type="file" id="stimme-datei" accept="audio/*,.m4a,.mp4,.opus,.ogg,.wav,.mp3,.aac,.flac"
+                     style="width:100%"></label>
+            <button class="btn-save" id="stimme-hochladen-btn" style="margin-top:6px;font-size:.72em" onclick="stimmeHochladen()">Hochladen</button>
+            <label style="font-size:.7rem;color:var(--muted);margin-top:8px">Hörprobe
+              <input type="text" id="stimme-probe-text" style="width:100%" autocomplete="off"
+                     value="Hallo zusammen, hier spricht die neue Stimme auf Kanal 74. Wie kommt das bei euch an?"></label>
+            <span style="display:flex;gap:5px;margin-top:4px">
+              <input type="text" id="stimme-probe-name" list="xtts-speaker-list" placeholder="Stimme" style="flex:1" autocomplete="off">
+              <button class="btn-save" id="stimme-probe-btn" style="font-size:.72em" onclick="stimmeProbe()">▶ Anhören</button>
+            </span>
+            <datalist id="xtts-speaker-list"></datalist>
+            <div id="stimme-status" style="font-size:.72rem;margin-top:6px;min-height:1em"></div>
+            <div style="font-size:.7rem;color:var(--muted);margin-top:4px;line-height:1.35">
+              Gut sind <b>10–30 Sekunden</b>, nur eine Person, ohne Musik und mit wenig Hall —
+              Funk-Mitschnitte klingen auch geklont nach Funk. Mehr als 60 s werden abgeschnitten.
+              Danach steht die Stimme oben und bei Susi zur Auswahl.
+            </div>
+          </div>
+
+          <div class="form-field" style="flex:1 1 300px">
             <label>Rückfallebene <span style="color:var(--muted)">— wenn die GPU-Box nicht antwortet</span></label>
             <label style="display:flex;align-items:center;gap:8px;margin:2px 0 4px;cursor:pointer;font-size:.78rem">
               <input type="checkbox" id="tts-fallback-local" onchange="saveTts()" style="accent-color:#f0b429" autocomplete="off">
@@ -5087,6 +5112,82 @@ function fillXttsSpeakers(eigene, studio) {
   }
   sel.value = aktuell;
   sel.dataset.aktuell = aktuell;
+  // Vorschlagsliste fuer Susis Stimme und die Hoerprobe
+  const dl = document.getElementById("xtts-speaker-list");
+  if (dl) dl.innerHTML = alle.map(n => `<option value="${esc(n)}">`).join("");
+}
+
+// Neue XTTS-Stimme aus einer Datei (2026-10-22)
+function _stimmeStatus(text, fehler) {
+  const el = document.getElementById("stimme-status");
+  el.textContent = text;
+  el.style.color = fehler ? "var(--red)" : "var(--accent)";
+}
+
+async function stimmeHochladen(ersetzen) {
+  const name  = document.getElementById("stimme-name").value.trim().toLowerCase();
+  const datei = document.getElementById("stimme-datei").files[0];
+  if (!/^[a-z0-9_-]{2,40}$/.test(name)) { _stimmeStatus("Name: 2–40 Zeichen, nur a–z, 0–9, _ und -", true); return; }
+  if (!datei) { _stimmeStatus("Bitte eine Datei wählen", true); return; }
+  const btn = document.getElementById("stimme-hochladen-btn");
+  btn.disabled = true;
+  _stimmeStatus("⏳ Wird umgewandelt und zum XTTS-Server übertragen …");
+  try {
+    const q = `?name=${encodeURIComponent(name)}` + (ersetzen ? "&ersetzen=1" : "");
+    const r = await adminFetch("/api/admin/tts/stimme" + q, {
+      method: "POST",
+      headers: { "Content-Type": datei.type || "application/octet-stream" },
+      body: datei,
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 409 && d.existiert) {
+      if (confirm(`Die Stimme „${name}“ gibt es schon. Ersetzen?`)) return stimmeHochladen(true);
+      _stimmeStatus("Nicht ersetzt");
+      return;
+    }
+    if (!r.ok) { _stimmeStatus(d.error || `Fehler ${r.status}`, true); return; }
+    _stimmeStatus(`✓ „${d.speaker}“ gespeichert (${d.duration_s} s` +
+                  (d.gekuerzt ? ", auf 60 s gekürzt" : "") + ") — jetzt anhören");
+    document.getElementById("stimme-probe-name").value = d.speaker;
+    const v = await (await adminFetch("/api/admin/tts/voices")).json();
+    fillXttsSpeakers(v.xtts_eigene, v.xtts_studio);
+  } catch (e) {
+    _stimmeStatus("Fehler: " + e, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function stimmeProbe() {
+  const name = document.getElementById("stimme-probe-name").value.trim();
+  const text = document.getElementById("stimme-probe-text").value.trim();
+  if (!name || !text) { _stimmeStatus("Stimme und Text angeben", true); return; }
+  const btn = document.getElementById("stimme-probe-btn");
+  btn.disabled = true;
+  _stimmeStatus("⏳ Hörprobe wird erzeugt …");
+  try {
+    const r = await adminFetch("/api/admin/tts/stimme-probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, text }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      _stimmeStatus(d.error || `Fehler ${r.status}`, true);
+      return;
+    }
+    const ctx = _tonCtx();
+    const audio = await ctx.decodeAudioData(await r.arrayBuffer());
+    const src = ctx.createBufferSource();
+    src.buffer = audio;
+    src.connect(ctx.destination);
+    src.start();
+    _stimmeStatus(`▶ „${name}“`);
+  } catch (e) {
+    _stimmeStatus("Fehler: " + e, true);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // Stimmungen/Sprecher der gewaehlten Stimme als Vorschlagsliste fuer das Feld
@@ -5339,7 +5440,7 @@ function botsWeitereZeigen(bots) {
         <div class="form-field"><label>Name</label>
           <input type="text" class="bw-name" maxlength="30" value="${esc(b.name)}" autocomplete="off"></div>
         <div class="form-field"><label>Stimme <small>XTTS-Sprecher</small></label>
-          <input type="text" class="bw-speaker" list="bot-speaker-list" value="${esc(b.xtts_speaker || "")}" autocomplete="off"></div>
+          <input type="text" class="bw-speaker" list="xtts-speaker-list" value="${esc(b.xtts_speaker || "")}" autocomplete="off"></div>
       </div>
       <div class="form-field"><label>Hört auch auf <small>Komma-getrennt, z.B. Whisper-Schreibweisen</small></label>
         <input type="text" class="bw-trigger" value="${esc((b.trigger || []).join(", "))}" autocomplete="off"></div>

@@ -8397,6 +8397,132 @@ class TXServer:
                                   "remote_voice": (v.get("remote_voice") or ""),
                                   "xtts_speaker": (v.get("xtts_speaker") or "aaron_dreschner"),
                                   "xtts_stream": bool(v.get("xtts_stream", True))})
+    # Neue XTTS-Stimme aus einer Datei (2026-10-22): Name + Audiodatei (WAV,
+    # MP3, M4A, Handy-Aufnahme ...) -> 24 kHz mono wie beim Mikrofon-Weg
+    # (handle_voice_sample_upload) -> Voice-Server /speaker/{name}. Danach
+    # steht sie in der Auswahl fuer Robert und Susi.
+    _STIMME_MAX_BYTES = 40 * 1024 * 1024
+    _STIMME_MAX_S     = 60     # XTTS nutzt vom Referenz-Sample ohnehin nur ~30 s
+
+    async def _xtts_sprecher(self) -> tuple[list, list]:
+        """(eigene, Studio-Stimmen) laut /speakers des XTTS-Servers."""
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as sess:
+            async with sess.get(self._voice_server_base() + "/speakers") as resp:
+                xd = await resp.json() if resp.status == 200 else {}
+        return xd.get("speakers") or [], xd.get("builtin") or []
+
+    async def handle_admin_tts_stimme(self, request):
+        """POST /api/admin/tts/stimme?name=..&ersetzen=1 -- Body: Audiodatei."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        name = (request.query.get("name") or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9_\-]{2,40}", name):
+            return web.json_response(
+                {"error": "Name: 2–40 Zeichen, nur a–z, 0–9, _ und -"}, status=400)
+        if name == "default":
+            return web.json_response({"error": "„default“ ist reserviert"}, status=400)
+        base = self._voice_server_base()
+        if not base:
+            return web.json_response({"error": "XTTS-Server nicht konfiguriert"}, status=503)
+        try:
+            eigene, studio = await self._xtts_sprecher()
+        except Exception as e:
+            return web.json_response({"error": f"XTTS-Server: {e}"}, status=502)
+        if name in studio:
+            return web.json_response({"error": "So heißt schon eine Studio-Stimme"}, status=400)
+        if name in eigene and request.query.get("ersetzen") != "1":
+            return web.json_response({"error": f"Stimme „{name}“ gibt es schon",
+                                      "existiert": True}, status=409)
+        # request.read() ist auf 1 MB begrenzt (client_max_size) -- Dateien
+        # sind groesser, darum selbst lesen, mit eigener Grenze
+        raw = bytearray()
+        async for chunk in request.content.iter_chunked(65536):
+            raw += chunk
+            if len(raw) > self._STIMME_MAX_BYTES:
+                return web.json_response({"error": "Datei zu groß (max. 40 MB)"}, status=413)
+        if len(raw) < 10000:
+            return web.json_response({"error": "Datei zu klein"}, status=400)
+
+        voices_dir = Path(__file__).parent / "voices"
+        voices_dir.mkdir(exist_ok=True)
+        wav_path = voices_dir / f".{name}-{uuid.uuid4().hex[:8]}.wav"
+        # Datei statt pipe: MP4/M4A braucht einen durchsuchbaren Eingang
+        roh_path = voices_dir / f".{name}-{uuid.uuid4().hex[:8]}.roh"
+        roh_path.write_bytes(bytes(raw))
+        try:
+            ffm = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", str(roh_path), "-vn", "-t", str(self._STIMME_MAX_S),
+                "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+                "-ar", "24000", "-ac", "1", "-sample_fmt", "s16",
+                str(wav_path),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await ffm.wait()
+        finally:
+            roh_path.unlink(missing_ok=True)
+        if ffm.returncode != 0 or not wav_path.exists():
+            wav_path.unlink(missing_ok=True)
+            return web.json_response({"error": "Datei ist kein lesbares Audio"}, status=400)
+        import wave as _wave
+        try:
+            with _wave.open(str(wav_path), "rb") as wf:
+                dur = wf.getnframes() / wf.getframerate()
+        except Exception:
+            wav_path.unlink(missing_ok=True)
+            return web.json_response({"error": "ungültiges Audio"}, status=400)
+        if dur < 6.0:
+            wav_path.unlink(missing_ok=True)
+            return web.json_response(
+                {"error": f"Probe zu kurz ({dur:.1f}s) — 10–30 Sekunden sind gut"}, status=400)
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as sess:
+                async with sess.post(f"{base}/speaker/{name}",
+                                     data=wav_path.read_bytes(),
+                                     headers=self._voice_server_hdrs()) as resp:
+                    rdata = await resp.json()
+                    if resp.status != 200:
+                        wav_path.unlink(missing_ok=True)
+                        return web.json_response(
+                            {"error": rdata.get("error", "XTTS-Server-Fehler")}, status=502)
+        except Exception as e:
+            wav_path.unlink(missing_ok=True)
+            return web.json_response({"error": f"XTTS-Server: {e}"}, status=502)
+        os.replace(wav_path, voices_dir / f"{name}.wav")
+        log.info("Neue XTTS-Stimme '%s' gespeichert (%.1fs)", name, dur)
+        return web.json_response({"ok": True, "speaker": name, "duration_s": round(dur, 1),
+                                  "gekuerzt": dur >= self._STIMME_MAX_S - 0.5})
+
+    async def handle_admin_tts_stimme_probe(self, request):
+        """POST {name, text} -- Hoerprobe einer XTTS-Stimme (WAV, kein Funk)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        name = str(body.get("name") or "").strip()
+        text = str(body.get("text") or "").strip()[:300]
+        if not name or not text:
+            return web.json_response({"error": "Name und Text nötig"}, status=400)
+        vcfg = self.cfg.get("voice", {})
+        url  = (vcfg.get("xtts_url") or "").strip()
+        if not url:
+            return web.json_response({"error": "XTTS-Server nicht konfiguriert"}, status=503)
+        payload = {"text": text, "language": vcfg.get("language", "de"), "speaker": name}
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as sess:
+                async with sess.post(url, json=payload) as resp:
+                    if resp.status != 200:
+                        return web.json_response(
+                            {"error": (await resp.text())[:120]}, status=502)
+                    wav = await resp.read()
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=502)
+        return web.Response(body=wav, content_type="audio/wav")
+
     async def handle_admin_tts_voices(self, request):
         """GET /api/admin/tts/voices — installierte Stimmen des lokalen Piper
         (Wyoming "describe"), deutsche zuerst. Fuer die Auswahlliste in der
@@ -10991,6 +11117,8 @@ class TXServer:
         app.router.add_get ("/api/admin/tts",       self.handle_admin_tts)
         app.router.add_post("/api/admin/tts",       self.handle_admin_tts)
         app.router.add_get ("/api/admin/tts/voices", self.handle_admin_tts_voices)
+        app.router.add_post("/api/admin/tts/stimme", self.handle_admin_tts_stimme)
+        app.router.add_post("/api/admin/tts/stimme-probe", self.handle_admin_tts_stimme_probe)
         app.router.add_get ("/api/admin/bot-chats",  self.handle_admin_bot_chats)
         app.router.add_get ("/api/admin/bot-prompt", self.handle_admin_bot_prompt)
         app.router.add_get ("/api/admin/notiz-vorschlaege", self.handle_admin_notiz_vorschlaege)
