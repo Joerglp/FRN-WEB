@@ -2434,6 +2434,10 @@ class TXServer:
         r"\b(?:dein|deine|deinem|deinen|deiner|mein|meine|meinem|meinen|meiner|"
         r"euer|eure|eurem|euren|unser\w*)\s+$")
     _KOSENAME_NACH = re.compile(r"^\s*[,!?]")
+    # Funk-Schlussformel ", kommt." / ", kommen." am Satzende ist ein Anruf,
+    # auch mit "den" davor (24.10. #35107: "QRZ den Robert und seine Pferde,
+    # kommt." -- blieb als Erzaehlung unbeantwortet).
+    _KOMMT_SCHLUSS = re.compile(r",\s*(?:so\s+)?komm(?:t|en)\s*$")
 
     def _nur_erwaehnt(self, low: str, m) -> bool:
         anfang = max(low.rfind(z, 0, m.start()) for z in ".!?")
@@ -2445,6 +2449,8 @@ class TXServer:
         if ende < len(low) and low[ende] == "?":
             return False
         if self._DU_RE.search(low[anfang + 1:ende]):
+            return False
+        if self._KOMMT_SCHLUSS.search(low[m.end():ende]):
             return False
         return bool(self._ERWAEHNT_VOR.search(low[anfang + 1:m.start()])
                     or self._ERWAEHNT_NACH.search(low[m.end():ende]))
