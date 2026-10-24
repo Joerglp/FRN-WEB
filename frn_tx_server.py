@@ -7497,6 +7497,58 @@ class TXServer:
             "search_query": search_query,
             "seconds": round(time.time() - t0, 1)})
 
+    # Zwiegespraech-Trockentest (25.10.): Robert und Susi abwechselnd im Chat,
+    # sendet NICHTS. Die Seite ruft je Wechsel einen Schritt ab und haelt den
+    # Verlauf selbst -- so beendet der Not-Halt dort sofort alles.
+    _ZWIE_ZUSATZ = ("{von} hat dich eben angesprochen. Antworte, wenn du etwas "
+                    "Eigenes dazu hast; sonst antworte mit SKIP.")
+
+    async def handle_admin_bot_zwiegespraech(self, request):
+        """POST {verlauf: [{wer, text, bot?}], bot?} → nächster Wechsel.
+        bot fehlt: wer im ersten Spruch gerufen wird, danach der jeweils andere."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+            verlauf = [z for z in body.get("verlauf") or [] if isinstance(z, dict)][-30:]
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        if not verlauf or not str(verlauf[0].get("text") or "").strip():
+            return web.json_response({"error": "kein Text"}, status=400)
+        ids = self._bot_ids()
+        bid = body.get("bot")
+        if bid not in ids:
+            letzter = next((z.get("bot") for z in reversed(verlauf) if z.get("bot") in ids), None)
+            if letzter is None:
+                bid = self._bot_waehlen("", str(verlauf[0]["text"]).lower()) if len(ids) > 1 else ""
+            else:
+                bid = ids[(ids.index(letzter) + 1) % len(ids)]
+        tok = self._bot_im(bid)
+        try:
+            bot = self._bot_cfg()
+            name = bot.get("name") or "Robert"
+            t = time.time() - 15 * len(verlauf)
+            hist = []
+            for i, z in enumerate(verlauf):
+                wer = str(z.get("wer") or "Testfunker")
+                if z.get("bot") in ids:
+                    wer += " (du)"
+                hist.append((t + 15 * i, wer, str(z.get("text") or "")))
+            von = str(verlauf[-1].get("wer") or "")
+            zusatz = (self._ZWIE_ZUSATZ.format(von=von)
+                      if len(verlauf) > 1 and verlauf[-1].get("bot") in ids else "")
+            t0 = time.time()
+            answer, raw = await self._bot_ollama(bot, hist, with_raw=True, zusatz=zusatz)
+            answer, stimmung = self._emotion_abtrennen(answer or "", bot)
+            answer = answer.strip()
+        finally:
+            _BOT_KONTEXT.reset(tok)
+        return web.json_response({
+            "bot": bid, "name": name, "answer": answer or "SKIP",
+            "would_reply": bool(answer), "stimmung": stimmung, "raw": raw,
+            "seconds": round(time.time() - t0, 1)})
+
     async def handle_admin_debug_replay(self, request):
         """Trockenlauf mit dem ECHTEN Gespraechsverlauf einer bereits im
         Debug-Panel aufgezeichneten Durchsage, aber wahlweise einem ANDEREN
@@ -11115,6 +11167,7 @@ class TXServer:
         app.router.add_post("/api/admin/tagesprogramm", self.handle_admin_tagesprogramm)
         app.router.add_post("/api/admin/bot",       self.handle_admin_bot)
         app.router.add_post("/api/admin/bot/test",  self.handle_admin_bot_test)
+        app.router.add_post("/api/admin/bot/zwiegespraech", self.handle_admin_bot_zwiegespraech)
         app.router.add_post("/api/admin/bot/probe", self.handle_admin_bot_probe)
         app.router.add_post("/api/intern/sprechbeginn", self.handle_intern_sprechbeginn)
         app.router.add_post("/api/intern/sprechende", self.handle_intern_sprechende)

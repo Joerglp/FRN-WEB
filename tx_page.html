@@ -2117,6 +2117,35 @@ audio {
       </div>
       <div id="bot-test-result" style="margin-top:10px;font-size:.85rem;display:none;
            padding:8px 10px;border:1px solid var(--border);border-radius:6px"></div>
+      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
+      <div class="admin-section-title">Zwiegespräch (Trockentest)</div>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">
+        Ein Funker wirft einen Satz ein, danach antworten die KI-Funker abwechselnd,
+        bis einer SKIP sagt, die Höchstzahl erreicht ist oder du NOT-HALT drückst.
+        Es wird <b>nichts gesendet</b>.
+      </div>
+      <div class="form-grid">
+        <div class="form-field" style="flex:0 0 120px">
+          <label>Von</label>
+          <input type="text" id="zwie-von" value="Peter" autocomplete="off">
+        </div>
+        <div class="form-field" style="flex:3">
+          <label>Erster Spruch</label>
+          <input type="text" id="zwie-text" placeholder="Robert, frag doch mal die Susi, was sie heute Abend vorhat." autocomplete="off">
+        </div>
+        <div class="form-field" style="flex:0 0 90px">
+          <label>Max. Wechsel</label>
+          <input type="number" id="zwie-max" value="8" min="1" max="30">
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn-save" onclick="zwieStart()" id="zwie-start-btn">STARTEN</button>
+        <button class="btn-save" onclick="zwieHalt()" id="zwie-halt-btn" disabled
+                style="background:#b42318;border-color:#b42318;color:#fff">NOT-HALT</button>
+        <button class="btn-save" onclick="zwieWeiter()" id="zwie-weiter-btn" disabled>EIN WECHSEL MEHR</button>
+      </div>
+      <div id="zwie-verlauf" style="margin-top:10px;font-size:.85rem;display:none;
+           padding:8px 10px;border:1px solid var(--border);border-radius:6px"></div>
       </div>
       <div class="adm-savebar">
         <button class="btn-save" onclick="saveBotAdmin()">SPEICHERN</button>
@@ -5650,6 +5679,76 @@ async function testBot() {
   } finally {
     btn.disabled = false;
   }
+}
+
+// ── Zwiegespräch-Trockentest ────────────────────────────────────────────────
+// Die Seite hält den Verlauf und holt je Wechsel EINEN Schritt vom Server;
+// NOT-HALT bricht die laufende Anfrage ab und startet keinen weiteren.
+let _zwie = { verlauf: [], halt: false, laeuft: false, ctrl: null };
+
+function _zwieZeile(wer, text, info, farbe) {
+  const box = document.getElementById("zwie-verlauf");
+  box.style.display = "";
+  const div = document.createElement("div");
+  div.style.margin = "4px 0";
+  div.innerHTML = `<b style="color:${farbe || "var(--text)"}">${esc(wer)}:</b> ${esc(text)}` +
+    (info ? ` <span style="color:var(--muted);font-size:.75rem">(${esc(info)})</span>` : "");
+  box.appendChild(div);
+  return div;
+}
+
+function _zwieKnoepfe() {
+  document.getElementById("zwie-start-btn").disabled = _zwie.laeuft;
+  document.getElementById("zwie-halt-btn").disabled = !_zwie.laeuft;
+  document.getElementById("zwie-weiter-btn").disabled = _zwie.laeuft || !_zwie.verlauf.length;
+}
+
+async function _zwieLauf(wechsel) {
+  _zwie.halt = false; _zwie.laeuft = true; _zwieKnoepfe();
+  try {
+    for (let i = 0; i < wechsel && !_zwie.halt; i++) {
+      const warte = _zwieZeile("…", "KI denkt", "", "var(--muted)");
+      _zwie.ctrl = new AbortController();
+      let d;
+      try {
+        const r = await adminFetch("/api/admin/bot/zwiegespraech", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ verlauf: _zwie.verlauf }), signal: _zwie.ctrl.signal });
+        d = await r.json();
+      } catch(e) {
+        warte.remove();
+        _zwieZeile("■", _zwie.halt ? "NOT-HALT" : "Fehler: " + e, "", "#b42318");
+        return;
+      }
+      warte.remove();
+      if (_zwie.halt) { _zwieZeile("■", "NOT-HALT", "", "#b42318"); return; }
+      if (d.error) { _zwieZeile("■", "Fehler: " + d.error, "", "#b42318"); return; }
+      if (!d.would_reply) { _zwieZeile(d.name, "SKIP – steigt aus", d.seconds + "s", "var(--muted)"); return; }
+      _zwie.verlauf.push({ wer: d.name, text: d.answer, bot: d.bot });
+      _zwieZeile(d.name, d.answer, d.seconds + "s" + (d.stimmung ? ", " + d.stimmung : ""),
+                 d.bot ? "#e879f9" : "#f0b429");
+    }
+    if (!_zwie.halt) _zwieZeile("■", "Höchstzahl erreicht", "", "var(--muted)");
+  } finally {
+    _zwie.laeuft = false; _zwie.ctrl = null; _zwieKnoepfe();
+  }
+}
+
+function zwieStart() {
+  const text = document.getElementById("zwie-text").value.trim();
+  const von = document.getElementById("zwie-von").value.trim() || "Testfunker";
+  if (!text) return;
+  document.getElementById("zwie-verlauf").innerHTML = "";
+  _zwie.verlauf = [{ wer: von, text }];
+  _zwieZeile(von, text, "", "#38bdf8");
+  _zwieLauf(Math.max(1, Math.min(30, +document.getElementById("zwie-max").value || 8)));
+}
+
+function zwieWeiter() { if (_zwie.verlauf.length) _zwieLauf(1); }
+
+function zwieHalt() {
+  _zwie.halt = true;
+  if (_zwie.ctrl) _zwie.ctrl.abort();
 }
 
 // ── Crosslink ────────────────────────────────────────────────────────────────
