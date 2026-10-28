@@ -2481,6 +2481,29 @@ class TXServer:
             return "angehaengt"
         return "kurz" if worte <= 3 else "echt"
 
+    def _angehaengt_als_anschluss(self, bot: dict, room: str, low: str,
+                                  triggers: list, seit_s: float) -> bool:
+        """Angehaengter Name im Anschlussfenster zaehlt wie ein Spruch ohne Namen,
+        wenn noch mind. 3 Woerter Inhalt da sind und kein anderer bekannter Name
+        drinsteht -- "Aeh, Joerg, ... ob du schon bei der Vor- Robert." (29.09.)
+        und "Nicht dich, sondern Susi." (16.10.) beantwortete das Modell im
+        Test (28.10.) jedes Mal statt SKIP."""
+        folge_s = float(bot.get("follow_up_window_s", 120))
+        if folge_s <= 0 or seit_s >= folge_s or self._anschluss_erschoepft(bot, room):
+            return False
+        worte = [w for w in re.findall(r"\w+", low) if w not in triggers]
+        if len(worte) < 3:
+            return False
+        andere = {n.lower() for n in self._bekannte_namen(bot)}
+        for bid in self._bot_ids():
+            tok = self._bot_im(bid)
+            try:
+                andere.add((self._bot_cfg().get("name") or "Robert").lower())
+            finally:
+                _BOT_KONTEXT.reset(tok)
+        andere -= set(triggers)
+        return not any(re.search(r"\b" + re.escape(n), low) for n in andere if n)
+
     def _anschluss_erschoepft(self, bot: dict, room: str) -> bool:
         maxi = int(bot.get("follow_up_max", 3) or 0)
         return maxi > 0 and self._anschluss_folge.get(room, 0) >= maxi
@@ -3480,6 +3503,13 @@ class TXServer:
                                   detail="nur Namen/Hotwords aufgezählt (oft Whisper-Erfindung) -- keine Antwort",
                                   final=True)
             return
+        if ruf == "angehaengt" and self._angehaengt_als_anschluss(bot, room_name, low, triggers, now - last):
+            # 28.10.: "Hoert sich sehr gut an, Robert." 2 s nach seiner Antwort
+            # blieb liegen -- ohne den Namen waere es als Anschlussfrage
+            # durchgegangen. Weiter wie ohne Namen (Fenster + Kettenbremse).
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
+                                  detail="Name angehängt, aber im Anschlussfenster -- wie Anschlussfrage")
+            ruf = None
         if ruf == "angehaengt":
             # Name ohne Frage/Gruss/Inhalt -- auch nicht als Anschlussfrage
             self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
