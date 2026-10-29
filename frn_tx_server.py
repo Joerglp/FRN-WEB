@@ -4271,6 +4271,7 @@ class TXServer:
             self._bot_state_merken()
             if not nachlegen:
                 self._nachlegen_pruefen(room, room_name, gehoert, answer, t1)
+            self._einmal_notizen_planen(bot, room_name, answer)
             payload = {"type": "voice_autosent", "room": room_name,
                        "from": "KI-Funker", "text": answer, "ok": True,
                        "heard": gehoert or (hist[-1][2] if hist else "")}
@@ -5302,6 +5303,65 @@ class TXServer:
                 encoding="utf-8")
         except Exception as e:
             log.warning("KI-Funker Notizbuch nicht auf Platte gespeichert: %s", e)
+
+    # Einmal-Notizen (29.10.): ein memory-Eintrag mit "einmalig": true ist ein
+    # Auftrag ("sag Anton, dass ..."). Nach jeder gesendeten Antwort, in deren
+    # Gespraech er stand, fragt das Modell nach, ob er erledigt ist; dann wird
+    # er durch "danach" ersetzt (Dauer-Notiz) oder geloescht.
+    def _einmal_notizen_planen(self, bot: dict, room_name: str, antwort: str):
+        offen = [m for m in bot.get("memory") or []
+                 if isinstance(m, dict) and m.get("einmalig") and (m.get("notes") or "").strip()]
+        if not offen:
+            return
+        fenster = " ".join(f"{w} {x}" for _t, w, x in
+                           self._room_hist.get(room_name, [])[-12:]).lower()
+        for m in offen:
+            if (m.get("name") or "").strip().lower() in fenster:
+                asyncio.create_task(self._einmal_notiz_pruefen(bot, m, antwort))
+
+    async def _einmal_notiz_pruefen(self, bot: dict, m: dict, antwort: str):
+        b = dict(bot, websearch={"enabled": False})
+        frage = (f"Auftrag: {m['notes'].strip()}\n\nGesagt wurde: {antwort.strip()}\n\n"
+                 "Ist der Auftrag mit dem Gesagten vollständig erledigt? "
+                 "Antworte nur mit JA oder NEIN.")
+        try:
+            raw = await self._llm_ollama(b, "Du prüfst, ob ein Auftrag erledigt ist.",
+                                         [{"role": "user", "content": frage}])
+        except Exception as e:
+            log.debug("Einmal-Notiz-Pruefung fehlgeschlagen: %r", e)
+            return
+        if not re.match(r"\W*ja\b", (raw or "").strip().lower()):
+            return
+        name = (m.get("name") or "").strip()
+        danach = (m.get("danach") or "").strip()
+
+        def umbauen(liste):
+            neu = []
+            for e in liste or []:
+                if (isinstance(e, dict) and e.get("einmalig")
+                        and (e.get("name") or "").strip() == name
+                        and (e.get("notes") or "").strip() == m["notes"].strip()):
+                    if danach:
+                        neu.append({"name": name, "notes": danach})
+                    continue
+                neu.append(e)
+            return neu
+
+        blk = self.cfg.setdefault("voice", {}).setdefault("bot", {})
+        blk["memory"] = umbauen(blk.get("memory"))
+        log.info("KI-Funker: Einmal-Notiz zu %s erledigt -- %s", name,
+                 "durch Dauer-Notiz ersetzt" if danach else "gelöscht")
+        try:
+            if not self.args.config:
+                return
+            cfg_path = Path(self.args.config)
+            disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+            dblk = disk.setdefault("voice", {}).setdefault("bot", {})
+            dblk["memory"] = umbauen(dblk.get("memory"))
+            cfg_path.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                                encoding="utf-8")
+        except Exception as e:
+            log.warning("Einmal-Notiz nicht auf Platte gespeichert: %s", e)
 
     # Stimmungen des thorsten_emotional-Modells (Rueckfall, wenn nichts
     # konfiguriert ist). "drunk"/"angry"/"disgusted" bewusst NICHT im
@@ -7192,6 +7252,16 @@ class TXServer:
                     nt = (m.get("notes") or "").strip()
                     if nm and nt:
                         mem.append({"name": nm[:60], "notes": nt[:500]})
+                # Einmal-Notizen (29.10.): das Panel kennt die Felder nicht --
+                # vom bisherigen Eintrag gleichen Namens uebernehmen
+                alt = {(m.get("name") or "").strip().lower(): m
+                       for m in bot.get("memory") or [] if isinstance(m, dict)}
+                for m in mem:
+                    a = alt.get(m["name"].lower()) or {}
+                    if a.get("einmalig") and a.get("notes", "").strip() == m["notes"]:
+                        m["einmalig"] = True
+                        if a.get("danach"):
+                            m["danach"] = a["danach"]
                 bot["memory"] = mem[:50]   # grosszuegige Obergrenze gegen Prompt-Aufblaehung
             if "notebook_enabled" in body:
                 bot["notebook_enabled"] = bool(body["notebook_enabled"])
