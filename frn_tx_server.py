@@ -2504,9 +2504,26 @@ class TXServer:
         andere -= set(triggers)
         return not any(re.search(r"\b" + re.escape(n), low) for n in andere if n)
 
+    # Kettenbremse nur bei Betrieb (29.10.): Anton und Robert im reinen
+    # Wechsel brach nach 3 Anschluss-Antworten ab. Die Bremse ist fuer
+    # fremde Gespraeche gedacht (02.10.) -- reden in den letzten 5 Minuten
+    # immer nur einer und ein KI-Funker abwechselnd, greift sie nicht.
+    _ZWIEGESPRAECH_S = 300.0
+
+    def _nur_wechsel(self, room: str) -> bool:
+        grenze = time.time() - self._ZWIEGESPRAECH_S
+        folge = [w.endswith(" (du)") for t, w, _x in self._room_hist.get(room, []) if t >= grenze]
+        if True not in folge:
+            return False
+        # erst ab dem Spruch vor der ersten Bot-Antwort -- was davor lief
+        # ("Goodbye." und dann der Ruf), gehoert nicht zum Gespraech
+        folge = folge[max(0, folge.index(True) - 1):]
+        return not any(not a and not b for a, b in zip(folge, folge[1:]))
+
     def _anschluss_erschoepft(self, bot: dict, room: str) -> bool:
         maxi = int(bot.get("follow_up_max", 3) or 0)
-        return maxi > 0 and self._anschluss_folge.get(room, 0) >= maxi
+        return (maxi > 0 and self._anschluss_folge.get(room, 0) >= maxi
+                and not self._nur_wechsel(room))
 
     def _hotword_liste(self, low: str) -> bool:
         """Besteht der Spruch fast nur aus Whisper-Hotwords? ("Ciao, Robert, Eddie,
