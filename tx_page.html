@@ -5047,32 +5047,52 @@ function renderBotMemory(list) {
   const box = document.getElementById("bot-memory-list");
   box.innerHTML = "";
   if (!list.length) { addBotMemoryRow(); return; }
-  list.forEach(m => addBotMemoryRow(m.name || "", m.notes || ""));
+  list.forEach(m => addBotMemoryRow(m.name || "", m.notes || "", !!m.einmalig, m.danach || ""));
 }
 
-function addBotMemoryRow(name = "", notes = "") {
+// Einmal-Notiz (29.10.): Auftrag an Robert ("sag Anton, dass ..."). Nach einer
+// Antwort, die ihn erledigt, ersetzt der Server ihn durch "danach" oder löscht ihn.
+function addBotMemoryRow(name = "", notes = "", einmalig = false, danach = "") {
   const box = document.getElementById("bot-memory-list");
   const row = document.createElement("div");
   row.className = "bot-mem-row";
-  row.style.cssText = "display:flex;gap:8px;margin-bottom:8px;align-items:flex-start";
+  row.style.cssText = "margin-bottom:10px";
+  const feld = "background:var(--panel);color:var(--text);border:1px solid var(--border);" +
+               "border-radius:6px;padding:8px 10px;font-size:.85em";
   row.innerHTML = `
-    <input type="text" class="bm-name" placeholder="Name" value="${esc(name)}"
-           style="flex:0 0 140px;background:var(--panel);color:var(--text);
-                  border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:.85em">
-    <input type="text" class="bm-notes" placeholder="Notizen (z.B. wohnt in ..., neue Antenne, ...)" value="${esc(notes)}"
-           style="flex:1;background:var(--panel);color:var(--text);
-                  border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:.85em">
-    <button type="button" onclick="this.parentElement.remove()"
-            style="flex:0 0 auto;background:none;border:1px solid var(--dim);
-                   color:var(--muted);border-radius:6px;padding:6px 10px;cursor:pointer">✕</button>`;
+    <div style="display:flex;gap:8px;align-items:flex-start">
+      <input type="text" class="bm-name" placeholder="Name" value="${esc(name)}"
+             style="flex:0 0 140px;${feld}">
+      <input type="text" class="bm-notes" placeholder="Notizen (z.B. wohnt in ..., neue Antenne, ...)" value="${esc(notes)}"
+             style="flex:1;${feld}">
+      <button type="button" onclick="this.closest('.bot-mem-row').remove()"
+              style="flex:0 0 auto;background:none;border:1px solid var(--dim);
+                     color:var(--muted);border-radius:6px;padding:6px 10px;cursor:pointer">✕</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:4px;padding-left:148px;flex-wrap:wrap">
+      <label style="display:flex;align-items:center;gap:6px;font-size:.78rem;color:var(--text-muted);cursor:pointer"
+             title="Auftrag: wird nach der Antwort, die ihn erledigt, durch „danach“ ersetzt oder gelöscht">
+        <input type="checkbox" class="bm-einmalig" ${einmalig ? "checked" : ""}
+               onchange="this.closest('.bot-mem-row').querySelector('.bm-danach').style.display = this.checked ? '' : 'none'">
+        einmalig
+      </label>
+      <input type="text" class="bm-danach" placeholder="danach (leer = Eintrag löschen)" value="${esc(danach)}"
+             style="flex:1;min-width:180px;${feld};${einmalig ? "" : "display:none"}">
+    </div>`;
   box.appendChild(row);
 }
 
 function collectBotMemory() {
-  return Array.from(document.querySelectorAll("#bot-memory-list .bot-mem-row")).map(row => ({
-    name:  row.querySelector(".bm-name").value.trim(),
-    notes: row.querySelector(".bm-notes").value.trim(),
-  })).filter(m => m.name && m.notes);
+  return Array.from(document.querySelectorAll("#bot-memory-list .bot-mem-row")).map(row => {
+    const m = {
+      name:  row.querySelector(".bm-name").value.trim(),
+      notes: row.querySelector(".bm-notes").value.trim(),
+      einmalig: row.querySelector(".bm-einmalig").checked,
+    };
+    const danach = row.querySelector(".bm-danach").value.trim();
+    if (m.einmalig && danach) m.danach = danach;
+    return m;
+  }).filter(m => m.name && m.notes);
 }
 
 async function loadGeminiModels() {

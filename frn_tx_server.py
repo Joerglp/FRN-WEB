@@ -7251,17 +7251,14 @@ class TXServer:
                     nm = (m.get("name") or "").strip()
                     nt = (m.get("notes") or "").strip()
                     if nm and nt:
-                        mem.append({"name": nm[:60], "notes": nt[:500]})
-                # Einmal-Notizen (29.10.): das Panel kennt die Felder nicht --
-                # vom bisherigen Eintrag gleichen Namens uebernehmen
-                alt = {(m.get("name") or "").strip().lower(): m
-                       for m in bot.get("memory") or [] if isinstance(m, dict)}
-                for m in mem:
-                    a = alt.get(m["name"].lower()) or {}
-                    if a.get("einmalig") and a.get("notes", "").strip() == m["notes"]:
-                        m["einmalig"] = True
-                        if a.get("danach"):
-                            m["danach"] = a["danach"]
+                        e = {"name": nm[:60], "notes": nt[:500]}
+                        # Einmal-Notiz (29.10.), siehe _einmal_notizen_planen
+                        if m.get("einmalig") is True:
+                            e["einmalig"] = True
+                            dn = str(m.get("danach") or "").strip()
+                            if dn:
+                                e["danach"] = dn[:500]
+                        mem.append(e)
                 bot["memory"] = mem[:50]   # grosszuegige Obergrenze gegen Prompt-Aufblaehung
             if "notebook_enabled" in body:
                 bot["notebook_enabled"] = bool(body["notebook_enabled"])
