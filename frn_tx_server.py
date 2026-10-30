@@ -737,9 +737,12 @@ class FRNTXRoom:
             while True:
                 jetzt = time.time()
                 if abbruch and abbruch():
-                    if gesendet:
-                        self._writer.write(b"RX0\r\n")
-                        await self._writer.drain()
+                    if gesendet and self._writer:
+                        try:
+                            self._writer.write(b"RX0\r\n")
+                            await self._writer.drain()
+                        except Exception:
+                            pass
                     return False
                 if jetzt - self._rx_letzt >= self._TX_FREI_S and jetzt - gesendet >= self._TX_WIEDERHOL_S:
                     if gesendet:
@@ -937,6 +940,8 @@ class TXServer:
         self._rx_offen: dict[str, float] = {}          # Raum -> Beginn der laufenden Durchsage (frn_stream)
         self._rx_ende: dict[str, float] = {}           # Raum -> zuletzt gemeldetes Durchsage-Ende
         self._rx_durchsagen: dict[str, list] = {}      # Raum -> (Beginn, Ende) der letzten Minuten
+        self._tx_fenster: dict[str, list] = {}         # Raum -> [getastet, losgelassen] der eigenen Sendungen
+        self._bot_vorgemerkt: dict[str, tuple] = {}    # Raum -> Ruf, der in einen laufenden Lauf fiel
         self._rx_puls: dict[str, float] = {}           # Raum -> letzte Meldung "laeuft noch" (frn_stream)
         self._speaker_letzte_pruefung: dict = {}
         self._load_speaker_enrollments()
@@ -1551,6 +1556,7 @@ class TXServer:
                          room_name, callsign)
                 self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
                                       detail=f"{callsign} auf der Ignorier-Liste", final=True)
+                self._rx_durchsage_streichen(room_name, ts)
                 return
             if confidence is not None:
                 kz = self._hist_konfidenz
@@ -1774,7 +1780,8 @@ class TXServer:
                 await room.ensure_connected()
                 ok = await room.request_tx(timeout=15.0, abbruch=abbruch)
                 if not ok:
-                    log.info("[%s] Auto-Senden: TX nicht genehmigt (Kanal belegt)", room.name)
+                    if not (abbruch and abbruch()):
+                        log.info("[%s] Auto-Senden: TX nicht genehmigt (Kanal belegt)", room.name)
                     task.cancel()
                     return False
                 if on_tx_start:
@@ -1833,6 +1840,30 @@ class TXServer:
                                speaker: str = "default",
                                force_xtts: bool = False,
                                on_tx_start=None, abbruch=None) -> bool:
+        """Merkt sich das echte Sendefenster (_tx_fenster): _bot_own_tx beginnt
+        schon vor TTS und Kanal-Warten, teils 30 s vor dem Tasten."""
+        fenster = None
+
+        def getastet():
+            nonlocal fenster
+            jetzt = time.time()
+            fenster = [jetzt, None]
+            liste = self._tx_fenster.setdefault(room.name, [])
+            liste[:] = [f for f in liste if f[1] is None or f[1] > jetzt - 300]
+            liste.append(fenster)
+            if on_tx_start:
+                on_tx_start()
+        try:
+            return await self._auto_send_voice_kern(room, text, speaker, force_xtts,
+                                                    getastet, abbruch)
+        finally:
+            if fenster:
+                fenster[1] = time.time()
+
+    async def _auto_send_voice_kern(self, room: "FRNTXRoom", text: str,
+                                    speaker: str = "default",
+                                    force_xtts: bool = False,
+                                    on_tx_start=None, abbruch=None) -> bool:
         """Synthetisiert Text und sendet ihn direkt in den Raum (ohne WS-Client).
 
         Gleicher Ablauf wie SPEAK_VOICE: erst Stimme erzeugen, dann Sender
@@ -1867,8 +1898,9 @@ class TXServer:
                 await room.ensure_connected()
                 ok = await room.request_tx(timeout=15.0, abbruch=abbruch)
                 if not ok:
-                    log.info("[%s] Auto-Senden: TX nicht genehmigt (Kanal belegt)",
-                             room.name)
+                    if not (abbruch and abbruch()):
+                        log.info("[%s] Auto-Senden: TX nicht genehmigt (Kanal belegt)",
+                                 room.name)
                     return False
                 if on_tx_start:
                     on_tx_start()
@@ -3640,7 +3672,8 @@ class TXServer:
         if len(self._bot_ids()) > 1:
             reason += f" -- {name}"
         self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok", detail=reason)
-        asyncio.create_task(self._bot_reply(room, room_name, bot, search_query, trigger_ts=ts))
+        asyncio.create_task(self._bot_reply(room, room_name, bot, search_query, trigger_ts=ts,
+                                            vorrang=name_hit))
 
     # Vorwaermen (2026-09-28): Nach laengerer Pause brauchte die erste Modell-
     # Anfrage >2 s statt ~1 s. Box-Log 28.09. 13:39: Prompt-Cache war noch
@@ -3932,17 +3965,32 @@ class TXServer:
             # Meldungen koennen sich ueberholen: eine verspaetete der VORIGEN
             # Durchsage darf die laufende nicht verdraengen.
             if beginn > self._rx_ende.get(room, 0.0) and beginn >= self._rx_offen.get(room, 0.0):
-                self._rx_offen[room] = beginn
+                self._rx_offen_setzen(room, beginn)
                 self._rx_puls[room] = time.time()
             return web.json_response({"ok": True})
         if room:
             # Meldungen laufen in eigenen Threads und koennen sich ueberholen:
             # ein Beginn, dessen Ende schon da ist, oeffnet nichts mehr.
             if beginn > self._rx_ende.get(room, 0.0) and beginn >= self._rx_offen.get(room, 0.0):
-                self._rx_offen[room] = beginn
+                self._rx_offen_setzen(room, beginn)
                 self._rx_puls[room] = time.time()   # frn_stream wiederholt die Meldung alle 2 s
             self._bot_vorwaermen_pruefen(room)
         return web.json_response({"ok": True})
+
+    def _rx_offen_setzen(self, room: str, beginn: float):
+        """Neuer Beginn vor dem Ende des Vorgaengers (schneller Wechsel, Meldungen
+        ueberholen sich): dessen spaetes Ende passt nicht mehr, also jetzt eintragen."""
+        alt = self._rx_offen.get(room)
+        if alt is not None and beginn > alt:
+            # Ohne Lebenszeichen hoert die Durchsage kurz nach dem letzten Puls auf
+            ende = min(beginn, self._rx_puls.get(room, alt) + 2.0)
+            self._rx_durchsagen.setdefault(room, []).append((alt, ende))
+        self._rx_offen[room] = beginn
+
+    def _rx_durchsage_streichen(self, room: str, ts: float):
+        liste = self._rx_durchsagen.get(room)
+        if liste:
+            liste[:] = [d for d in liste if abs(d[0] - ts) >= 1.5]
 
     async def handle_intern_sprechende(self, request):
         """POST {room, ende} von frn_stream.py, wenn eine Durchsage zu Ende
@@ -4070,24 +4118,27 @@ class TXServer:
     # 30 s, Robert antwortete dann auf Sprueche, ueber die schon drei andere
     # hinweg waren ("Alles im grünen Bereich, Gottfried!"). Wer ihn direkt
     # gerufen hat, bekommt die Antwort trotzdem -- darauf wartet er.
-    _UEBERHOLT_SPRACHE_S = 3.0   # kuerzer ist Rauschschwanz
-
     def _antwort_ueberholt(self, room_name: str, heard_ts: float) -> bool:
-        jetzt = time.time()
         durchsagen = list(self._rx_durchsagen.get(room_name, []))
         offen = self._rx_offen.get(room_name)
         if offen is not None:
-            durchsagen.append((offen, jetzt))
-        return any(b > heard_ts + 1.0 and e - b >= self._UEBERHOLT_SPRACHE_S
-                   and self._bot_echo_ende(room_name, b) is None
-                   for b, e in durchsagen)
+            # Bis zum letzten Lebenszeichen, nicht bis jetzt: das Ende kommt erst
+            # nach 1 s Stille und kann ganz verloren gehen -- sonst wuerde aus
+            # einem Rauschschwanz von 2 s "Sprache".
+            durchsagen.append((offen, self._rx_puls.get(room_name, offen)))
+        hist = self._room_hist.get(room_name, [])
+        wer = next((w for t, w, _x in hist if abs(t - heard_ts) < 0.5), "")
 
-    def _direkt_gerufen(self, text: str, namen: list) -> bool:
-        low = text.lower()
-        if "?" in low:
-            return any(re.search(r"\b" + re.escape(n), low) for n in namen)
-        vorne = " ".join(re.findall(r"\w+", low)[:3])
-        return any(re.search(r"\b" + re.escape(n), vorne) for n in namen)
+        def zaehlt(b, e):
+            if b <= heard_ts + 1.0 or e - b < self._NACHLEGEN_SPRACHE_S:
+                return False
+            if any(s - 0.5 <= b <= (x or time.time())
+                   for s, x in self._tx_fenster.get(room_name, [])):
+                return False    # eigenes Echo
+            # Schon erkannt und derselbe Sprecher: ein Nachsatz, nicht "jemand anderes"
+            return not (wer and wer != "Funker"
+                        and any(w == wer and abs(t - b) < 1.5 for t, w, _x in hist))
+        return any(zaehlt(b, e) for b, e in durchsagen)
 
     def _bot_echo_ende(self, room_name: str, beginn: float) -> float | None:
         """Ende der eigenen Bot-Sendung, waehrend der eine Durchsage begann
@@ -4149,9 +4200,14 @@ class TXServer:
 
     async def _bot_reply(self, room: "FRNTXRoom", room_name: str, bot: dict,
                          search_query: str = "", trigger_ts: float | None = None,
-                         zusatz: str = "", nachlegen: bool = False):
-        """Antwort generieren und senden (höchstens ein Lauf pro Raum)."""
+                         zusatz: str = "", nachlegen: bool = False, vorrang: bool = False):
+        """Antwort generieren und senden (höchstens ein Lauf pro Raum).
+        vorrang: beim Namen gerufen -- wird nie als ueberholt verworfen und
+        wartet, falls gerade ein anderer Lauf aktiv ist."""
         if room_name in self._bot_busy:
+            if vorrang:
+                self._bot_vorgemerkt[room_name] = (_BOT_KONTEXT.get(), room, search_query, trigger_ts)
+                log.info("[%s] KI-Funker: Ruf vorgemerkt, Antwort läuft noch", room_name)
             return
         self._bot_busy.add(room_name)
         heard_ts = time.time()
@@ -4280,20 +4336,20 @@ class TXServer:
             # Liste ist die neutrale Ruecklage.
             if not stimmung and bot.get("emotion_auto"):
                 stimmung = self._emotion_liste(bot)[0]
-            namen = [t.lower() for t in bot.get("trigger", []) if t.strip()] + [name.lower()]
-            pruefen = (not nachlegen and trigger_ts is not None and gehoert
-                       and not self._direkt_gerufen(gehoert, namen))
-            ueberholt = {"ja": False}
+            pruefen = not nachlegen and not vorrang and trigger_ts is not None and bool(gehoert)
+            ueberholt = False
 
             def _abbruch():
-                ueberholt["ja"] = bool(pruefen and self._antwort_ueberholt(room_name, heard_ts))
-                return ueberholt["ja"]
+                nonlocal ueberholt
+                ueberholt = pruefen and self._antwort_ueberholt(room_name, heard_ts)
+                return ueberholt
 
-            sent = await self._auto_send_voice(room, answer,
-                                               stimmung or bot.get("speaker") or "default",
-                                               on_tx_start=_on_tx_start, abbruch=_abbruch)
+            # Schon jetzt pruefen spart bei vollem Kanal das TTS
+            sent = (not _abbruch()) and await self._auto_send_voice(
+                room, answer, stimmung or bot.get("speaker") or "default",
+                on_tx_start=_on_tx_start, abbruch=_abbruch)
             t1   = time.time()
-            if ueberholt["ja"]:
+            if ueberholt:
                 log.info("[%s] KI-Funker: Antwort überholt, nicht gesendet: %.80s", room_name, answer)
                 self.debug_trace_step(room_name, heard_ts, "Ergebnis", "skip",
                                       detail="Inzwischen hat jemand anderes gesprochen -- Antwort verworfen",
@@ -4337,6 +4393,14 @@ class TXServer:
                                   detail=str(e)[:200], final=True)
         finally:
             self._bot_busy.discard(room_name)
+            ruf = self._bot_vorgemerkt.pop(room_name, None)
+            if ruf and time.time() - (ruf[3] or 0.0) < 120:
+                asyncio.create_task(self._vorgemerkt_lauf(room_name, *ruf))
+
+    async def _vorgemerkt_lauf(self, room_name: str, bid: str, room, search_query: str, ts: float):
+        _BOT_KONTEXT.set(bid)       # gilt nur fuer diesen Task
+        await self._bot_reply(room, room_name, self._bot_cfg(), search_query,
+                              trigger_ts=ts, vorrang=True)
 
     @staticmethod
     def _ollama_headers(token: str | None):
@@ -7593,7 +7657,7 @@ class TXServer:
                           max(4, int(bot.get("history_len", 10))) + 2 * self._PROMPT_BLOCK)
         log.info("[%s] KI-Funker Probe (%s): %s", room_name, wer, text)
         self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok", detail=f"Probe aus der Verwaltung: {text[:120]}")
-        await self._bot_reply(room, room_name, bot, trigger_ts=ts)
+        await self._bot_reply(room, room_name, bot, trigger_ts=ts, vorrang=True)
         tr = self._debug_trace_get(room_name, ts)
         schritte = tr.get("steps") or tr.get("schritte") or []
         return web.json_response({"ok": True, "room": room_name,
