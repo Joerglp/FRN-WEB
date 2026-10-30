@@ -726,7 +726,8 @@ class FRNTXRoom:
     _TX_FREI_S = 1.5
     _TX_WIEDERHOL_S = 2.0   # > laengste beobachtete Freigabe-Verzoegerung (1.1 s)
 
-    async def request_tx(self, timeout: float = 30.0) -> bool:
+    async def request_tx(self, timeout: float = 30.0, abbruch=None) -> bool:
+        """abbruch: optional, wird beim Warten geprueft; True = nicht mehr senden."""
         if not self._connected:
             await self.ensure_connected()
         self._tx_approved.clear()
@@ -735,6 +736,11 @@ class FRNTXRoom:
         try:
             while True:
                 jetzt = time.time()
+                if abbruch and abbruch():
+                    if gesendet:
+                        self._writer.write(b"RX0\r\n")
+                        await self._writer.drain()
+                    return False
                 if jetzt - self._rx_letzt >= self._TX_FREI_S and jetzt - gesendet >= self._TX_WIEDERHOL_S:
                     if gesendet:
                         log.info("[%s] TX0 wiederholt (Kanal seit %.1fs frei)",
@@ -930,6 +936,7 @@ class TXServer:
         self._nachlegen_zuletzt: dict[str, float] = {} # Raum -> letztes Nachlegen (Robert <-> Susi)
         self._rx_offen: dict[str, float] = {}          # Raum -> Beginn der laufenden Durchsage (frn_stream)
         self._rx_ende: dict[str, float] = {}           # Raum -> zuletzt gemeldetes Durchsage-Ende
+        self._rx_durchsagen: dict[str, list] = {}      # Raum -> (Beginn, Ende) der letzten Minuten
         self._rx_puls: dict[str, float] = {}           # Raum -> letzte Meldung "laeuft noch" (frn_stream)
         self._speaker_letzte_pruefung: dict = {}
         self._load_speaker_enrollments()
@@ -1724,7 +1731,7 @@ class TXServer:
                         yield (y * 32767.0).astype("<i2").tobytes()
 
     async def _auto_send_voice_stream(self, room, text: str, speaker: str,
-                                      url: str, on_tx_start=None) -> bool | None:
+                                      url: str, on_tx_start=None, abbruch=None) -> bool | None:
         """Stueckweise senden. None = Stream kam gar nicht zustande (Aufrufer
         faellt auf den Ganz-Weg zurueck); True/False wie _auto_send_voice."""
         vcfg = self.cfg.get("voice", {})
@@ -1765,7 +1772,7 @@ class TXServer:
         try:
             async with room._tx_lock:
                 await room.ensure_connected()
-                ok = await room.request_tx(timeout=15.0)
+                ok = await room.request_tx(timeout=15.0, abbruch=abbruch)
                 if not ok:
                     log.info("[%s] Auto-Senden: TX nicht genehmigt (Kanal belegt)", room.name)
                     task.cancel()
@@ -1825,7 +1832,7 @@ class TXServer:
     async def _auto_send_voice(self, room: "FRNTXRoom", text: str,
                                speaker: str = "default",
                                force_xtts: bool = False,
-                               on_tx_start=None) -> bool:
+                               on_tx_start=None, abbruch=None) -> bool:
         """Synthetisiert Text und sendet ihn direkt in den Raum (ohne WS-Client).
 
         Gleicher Ablauf wie SPEAK_VOICE: erst Stimme erzeugen, dann Sender
@@ -1845,7 +1852,8 @@ class TXServer:
         if xtts and vcfg.get("xtts_stream", True):
             url = (vcfg.get("xtts_url") if force_xtts else vcfg.get("remote_url")) or vcfg.get("xtts_url") or ""
             ergebnis = await self._auto_send_voice_stream(room, text, speaker, url.strip(),
-                                                          on_tx_start=on_tx_start)
+                                                          on_tx_start=on_tx_start,
+                                                          abbruch=abbruch)
             if ergebnis is not None:
                 return ergebnis
         try:
@@ -1857,7 +1865,7 @@ class TXServer:
         try:
             async with room._tx_lock:
                 await room.ensure_connected()
-                ok = await room.request_tx(timeout=15.0)
+                ok = await room.request_tx(timeout=15.0, abbruch=abbruch)
                 if not ok:
                     log.info("[%s] Auto-Senden: TX nicht genehmigt (Kanal belegt)",
                              room.name)
@@ -3953,7 +3961,9 @@ class TXServer:
             # Nur die eigene Durchsage schliessen, nicht die des naechsten
             # Sprechers, falls dessen Beginn-Meldung schneller war.
             if self._rx_offen.get(room, ende + 1) <= ende:
-                self._rx_offen.pop(room, None)
+                liste = self._rx_durchsagen.setdefault(room, [])
+                liste.append((self._rx_offen.pop(room), ende))
+                liste[:] = [d for d in liste if d[1] > ende - 300]
             self._rx_ende[room] = max(self._rx_ende.get(room, 0.0), ende)
             self._rx_zuletzt[room] = max(self._rx_zuletzt.get(room, 0.0), ende)
         return web.json_response({"ok": True})
@@ -4055,6 +4065,29 @@ class TXServer:
             if echo_ende is None or puls > echo_ende + 1.0:
                 return jetzt
         return self._rx_zuletzt.get(room_name, 0.0)
+
+    # Ueberholte Antworten (30.10.): gehoert->gesendet dauert auf vollem Kanal
+    # 30 s, Robert antwortete dann auf Sprueche, ueber die schon drei andere
+    # hinweg waren ("Alles im grünen Bereich, Gottfried!"). Wer ihn direkt
+    # gerufen hat, bekommt die Antwort trotzdem -- darauf wartet er.
+    _UEBERHOLT_SPRACHE_S = 3.0   # kuerzer ist Rauschschwanz
+
+    def _antwort_ueberholt(self, room_name: str, heard_ts: float) -> bool:
+        jetzt = time.time()
+        durchsagen = list(self._rx_durchsagen.get(room_name, []))
+        offen = self._rx_offen.get(room_name)
+        if offen is not None:
+            durchsagen.append((offen, jetzt))
+        return any(b > heard_ts + 1.0 and e - b >= self._UEBERHOLT_SPRACHE_S
+                   and self._bot_echo_ende(room_name, b) is None
+                   for b, e in durchsagen)
+
+    def _direkt_gerufen(self, text: str, namen: list) -> bool:
+        low = text.lower()
+        if "?" in low:
+            return any(re.search(r"\b" + re.escape(n), low) for n in namen)
+        vorne = " ".join(re.findall(r"\w+", low)[:3])
+        return any(re.search(r"\b" + re.escape(n), vorne) for n in namen)
 
     def _bot_echo_ende(self, room_name: str, beginn: float) -> float | None:
         """Ende der eigenen Bot-Sendung, waehrend der eine Durchsage begann
@@ -4247,10 +4280,25 @@ class TXServer:
             # Liste ist die neutrale Ruecklage.
             if not stimmung and bot.get("emotion_auto"):
                 stimmung = self._emotion_liste(bot)[0]
+            namen = [t.lower() for t in bot.get("trigger", []) if t.strip()] + [name.lower()]
+            pruefen = (not nachlegen and trigger_ts is not None and gehoert
+                       and not self._direkt_gerufen(gehoert, namen))
+            ueberholt = {"ja": False}
+
+            def _abbruch():
+                ueberholt["ja"] = bool(pruefen and self._antwort_ueberholt(room_name, heard_ts))
+                return ueberholt["ja"]
+
             sent = await self._auto_send_voice(room, answer,
                                                stimmung or bot.get("speaker") or "default",
-                                               on_tx_start=_on_tx_start)
+                                               on_tx_start=_on_tx_start, abbruch=_abbruch)
             t1   = time.time()
+            if ueberholt["ja"]:
+                log.info("[%s] KI-Funker: Antwort überholt, nicht gesendet: %.80s", room_name, answer)
+                self.debug_trace_step(room_name, heard_ts, "Ergebnis", "skip",
+                                      detail="Inzwischen hat jemand anderes gesprochen -- Antwort verworfen",
+                                      final=True)
+                return
             log.info("[%s] KI-Funker TTS+Senden: %.1fs — Gesamt (gehört→gesendet): %.1fs",
                      room_name, t1 - t0, t1 - heard_ts)
             self.debug_trace_step(room_name, heard_ts, "TTS+Senden",
