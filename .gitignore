@@ -26,3 +26,4 @@ nachrichten.json
 
 # Raum-Konten mit Passwörtern (Vorlage: tx_rooms.json.example)
 tx_rooms.json
+stimmen_ref/

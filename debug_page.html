@@ -152,6 +152,15 @@ h1 {
         <option value="">alle</option>
       </select>
     </label>
+    <label style="display:flex;align-items:center;gap:8px">
+      Name:
+      <select id="dbg-name-filter" onchange="loadDebugTraces()"
+              style="background:var(--panel);color:var(--text);border:1px solid var(--border);
+                     border-radius:6px;padding:4px 8px;font-size:.85em">
+        <option value="">alle Durchsagen</option>
+        <option value="alle">Bot genannt</option>
+      </select>
+    </label>
     <span id="dbg-last-refresh" style="font-size:.78em;color:var(--muted)"></span>
   </div>
   <div id="debug-traces"></div>
@@ -418,10 +427,19 @@ async function loadDebugTraces() {
     populateDebugRoomFilter(traces);
     const roomFilter = document.getElementById("dbg-room-filter").value;
     if (roomFilter) traces = traces.filter(t => t.room === roomFilter);
+    const nameSel = document.getElementById("dbg-name-filter");
+    if (nameSel.options.length === 2) {
+      (data.bot_namen || []).forEach(n => nameSel.add(new Option(n + " genannt", n)));
+    }
+    const nameFilter = nameSel.value;
+    if (nameFilter) traces = traces.filter(t => (t.namen || []).length
+      && (nameFilter === "alle" || t.namen.includes(nameFilter)));
     document.getElementById("dbg-last-refresh").textContent =
       "zuletzt aktualisiert: " + new Date().toLocaleTimeString("de-DE");
     if (!traces.length) {
-      box.innerHTML = `<div style="color:var(--muted);font-size:0.85em">Noch keine Durchsagen aufgezeichnet.</div>`;
+      box.innerHTML = `<div style="color:var(--muted);font-size:0.85em">${nameFilter
+        ? "Unter den letzten 80 Durchsagen fällt der Name nicht."
+        : "Noch keine Durchsagen aufgezeichnet."}</div>`;
       return;
     }
     box.innerHTML = traces.map(tr => {

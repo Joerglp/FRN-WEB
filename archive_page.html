@@ -480,6 +480,12 @@
     <option value="">Alle Räume</option>
   </select>
 
+  <select id="f-name" title="Durchsagen, in denen ein KI-Funker genannt wird (ohne seine eigenen)"
+          onchange="applyFilter()">
+    <option value="">Alle Durchsagen</option>
+    <option value="alle">Bot genannt</option>
+  </select>
+
   <span class="filter-label" id="f-date-label">Von:</span>
   <input type="date" id="f-from">
   <input type="time" id="f-from-time" title="Uhrzeit (optional)">
@@ -546,6 +552,7 @@ function switchTab(tab) {
     el.style.background        = active ? 'var(--bg3)'    : 'transparent';
   });
   const isAudio = tab === 'audio';
+  document.getElementById('f-name').style.display       = isAudio ? '' : 'none';
   document.getElementById('f-date-label').style.display = isAudio ? '' : 'none';
   document.getElementById('f-from').style.display       = isAudio ? '' : 'none';
   document.getElementById('f-from-time').style.display  = isAudio ? '' : 'none';
@@ -946,7 +953,8 @@ async function loadEntries(append = false) {
   const room    = document.getElementById('f-room').value;
   const dfrom   = combineDateTime('f-from', 'f-from-time');
   const dto     = combineDateTime('f-to', 'f-to-time');
-  const filterActive = !!(search || room || dfrom || dto);
+  const name    = currentTab === 'audio' ? document.getElementById('f-name').value : '';
+  const filterActive = !!(search || room || dfrom || dto || name);
 
   document.getElementById('stat-filter-info').style.display =
     filterActive ? '' : 'none';
@@ -1014,6 +1022,7 @@ async function loadEntries(append = false) {
         ...(room   ? {room}   : {}),
         ...(dfrom  ? {from: dfrom} : {}),
         ...(dto    ? {to: dto}     : {}),
+        ...(name   ? {name}        : {}),
       });
       // Mit Token: dann liefert der Server auch die Sprecher-Werte (nur Admins)
       const tok = localStorage.getItem('frn_token');
@@ -1031,6 +1040,15 @@ async function loadEntries(append = false) {
           o.value = r; o.textContent = r;
           if (r === cur) o.selected = true;
           sel.appendChild(o);
+        });
+      }
+
+      const nameSel = document.getElementById('f-name');
+      if (nameSel.options.length === 2) {
+        (data.bot_namen || []).forEach(n => {
+          const o = document.createElement('option');
+          o.value = n; o.textContent = n + ' genannt';
+          nameSel.appendChild(o);
         });
       }
 
@@ -1097,6 +1115,7 @@ function applyFilter() { loadEntries(false); }
 function clearFilter() {
   document.getElementById('f-search').value = '';
   document.getElementById('f-room').value   = '';
+  document.getElementById('f-name').value   = '';
   document.getElementById('f-from').value   = '';
   document.getElementById('f-from-time').value = '';
   document.getElementById('f-to').value     = '';
@@ -1151,7 +1170,8 @@ function scheduleRefresh() {
     const room   = document.getElementById('f-room').value;
     const dfrom  = combineDateTime('f-from', 'f-from-time');
     const dto    = combineDateTime('f-to', 'f-to-time');
-    if (!search && !room && !dfrom && !dto) loadEntries(false);
+    const name   = document.getElementById('f-name').value;
+    if (!search && !room && !dfrom && !dto && !name) loadEntries(false);
   }, 30000);
 }
 

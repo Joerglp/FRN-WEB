@@ -1576,6 +1576,7 @@ audio {
         <button class="bot-subtab" data-bsub="modell" onclick="showBotSubTab('modell')">MODELL</button>
         <button class="bot-subtab" data-bsub="memory" onclick="showBotSubTab('memory')">GEDÄCHTNIS</button>
         <button class="bot-subtab" data-bsub="test" onclick="showBotSubTab('test')">TROCKENTEST</button>
+        <button class="bot-subtab" data-bsub="raeume" onclick="showBotSubTab('raeume'); loadBotRaeume()">JE RAUM</button>
       </div>
       <div id="bot-sub-verhalten" class="bot-subtab-content active">
 
@@ -1787,6 +1788,7 @@ audio {
           <div class="adm-hint">Themenorientiert: die Sprecher-Erkennung ist im CB-Kanal zu unsicher für „wer hat was gesagt".
             Das Bauen dauert je nach Funkverkehr ein bis drei Minuten auf der GPU-Box.</div>
           <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <select id="rb-gruppe" onchange="loadRueckblick()" style="max-width:190px;display:none" title="Gruppe"></select>
             <input type="date" id="rb-datum" autocomplete="off" style="max-width:170px">
             <button type="button" class="btn-save" style="padding:6px 14px" onclick="rueckblickBauen()" id="rb-neu-btn">Diesen Tag (neu) bauen</button>
             <span id="rb-stand" class="adm-hint" style="margin:0"></span>
@@ -2058,6 +2060,38 @@ audio {
         </div>
       </div>
       </div>
+      <div id="bot-sub-raeume" class="bot-subtab-content">
+        <div class="adm-card">
+          <div class="adm-card-title">🏠 Einstellungen je Raum</div>
+          <div class="adm-card-sub">Hier stehen nur Abweichungen von den Grundwerten der anderen Reiter.
+            Leeres Feld bzw. „Standard" = Grundwert. Robert spricht trotzdem nur in den Räumen aus
+            „Nur diese Räume". „Robert aus" per Funk schaltet nur den Raum ab, in dem es gesagt wurde.</div>
+          <div class="adm-fields">
+            <div class="form-field">
+              <label>Raum</label>
+              <select id="br-raum" onchange="botRaumZeigen()"></select>
+            </div>
+            <div class="form-field">
+              <label>Funker</label>
+              <select id="br-bot" onchange="botRaumZeigen()"></select>
+            </div>
+          </div>
+          <div id="br-felder" style="margin-top:12px"></div>
+          <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button type="button" class="btn-save" style="padding:6px 14px" onclick="botRaumSpeichern()">Raum speichern</button>
+            <span id="br-stand" class="adm-hint" style="margin:0"></span>
+          </div>
+          <div id="br-uebersicht" class="adm-hint" style="margin-top:12px"></div>
+        </div>
+        <div class="adm-card" id="br-gruppe-karte" style="display:none">
+          <div class="adm-card-title">📒 Notizbuch der Gruppe <span id="br-gruppe-name"></span></div>
+          <div class="adm-card-sub">Räume derselben Gruppe teilen Notizbuch und Tagesrückblick. Räume ohne Gruppe
+            nutzen das Notizbuch im Reiter GEDÄCHTNIS. Hier kannst du nur löschen.</div>
+          <div id="br-gruppe-nb" style="font-size:.82rem;line-height:1.5"></div>
+          <button type="button" class="btn-save" style="padding:6px 14px;margin-top:8px" onclick="botGruppeNbSpeichern()">Notizbuch speichern</button>
+        </div>
+      </div>
+
       <div id="bot-sub-memory" class="bot-subtab-content">
       <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
       <div class="admin-section-title">Personen-Gedächtnis</div>
@@ -2384,6 +2418,22 @@ audio {
     </div>
 
     <!-- ── Debug tab ── -->
+    <div id="admin-tab-ki" class="admin-tab-content">
+      <div class="admin-section-title">KI-Dienste</div>
+      <div class="adm-card">
+        <div class="adm-card-title">🔌 Anbieter</div>
+        <div class="adm-card-sub">Zugänge zu den Diensten. Schlüssel werden nie angezeigt, nur ob einer gesetzt ist.
+          „Prüfen" fragt den Dienst direkt.</div>
+        <div id="ki-anbieter"></div>
+      </div>
+      <div class="adm-card">
+        <div class="adm-card-title">🧩 Aufgaben &amp; Zuweisung</div>
+        <div class="adm-card-sub">Welcher Dienst was erledigt. Graue Zeilen sind fest verdrahtet und nur zur Übersicht.</div>
+        <div id="ki-aufgaben"></div>
+        <div id="ki-stand" class="adm-hint"></div>
+      </div>
+    </div>
+
     <div id="admin-tab-dienste" class="admin-tab-content">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:10px;flex-wrap:wrap">
         <div class="admin-section-title" style="margin:0">Dienste &amp; Geräte</div>
@@ -4308,7 +4358,7 @@ const ADMIN_GROUPS = [
   {id: "zugang", icon: "👥", label: "Zugang",    tabs: [["users", "Benutzer"], ["rooms", "Räume"], ["server", "FRN-Server"], ["crosslink", "Crosslink"]]},
   {id: "robert", icon: "🤖", label: "Robert",    tabs: [["bot", "KI-Funker"], ["robert", "Gespräche analysieren"], ["prompt", "Kompletter Prompt"], ["autoreply", "Namens-Antwort"]]},
   {id: "audio",  icon: "🎙", label: "Funk & Audio", tabs: [["audio", "Transkription & Archiv"], ["sprecher", "Sprecher-Erkennung"]]},
-  {id: "system", icon: "🛠", label: "System",    tabs: [["dienste", "Dienste & Geräte"], ["status", "Räume & Verbindungen"], ["debug", "Ablaufverfolgung"]]},
+  {id: "system", icon: "🛠", label: "System",    tabs: [["ki", "KI-Dienste"], ["dienste", "Dienste & Geräte"], ["status", "Räume & Verbindungen"], ["debug", "Ablaufverfolgung"]]},
 ];
 
 function adminNavBauen() {
@@ -4343,6 +4393,7 @@ function showAdminTab(name) {
     if (name === "users")     loadUsers();
     if (name === "status")    loadStatus();
     if (name === "dienste")   statusSeiteLaden(false);
+    if (name === "ki")        kiLaden();
     if (name === "rooms")     loadRooms();
     if (name === "server")    loadServerTab();
     if (name === "autoreply") loadAutoReplyAdmin();
@@ -4368,8 +4419,10 @@ async function loadOverview() {
     body.innerHTML = (d.groups || []).map(g => {
       const rows = g.items.map(([label, value, active]) => {
         let vhtml;
-        if (active === true)  vhtml = `<span class="ov-badge ov-on">● AN</span>`;
-        else if (active === false) vhtml = `<span class="ov-badge ov-off">○ AUS</span>`;
+        const rest = typeof value === "string" ? value.replace(/^(AN|AUS)\s*/, "") : "";
+        const zusatz = rest ? ` <span class="ov-val">${esc(rest)}</span>` : "";
+        if (active === true)  vhtml = `<span class="ov-badge ov-on">● AN</span>${zusatz}`;
+        else if (active === false) vhtml = `<span class="ov-badge ov-off">○ AUS</span>${zusatz}`;
         else vhtml = `<span class="ov-val">${esc(value)}</span>`;
         return `<div class="ov-row"><span class="ov-key">${esc(label)}</span>${vhtml}</div>`;
       }).join("");
@@ -5572,6 +5625,256 @@ async function nachrichtLoeschen(id) {
   } catch(e) { document.getElementById("na-stand").textContent = "Fehler: " + e; }
 }
 
+
+// ── KI-Dienste (03.11.) ──────────────────────────────────────────────────
+const KI_NAMEN = {ollama: "GPU-Box", box: "GPU-Box", mistral: "Mistral", gemini: "Gemini",
+                  openrouter: "OpenRouter", aus: "aus", piper: "Piper lokal", lokal: "lokal"};
+const KI_NAMEN_TTS = {mistral: "Mistral, dann Piper", piper: "Piper lokal", aus: "aus"};
+let kiDaten = null;
+
+async function kiLaden(d) {
+  const st = document.getElementById("ki-stand");
+  try {
+    if (!d) {
+      const r = await adminFetch("/api/admin/ki_dienste");
+      d = await r.json();
+      if (!r.ok || d.error) { st.textContent = "nicht geladen: " + (d.error || r.status); return; }
+    }
+    kiDaten = d;
+    document.getElementById("ki-anbieter").innerHTML = d.anbieter.map(a => `
+      <div style="display:grid;grid-template-columns:minmax(140px,1fr) minmax(180px,2fr) auto;gap:8px;align-items:center;padding:8px 0;border-top:1px solid rgba(42,63,95,.5)">
+        <div><b>${esc(a.name)}</b><div class="adm-hint" style="margin:2px 0 0">${esc(a.hinweis || "")}</div></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${a.url !== undefined ? `<span class="adm-hint" style="margin:0;align-self:center">${esc(a.url)}</span>` : ""}
+          <input type="password" id="ki-key-${a.id}" placeholder="${a.schluessel ? "Schlüssel gesetzt" : "kein Schlüssel"}${a.id === "box" ? " (Token)" : ""}"
+                 autocomplete="new-password" style="flex:1;min-width:140px">
+          <button type="button" class="btn-save" style="padding:4px 10px" onclick="kiSchluessel('${a.id}')">Speichern</button>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button type="button" class="btn-save" style="padding:4px 10px" onclick="kiPruefen('${a.id}')">Prüfen</button>
+          <span id="ki-pr-${a.id}" class="adm-hint" style="margin:0;max-width:260px"></span>
+        </div>
+      </div>`).join("");
+    document.getElementById("ki-aufgaben").innerHTML = d.aufgaben.map(t => {
+      const z = t.zuletzt ? `<div class="adm-hint" style="margin:2px 0 0;color:${t.zuletzt.ok ? "inherit" : "#f0b429"}">zuletzt eingesprungen ${new Date(t.zuletzt.ts * 1000).toLocaleString("de-DE")}: ${esc(t.zuletzt.grund)} (${t.zuletzt.s} s${t.zuletzt.ok ? "" : ", ohne Ergebnis"})</div>` : "";
+      if (t.fest) return `
+        <div style="display:grid;grid-template-columns:minmax(160px,1fr) 2fr;gap:8px;padding:8px 0;border-top:1px solid rgba(42,63,95,.5);opacity:.7">
+          <div><b>${esc(t.name)}</b></div>
+          <div>${esc(KI_NAMEN[t.anbieter] || t.anbieter)}${t.modell ? " · " + esc(t.modell) : ""}<div class="adm-hint" style="margin:2px 0 0">${esc(t.info || "")}</div></div>
+        </div>`;
+      const mitModell = t.modell !== undefined && t.id !== "tts_ausweich";
+      return `
+        <div style="display:grid;grid-template-columns:minmax(160px,1fr) 2fr;gap:8px;padding:8px 0;border-top:1px solid rgba(42,63,95,.5)">
+          <div><b>${esc(t.name)}</b><div class="adm-hint" style="margin:2px 0 0">${esc(t.info || "")}</div>${z}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <select id="ki-an-${t.id}" onchange="kiModellFolgen('${t.id}')">${t.optionen.map(o => `<option value="${o}"${o === t.anbieter ? " selected" : ""}>${esc((t.id === "tts_ausweich" ? KI_NAMEN_TTS[o] : null) || KI_NAMEN[o] || o)}</option>`).join("")}</select>
+            ${mitModell ? `<input type="text" id="ki-mo-${t.id}" value="${esc(t.modell || "")}" placeholder="Modell" style="flex:1;min-width:150px" autocomplete="off">` : ""}
+            ${t.ausweich_nach_s !== undefined ? `<label class="adm-hint" style="margin:0">nach <input type="number" id="ki-ns-${t.id}" value="${t.ausweich_nach_s}" min="0" max="180" style="width:64px"> s</label>` : ""}
+            <button type="button" class="btn-save" style="padding:4px 10px" onclick="kiZuweisen('${t.id}')">Übernehmen</button>
+          </div>
+        </div>`;
+    }).join("");
+  } catch(e) { st.textContent = "nicht geladen: " + e; }
+}
+
+function kiModellFolgen(id) {
+  const t = (kiDaten?.aufgaben || []).find(x => x.id === id);
+  const mo = document.getElementById("ki-mo-" + id);
+  if (t && t.modelle && mo) mo.value = t.modelle[document.getElementById("ki-an-" + id).value] || "";
+}
+
+async function kiPost(body) {
+  const r = await adminFetch("/api/admin/ki_dienste", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const d = await r.json();
+  if (!r.ok || d.error) throw new Error(d.error || r.status);
+  return d;
+}
+
+async function kiPruefen(id) {
+  const el = document.getElementById("ki-pr-" + id);
+  el.textContent = "⏳"; el.style.color = "";
+  try {
+    const d = await kiPost({pruefen: id});
+    el.textContent = (d.ok ? "✓ " : "✗ ") + (d.text || "");
+    el.style.color = d.ok ? "var(--green2, #4caf50)" : "#f0b429";
+  } catch(e) { el.textContent = "✗ " + e.message; el.style.color = "#f0b429"; }
+}
+
+async function kiSchluessel(id) {
+  const inp = document.getElementById("ki-key-" + id);
+  const wert = inp.value.trim();
+  if (!wert && !confirm("Schlüssel für " + id + " löschen?")) return;
+  try {
+    const d = await kiPost({anbieter: id, schluessel: wert});
+    inp.value = "";
+    kiLaden(d);
+    document.getElementById("ki-stand").textContent = "Schlüssel gespeichert.";
+  } catch(e) { document.getElementById("ki-stand").textContent = "Fehler: " + e.message; }
+}
+
+async function kiZuweisen(id) {
+  const body = {aufgabe: id, anbieter: document.getElementById("ki-an-" + id).value};
+  const mo = document.getElementById("ki-mo-" + id), ns = document.getElementById("ki-ns-" + id);
+  if (mo) body.modell = mo.value.trim();
+  if (ns) body.ausweich_nach_s = Number(ns.value || 0);
+  try {
+    const d = await kiPost(body);
+    kiLaden(d);
+    document.getElementById("ki-stand").textContent = "Übernommen, gilt ab sofort.";
+  } catch(e) { document.getElementById("ki-stand").textContent = "Fehler: " + e.message; }
+}
+
+function rbGruppe() {
+  const sel = document.getElementById("rb-gruppe");
+  return (sel && sel.value) || "";
+}
+
+function rbGruppenSetzen(gruppen, aktiv) {
+  const sel = document.getElementById("rb-gruppe");
+  if (!sel) return;
+  sel.style.display = gruppen.length > 1 ? "" : "none";
+  sel.innerHTML = gruppen.map(g =>
+    `<option value="${esc(g)}"${g === aktiv ? " selected" : ""}>${g ? "Gruppe " + esc(g) : "Standardgruppe"}</option>`).join("");
+}
+
+// ── Einstellungen je Raum (03.11.) ──────────────────────────────────────
+const BR_NAMEN = {
+  enabled: "Aktiv in diesem Raum", only_when_addressed: "Nur auf Ansprache",
+  begruessung_enabled: "Begrüßung", mitschreiber_enabled: "Stiller Mitschreiber",
+  notebook_enabled: "Notizbuch", rueckblick_enabled: "Tagesrückblick",
+  nachrichten_enabled: "Nachrichten ausrichten", tagesprogramm_enabled: "Tagesprogramm im Prompt",
+  websearch_enabled: "Websuche",
+  cooldown_s: "Cooldown (Sek.)", conversation_window_s: "Gesprächsfenster (Sek.)",
+  follow_up_window_s: "Anschlussfragen (Sek.)", follow_up_max: "Anschlussfragen max.",
+  silence_call_threshold_s: "Ruf nach Funkstille (Sek.)", begruessung_ruhe_h: "Begrüßung: Ruhe vorher (Std.)",
+  begruessung_min_sprueche: "Begrüßung: ab Sprüchen", begruessung_warte_min: "Begrüßung: Wartezeit min (Min.)",
+  begruessung_warte_max: "Begrüßung: Wartezeit max (Min.)", temperature: "Temperatur",
+  nachfragen: "Nachfragen (Anteil 0–1)", persona: "Persona", gruppe: "Gruppe",
+};
+let brDaten = null;
+
+async function loadBotRaeume() {
+  const st = document.getElementById("br-stand");
+  try {
+    const r = await adminFetch("/api/admin/bot/raeume");
+    const d = await r.json();
+    if (!r.ok || d.error) { st.textContent = "nicht geladen: " + (d.error || r.status); return; }
+    brSetzen(d);
+  } catch(e) { st.textContent = "nicht geladen: " + e; }
+}
+
+function brSetzen(d) {
+  brDaten = d;
+  const selR = document.getElementById("br-raum"), selB = document.getElementById("br-bot");
+  const altR = selR.value, altB = selB.value;
+  selR.innerHTML = d.raeume.map(x => `<option${x === altR ? " selected" : ""}>${esc(x)}</option>`).join("");
+  selB.innerHTML = d.bots.map(b => `<option value="${esc(b.id)}"${b.id === altB ? " selected" : ""}>${esc(b.name)}</option>`).join("");
+  botRaumZeigen();
+  // Uebersicht: wo weicht was ab?
+  const zeilen = [];
+  for (const b of d.bots)
+    for (const [raum, w] of Object.entries(b.raeume || {}))
+      zeilen.push(`<b>${esc(b.name)}</b> · ${esc(raum)}: ` +
+        Object.entries(w).map(([k, v]) => `${esc(BR_NAMEN[k] || k)} = ${esc(typeof v === "string" && v.length > 30 ? v.slice(0, 30) + "…" : String(v))}`).join(", "));
+  document.getElementById("br-uebersicht").innerHTML = zeilen.length
+    ? "Abweichungen:<br>" + zeilen.join("<br>") : "Noch keine Abweichungen, überall gelten die Grundwerte.";
+}
+
+function brStandardText(k, v) {
+  if (typeof v === "boolean") return v ? "an" : "aus";
+  if (v === null || v === undefined || v === "") return "–";
+  return String(v);
+}
+
+function botRaumZeigen() {
+  const d = brDaten; if (!d) return;
+  const raum = document.getElementById("br-raum").value, bid = document.getElementById("br-bot").value;
+  const bot = d.bots.find(b => b.id === bid) || d.bots[0];
+  const w = (bot.raeume || {})[raum] || {};
+  const robertW = (d.bots[0].raeume || {})[raum] || {};
+  let html = '<div class="adm-fields">';
+  for (const k of d.felder.bool) {
+    const std = k === "enabled" ? "global" : brStandardText(k, d.standard[k]);
+    const v = w[k];
+    html += `<div class="form-field"><label>${esc(BR_NAMEN[k] || k)}</label>` +
+      `<select data-br="${k}" data-art="bool">` +
+      `<option value=""${v === undefined ? " selected" : ""}>Standard (${esc(std)})</option>` +
+      (k === "enabled" ? "" : `<option value="1"${v === true ? " selected" : ""}>an</option>`) +
+      `<option value="0"${v === false ? " selected" : ""}>aus</option></select></div>`;
+  }
+  for (const k of d.felder.zahl) {
+    const g = d.grenzen[k] || [];
+    html += `<div class="form-field"><label>${esc(BR_NAMEN[k] || k)}</label>` +
+      `<input type="number" step="any" data-br="${k}" data-art="zahl" min="${g[0] ?? ""}" max="${g[1] ?? ""}" ` +
+      `placeholder="${esc(brStandardText(k, d.standard[k]))}" value="${w[k] ?? ""}" autocomplete="off"></div>`;
+  }
+  html += "</div>";
+  if (!bid) {
+    html += `<div class="adm-fields wide"><div class="form-field"><label>${BR_NAMEN.gruppe}` +
+      `<small>Räume derselben Gruppe teilen Notizbuch und Tagesrückblick; leer = Standardgruppe (Eickelborn)</small></label>` +
+      `<input type="text" data-br="gruppe" data-art="text" maxlength="40" value="${esc(w.gruppe || "")}" autocomplete="off"></div></div>`;
+  }
+  html += `<div class="form-field" style="margin-top:10px"><label>${BR_NAMEN.persona} <small>leer = Grundwert</small></label>` +
+    `<textarea data-br="persona" data-art="text" rows="3" placeholder="${esc(d.standard.persona || "")}">${esc(w.persona || "")}</textarea></div>`;
+  document.getElementById("br-felder").innerHTML = html;
+  document.getElementById("br-stand").textContent = "";
+  // Gruppen-Notizbuch
+  const gruppe = (robertW.gruppe || "").trim();
+  const karte = document.getElementById("br-gruppe-karte");
+  karte.style.display = gruppe && d.gruppen[gruppe] ? "" : "none";
+  if (gruppe && d.gruppen[gruppe]) {
+    document.getElementById("br-gruppe-name").textContent = gruppe + " (" + d.gruppen[gruppe].raeume.join(", ") + ")";
+    const nb = d.gruppen[gruppe].notebook || [];
+    document.getElementById("br-gruppe-nb").innerHTML = nb.length ? nb.map((n, i) =>
+      `<label style="display:flex;gap:8px;align-items:flex-start;margin-bottom:4px">` +
+      `<input type="checkbox" checked data-nb="${i}" style="accent-color:#f0b429;margin-top:3px">` +
+      `<span><span style="color:var(--muted)">${new Date(n.ts * 1000).toLocaleDateString("de-DE")}</span> ${esc(n.text)}</span></label>`).join("")
+      : '<span style="color:var(--muted)">Noch leer.</span>';
+  }
+}
+
+async function botRaumSpeichern() {
+  const st = document.getElementById("br-stand");
+  const raum = document.getElementById("br-raum").value, bot = document.getElementById("br-bot").value;
+  const werte = {};
+  document.querySelectorAll("#br-felder [data-br]").forEach(el => {
+    const k = el.dataset.br, art = el.dataset.art, v = el.value.trim();
+    if (art === "bool") werte[k] = v === "" ? null : v === "1";
+    else if (art === "zahl") werte[k] = v === "" ? null : Number(v);
+    else werte[k] = v === "" ? null : v;
+  });
+  st.textContent = "speichere …";
+  try {
+    const r = await adminFetch("/api/admin/bot/raeume", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({raum, bot, werte})});
+    const d = await r.json();
+    if (!r.ok || d.error) { st.textContent = "Fehler: " + (d.error || r.status); return; }
+    brSetzen(d);
+    st.textContent = "Gespeichert.";
+  } catch(e) { st.textContent = "Fehler: " + e; }
+}
+
+async function botGruppeNbSpeichern() {
+  const d = brDaten; if (!d) return;
+  const raum = document.getElementById("br-raum").value;
+  const gruppe = (((d.bots[0].raeume || {})[raum] || {}).gruppe || "").trim();
+  const alt = (d.gruppen[gruppe] || {}).notebook || [];
+  const notebook = alt.filter((_n, i) => {
+    const cb = document.querySelector(`#br-gruppe-nb input[data-nb="${i}"]`);
+    return !cb || cb.checked;
+  });
+  const st = document.getElementById("br-stand");
+  try {
+    const r = await adminFetch("/api/admin/bot/raeume", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({gruppe, notebook})});
+    const dd = await r.json();
+    if (!r.ok || dd.error) { st.textContent = "Fehler: " + (dd.error || r.status); return; }
+    brSetzen(dd);
+    st.textContent = "Notizbuch gespeichert.";
+  } catch(e) { st.textContent = "Fehler: " + e; }
+}
+
 async function loadRueckblick() {
   const dat = document.getElementById("rb-datum");
   if (dat && !dat.value) {
@@ -5579,9 +5882,10 @@ async function loadRueckblick() {
     dat.value = `${g.getFullYear()}-${String(g.getMonth() + 1).padStart(2, "0")}-${String(g.getDate()).padStart(2, "0")}`;
   }
   try {
-    const r = await adminFetch("/api/admin/rueckblick");
+    const r = await adminFetch("/api/admin/rueckblick?gruppe=" + encodeURIComponent(rbGruppe()));
     const d = await r.json();
     if (!r.ok || d.error) { document.getElementById("rb-stand").textContent = "nicht geladen: " + (d.error || r.status); return; }
+    rbGruppenSetzen(d.gruppen || [""], d.gruppe || "");
     rueckblickZeigen(d.tage);
   } catch(e) { document.getElementById("rb-stand").textContent = "nicht geladen: " + e; }
 }
@@ -5592,7 +5896,7 @@ async function rueckblickBauen() {
   btn.disabled = true; st.textContent = "⏳ baue Rückblick … (dauert ein bis drei Minuten)";
   try {
     const r = await adminFetch("/api/admin/rueckblick", {
-      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({datum})});
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({datum, gruppe: rbGruppe()})});
     const d = await r.json();
     if (!r.ok || d.error) { st.textContent = "Fehler: " + (d.error || r.status); return; }
     st.textContent = d.fehler ? "Nicht gebaut: " + d.fehler : "Fertig.";

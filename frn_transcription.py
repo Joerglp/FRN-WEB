@@ -586,6 +586,73 @@ def _mark_discarded(wav_path: str) -> None:
         log.debug("_mark_discarded fehlgeschlagen (%s): %s", wav_path, e)
 
 
+# ── Ausweich-Transkription (03.11.): Mistral Voxtral ──────────────────────
+# Ist der Whisper-Dienst der Box nicht erreichbar oder schlaegt er fehl,
+# transkribiert Voxtral -- statt die Warteschlange anzuhalten. Im Test
+# (10 Clips) bei klarer Sprache gleich gut, bei kurzen/verrauschten
+# Spruechen schwaecher (leer, Englisch/Russisch) -- daher nur Ausweich.
+# config: whisper.ausweich = "mistral", whisper.ausweich_modell,
+# Schluessel aus voice.bot.mistral_api_key.
+AUSWEICH_LETZT: tuple | None = None   # (Zeit, Grund, Sekunden, Text vorhanden)
+
+
+def _ausweich_cfg() -> dict | None:
+    try:
+        cfg = json.loads((Path(__file__).parent / "config.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    w = cfg.get("whisper", {})
+    key = (cfg.get("voice", {}).get("bot", {}).get("mistral_api_key") or "").strip()
+    if (w.get("ausweich") or "").strip().lower() != "mistral" or not key:
+        return None
+    return {"key": key, "modell": (w.get("ausweich_modell") or "voxtral-mini-transcribe-3").strip()}
+
+
+def _transcribe_mistral(wav_path: str, language: str, key: str, modell: str) -> str:
+    """Voxtral-Transkription (blockierend, fuer run_in_executor)."""
+    import requests
+    with open(wav_path, "rb") as f:
+        r = requests.post("https://api.mistral.ai/v1/audio/transcriptions",
+                          headers={"Authorization": f"Bearer {key}"},
+                          files={"file": (Path(wav_path).name, f, "audio/wav")},
+                          data={"model": modell, "language": language or "de"},
+                          timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Mistral HTTP {r.status_code}: {r.text[:120]}")
+    text = (r.json().get("text") or "").strip()
+    # Voxtral springt bei Rauschen trotz language=de in andere Sprachen
+    # ("Спасибо.", "Oh, are you there?") -- das ist nichts Gehoertes.
+    if text and (_re.search(r"[^\x00-\u024f\s\d.,!?;:'\"()\-–…]", text)
+                 or _is_english_hallucination(text) or _is_generic_hallucination(text)):
+        log.info("Ausweich-Transkription verworfen (fremde Sprache/Floskel): %.60s", text)
+        return ""
+    return _remove_repetitions(text)
+
+
+async def _ausweich_versuch(wav_path: str, language: str, room: str, ts: float,
+                            grund: str, dbg=None) -> str | None:
+    """Transkript per Ausweich, None wenn keiner eingerichtet ist oder er versagt."""
+    global AUSWEICH_LETZT
+    aw = _ausweich_cfg()
+    if not aw:
+        return None
+    _t0 = time.time()
+    try:
+        loop = asyncio.get_running_loop()
+        text = await asyncio.wait_for(loop.run_in_executor(
+            None, _transcribe_mistral, wav_path, language, aw["key"], aw["modell"]), timeout=70)
+    except Exception as e:
+        log.warning("[%s] Ausweich-Transkription fehlgeschlagen: %s", room, e)
+        AUSWEICH_LETZT = (time.time(), grund, round(time.time() - _t0, 1), False)
+        return None
+    dt = time.time() - _t0
+    AUSWEICH_LETZT = (time.time(), grund, round(dt, 1), bool(text))
+    log.warning("[%s] %s -- Ausweich %s: %.1fs", room, grund, aw["modell"], dt)
+    if dbg:
+        dbg(room, ts, "Whisper", "warn", dt, f"{grund} -- Ausweich {aw['modell']}: {text[:160]}")
+    return text
+
+
 def _is_remote_available(url: str) -> bool:
     """Prüft ob der Remote-Whisper-Server erreichbar ist (Health-Check)."""
     import urllib.request as _ur
@@ -884,12 +951,20 @@ class TranscriptionPipeline:
             except Exception:
                 _dur_s = 0.0
             while True:
+                ausgewichen = None
                 if remote_url:
                     loop = asyncio.get_event_loop()
                     while not await loop.run_in_executor(None, _is_remote_available, remote_url):
+                        ausgewichen = await _ausweich_versuch(
+                            wav_path, language, room, ts, "Whisper nicht erreichbar", dbg)
+                        if ausgewichen is not None:
+                            break
                         log.warning("Remote-Whisper nicht erreichbar — Warteschlange pausiert, "
                                     "nächster Versuch in 30s …")
                         await asyncio.sleep(30)
+                if ausgewichen is not None:
+                    text = ausgewichen
+                    break
                 try:
                     _t0 = time.time()
                     messwerte.clear()
@@ -1022,6 +1097,11 @@ class TranscriptionPipeline:
                             dbg(room, ts, "Whisper", "error", time.time() - _t0,
                                f"nach {fails} Timeouts übersprungen", final=True)
                         return
+                    ausgewichen = await _ausweich_versuch(
+                        wav_path, language, room, ts, "Whisper-Timeout", dbg)
+                    if ausgewichen is not None:
+                        text = ausgewichen
+                        break
                     log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
                     await asyncio.sleep(30)
                 except Exception as e:
@@ -1046,6 +1126,11 @@ class TranscriptionPipeline:
                             dbg(room, ts, "Whisper", "error", None,
                                f"nach {fails} Fehlern übersprungen: {e}"[:200], final=True)
                         return
+                    ausgewichen = await _ausweich_versuch(
+                        wav_path, language, room, ts, f"Whisper-Fehler ({str(e)[:60]})", dbg)
+                    if ausgewichen is not None:
+                        text = ausgewichen
+                        break
                     log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
                     await asyncio.sleep(30)
 

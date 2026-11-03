@@ -49,6 +49,10 @@ from scipy.signal import resample as sp_resample
 # Haupt-Bot aus voice.bot (Robert), sonst die id aus voice.bots_weitere.
 # asyncio-Tasks erben den Wert beim Anlegen, _bot_cfg() liest ihn.
 _BOT_KONTEXT: contextvars.ContextVar[str] = contextvars.ContextVar("frn_bot", default="")
+# In welchem Raum gerade gehandelt wird (03.11., Einstellungen je Raum):
+# _bot_cfg() legt voice.bot.raeume[Raum] ueber die Grundwerte. "" = kein Raum
+# (Admin-Seite, Tagesprogramm, Status) -> Grundwerte wie bisher.
+_BOT_RAUM: contextvars.ContextVar[str] = contextvars.ContextVar("frn_bot_raum", default="")
 
 try:
     from frn_transcription import TranscriptionPipeline, transcribe_wav
@@ -1438,6 +1442,43 @@ class TXServer:
             w.writeframes(bytes(pcm))
         return buf.getvalue()
 
+    _tts_ausweich_letzt: tuple | None = None   # (Zeit, Grund, Sekunden, ok)
+    _STIMMEN_REF = Path(__file__).parent / "stimmen_ref"
+
+    async def _mistral_tts_wav(self, text: str, speaker: str, grund: str) -> bytes | None:
+        """Sprachausgabe ueber Mistral Voxtral mit geklonter Stimme. None, wenn
+        nicht eingerichtet, keine Stimmvorlage da ist oder der Dienst versagt."""
+        v = self.cfg.get("voice", {})
+        key = (v.get("bot", {}).get("mistral_api_key") or "").strip()
+        if (v.get("tts_ausweich") or "").strip().lower() != "mistral" or not key:
+            return None
+        ref = self._STIMMEN_REF / f"{re.sub(r'[^a-z0-9_-]', '_', (speaker or 'default').lower())}.wav"
+        if not ref.exists():      # fremde Stimme nie mit Roberts Vorlage sprechen
+            log.info("TTS-Ausweich Mistral: keine Stimmvorlage für %s", speaker)
+            return None
+        body = {"model": (v.get("tts_ausweich_modell") or "voxtral-mini-tts-latest").strip(),
+                "input": text, "ref_audio": base64.b64encode(ref.read_bytes()).decode(),
+                "response_format": "wav"}
+        _t0 = time.time()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=40)) as sess:
+                async with sess.post("https://api.mistral.ai/v1/audio/speech", json=body,
+                                     headers={"Authorization": f"Bearer {key}"}) as resp:
+                    data = await resp.json(content_type=None)
+                    if resp.status != 200:
+                        raise RuntimeError(f"HTTP {resp.status}: {str(data)[:120]}")
+            wav = base64.b64decode(data.get("audio_data") or "")
+            if len(wav) < 1000:
+                raise RuntimeError("leere Audiodaten")
+        except Exception as e:
+            log.warning("TTS-Ausweich Mistral fehlgeschlagen: %s", e)
+            self._tts_ausweich_letzt = (time.time(), grund, round(time.time() - _t0, 1), False)
+            return None
+        dt = time.time() - _t0
+        self._tts_ausweich_letzt = (time.time(), grund, round(dt, 1), True)
+        log.warning("Sprachausgabe kam von Mistral Voxtral (%s, %.1fs, Stimme %s)", grund, dt, ref.stem)
+        return wav
+
     async def _get_voice_pcm(self, text: str, lang: str = "de",
                              speaker: str = "default",
                              force_xtts: bool = False) -> bytes:
@@ -1482,16 +1523,19 @@ class TXServer:
                         raise RuntimeError(f"TTS-Dienst {resp.status}: {body[:120]}")
                     wav_bytes = await resp.read()
         except Exception as e:
-            # GPU-Box weg -> lokales Piper statt Schweigen (siehe
-            # _piper_local_wav). Bei geklonten Stimmen (XTTS) klingt die
-            # Rueckfallebene nach der Standard-Stimme, nicht nach dem
-            # Original -- immer noch besser als gar keine Durchsage.
-            if not vcfg.get("tts_fallback_local", True):
-                raise
-            log.warning("TTS über %s fehlgeschlagen (%s) -- weiche auf lokales Piper aus", url, e)
-            loop = asyncio.get_running_loop()
-            wav_bytes = await loop.run_in_executor(None, self._piper_local_wav, text, speaker)
-            log.info("Sprachausgabe kam aus dem lokalen Piper (Rückfallebene)")
+            # GPU-Box weg -> zuerst Mistral Voxtral mit geklonter Stimme
+            # (03.11., voice.tts_ausweich = "mistral", Vorlage in
+            # stimmen_ref/<Sprecher>.wav), dann lokales Piper statt Schweigen
+            # (siehe _piper_local_wav). Piper klingt nach der Standard-Stimme,
+            # nicht nach dem Original -- immer noch besser als gar keine Durchsage.
+            wav_bytes = await self._mistral_tts_wav(text, speaker, f"XTTS-Fehler: {str(e)[:60]}")
+            if wav_bytes is None:
+                if not vcfg.get("tts_fallback_local", True):
+                    raise
+                log.warning("TTS über %s fehlgeschlagen (%s) -- weiche auf lokales Piper aus", url, e)
+                loop = asyncio.get_running_loop()
+                wav_bytes = await loop.run_in_executor(None, self._piper_local_wav, text, speaker)
+                log.info("Sprachausgabe kam aus dem lokalen Piper (Rückfallebene)")
         ffm = await asyncio.create_subprocess_exec(
             "ffmpeg", "-i", "pipe:0",
             # Lautheits-Normalisierung (EBU R128) -- verschiedene TTS-Engines/
@@ -1511,6 +1555,15 @@ class TXServer:
 
     async def on_transcript(self, room_name: str, callsign: str,
                             text: str, ts: float, confidence: float | None = None):
+        # Raum fuer _bot_cfg() setzen (03.11.); hier angelegte Tasks erben ihn.
+        tok = self._raum_setzen(room_name)
+        try:
+            await self._on_transcript_kern(room_name, callsign, text, ts, confidence)
+        finally:
+            _BOT_RAUM.reset(tok)
+
+    async def _on_transcript_kern(self, room_name: str, callsign: str,
+                                  text: str, ts: float, confidence: float | None = None):
         """Von der Transkriptions-Pipeline nach jedem Transkript gerufen.
 
         Prüft die Automatik jedes Benutzers (eigene Trigger-Wörter, eigene
@@ -1530,6 +1583,14 @@ class TXServer:
                          if r.name == room_name), None)
             if room is None:
                 return
+
+            # Fuer den Namensfilter der Debug-Anzeige: wer faellt im Text? Eigene
+            # Sendungen zaehlen nicht ("Hier ist Robert").
+            if not self._bot_is_own(room_name, text, ts):
+                gefallen = [n for n, trig in self._bot_namen().items()
+                            if any(re.search(r"\b" + re.escape(t), low) for t in trig)]
+                if gefallen:
+                    self._debug_trace_get(room_name, ts)["namen"] = gefallen
 
             # KI-Funker beobachtet jeden Durchgang (unabhängig von der
             # Namens-Automatik) und antwortet ggf. selbstständig.
@@ -2020,6 +2081,8 @@ class TXServer:
             "begruessung_warte_max":    (0, 180),
             "temperature":              (0.0, 2.0),  # 0 = immer gleiche Antwort
             "min_confidence":           (0.0, 1.0),  # 0 = Pruefung aus
+            "nachfragen":               (0.0, 1.0),  # Anteil Antworten mit Rueckfrage
+            "ausweich_nach_s":          (0, 180),    # 0 = nur bei Fehler ausweichen
         },
         "auto_reply": {
             "cooldown_s":               (0, 3600),
@@ -2278,15 +2341,104 @@ class TXServer:
     # Antwort abzuleiten -- das Modell entscheidet selbst, was wirklich
     # merkenswert ist, sonst wuerde bei jedem Smalltalk etwas gespeichert.
 
-    def _bot_cfg(self) -> dict:
-        basis = {**self._BOT_DEFAULTS,
-                 **self.cfg.get("voice", {}).get("bot", {})}
+    # Einstellungen je Raum (03.11.): voice.bot.raeume = {Raum: {Schluessel:
+    # Wert}} enthaelt nur Abweichungen von den Grundwerten; bots_weitere[i].raeume
+    # genauso fuer Susi. "gruppe" fasst Raeume zusammen, die Notizbuch und
+    # Tagesrueckblick teilen (andere Funkrunden im FRN-System). Raeume ohne
+    # Gruppe bilden die Standardgruppe mit dem bisherigen Notizbuch
+    # (voice.bot.notebook) und Rueckblick; benannte Gruppen liegen unter
+    # voice.bot.gruppen[Name].notebook bzw. tagesrueckblick.json "gruppen".
+    _RAUM_BOOL = ("enabled", "only_when_addressed", "begruessung_enabled",
+                  "mitschreiber_enabled", "notebook_enabled", "rueckblick_enabled",
+                  "nachrichten_enabled", "tagesprogramm_enabled")
+    _RAUM_ZAHL = ("cooldown_s", "conversation_window_s", "follow_up_window_s",
+                  "follow_up_max", "silence_call_threshold_s", "begruessung_ruhe_h",
+                  "begruessung_min_sprueche", "begruessung_warte_min",
+                  "begruessung_warte_max", "temperature", "nachfragen")
+    _RAUM_TEXT = ("persona", "gruppe")
+    _RAUM_LABEL = {
+        "only_when_addressed": "nur auf Ansprache", "begruessung_enabled": "Begrüßung",
+        "mitschreiber_enabled": "Mitschreiber", "notebook_enabled": "Notizbuch",
+        "rueckblick_enabled": "Rückblick", "nachrichten_enabled": "Nachrichten",
+        "tagesprogramm_enabled": "Tagesprogramm", "websearch_enabled": "Websuche",
+        "cooldown_s": "Cooldown s", "conversation_window_s": "Gesprächsfenster s",
+        "follow_up_window_s": "Anschlussfragen s", "follow_up_max": "Anschlussfragen max",
+        "silence_call_threshold_s": "Ruf nach Stille s", "begruessung_ruhe_h": "Begrüßung Ruhe h",
+        "begruessung_min_sprueche": "Begrüßung ab Sprüchen",
+        "begruessung_warte_min": "Begrüßung Warten min", "begruessung_warte_max": "Begrüßung Warten max",
+        "temperature": "Temperatur", "nachfragen": "Nachfragen", "gruppe": "Gruppe"}
+
+    @staticmethod
+    def _raum_werte(b: dict | None, raum: str) -> dict:
+        r = ((b or {}).get("raeume") or {}).get(raum) if raum else None
+        return r if isinstance(r, dict) else {}
+
+    def _bot_cfg(self, raum: str | None = None) -> dict:
+        robert = self.cfg.get("voice", {}).get("bot", {})
+        raum = _BOT_RAUM.get() if raum is None else raum
         bid = _BOT_KONTEXT.get()
-        if bid:
-            extra = self._bot_weitere_cfg(bid)
-            if extra is not None:
-                return {**basis, **extra}
-        return basis
+        extra = self._bot_weitere_cfg(bid) if bid else None
+        out = {**self._BOT_DEFAULTS, **robert}
+        an = bool(out.get("enabled"))
+        r_robert = self._raum_werte(robert, raum)
+        self._raum_ueberlagern(out, r_robert)
+        if extra is not None:
+            out.update(extra)
+            an = bool(extra.get("enabled", an))
+            r_eigen = self._raum_werte(extra, raum)
+            self._raum_ueberlagern(out, r_eigen)
+        else:
+            r_eigen = r_robert
+        # Ein/Aus: global UND Raum, und nur der eigene Raumwert -- "Robert aus"
+        # in einem Raum darf Susi dort nicht mit abschalten.
+        out["_an_global"] = an
+        out["enabled"] = an and r_eigen.get("enabled") is not False
+        out["_raum"] = raum
+        gruppe = self._gruppe_von(raum)
+        out["_gruppe"] = gruppe
+        if gruppe:
+            out["notebook"] = list(((robert.get("gruppen") or {}).get(gruppe) or {})
+                                   .get("notebook") or [])
+        out.pop("raeume", None)
+        out.pop("gruppen", None)
+        return out
+
+    @staticmethod
+    def _raum_ueberlagern(out: dict, werte: dict) -> None:
+        for k, v in werte.items():
+            if k in ("enabled", "gruppe"):
+                continue
+            if k == "websearch_enabled":
+                out["websearch"] = dict(out.get("websearch") or {}, enabled=bool(v))
+            else:
+                out[k] = v
+
+    def _gruppe_von(self, raum: str) -> str:
+        """Gruppe eines Raums ("" = Standardgruppe)."""
+        robert = self.cfg.get("voice", {}).get("bot", {})
+        return str(self._raum_werte(robert, raum).get("gruppe") or "").strip()
+
+    def _gruppen(self) -> dict[str, list[str]]:
+        """{Gruppe: Raeume}; "" = Standardgruppe. Deren Raumliste ist leer, wenn
+        Robert in allen Raeumen spricht (dann: alle ausser benannten Gruppen)."""
+        robert = self.cfg.get("voice", {}).get("bot", {})
+        benannt: dict[str, list[str]] = {}
+        for raum, w in (robert.get("raeume") or {}).items():
+            g = str((w or {}).get("gruppe") or "").strip() if isinstance(w, dict) else ""
+            if g:
+                benannt.setdefault(g, []).append(raum)
+        alle_benannt = {r for rs in benannt.values() for r in rs}
+        std = [r for r in (robert.get("rooms") or []) if r not in alle_benannt]
+        return {"": std, **benannt}
+
+    def _raum_setzen(self, raum: str):
+        """tok = self._raum_setzen(r) ... _BOT_RAUM.reset(tok)"""
+        return _BOT_RAUM.set(raum or "")
+
+    def _aus_in_raeumen(self, b: dict | None) -> list[str]:
+        """Raeume, in denen dieser Bot per Raumwert (z.B. Funkbefehl) aus ist."""
+        return [r for r, w in ((b or {}).get("raeume") or {}).items()
+                if isinstance(w, dict) and w.get("enabled") is False]
 
     # Weitere KI-Funker (12.10., "Susi"): voice.bots_weitere ist eine Liste von
     # Ueberlagerungen fuer voice.bot -- jeder erbt alles von Robert (Modell,
@@ -2297,6 +2449,17 @@ class TXServer:
             if isinstance(b, dict) and b.get("id") == bid:
                 return b
         return None
+
+    def _bot_namen(self) -> dict[str, list[str]]:
+        """{Anzeigename: Trigger-Woerter} aller KI-Funker, fuer die Namensfilter
+        in Archiv und Debug-Anzeige."""
+        namen = {}
+        for bid in self._bot_ids():
+            b = self.cfg.get("voice", {}).get("bot", {}) if not bid else self._bot_weitere_cfg(bid)
+            name = (b or {}).get("name") or ("Robert" if not bid else bid)
+            trigger = (b or {}).get("trigger") or [name]
+            namen[name] = sorted({str(t).strip().lower() for t in trigger if str(t).strip()})
+        return namen
 
     def _bot_ids(self) -> list[str]:
         return [""] + [b["id"] for b in self.cfg.get("voice", {}).get("bots_weitere") or []
@@ -3206,20 +3369,39 @@ class TXServer:
 
     def _bot_set_enabled(self, value: bool):
         """Bot ein-/ausschalten und in config.json persistieren (überlebt
-        Neustart)."""
+        Neustart). Mit Raum (_BOT_RAUM, Funkbefehl) nur in diesem Raum
+        (03.11.): "aus" setzt raeume[Raum].enabled = false, "an" nimmt den
+        Eintrag wieder heraus -- dann gilt der globale Schalter."""
         bid = _BOT_KONTEXT.get()
+        raum = _BOT_RAUM.get()
 
         def _ziel(voice: dict) -> dict:
             if bid:
                 return next((b for b in voice.get("bots_weitere") or []
                              if isinstance(b, dict) and b.get("id") == bid), {})
             return voice.setdefault("bot", {})
-        _ziel(self.cfg.setdefault("voice", {}))["enabled"] = bool(value)
+
+        def _setzen(voice: dict) -> None:
+            z = _ziel(voice)
+            if not raum:
+                z["enabled"] = bool(value)
+                return
+            raeume = z.setdefault("raeume", {})
+            r = raeume.setdefault(raum, {})
+            if value:
+                r.pop("enabled", None)
+                if not r:
+                    raeume.pop(raum, None)
+                if not raeume:
+                    z.pop("raeume", None)
+            else:
+                r["enabled"] = False
+        _setzen(self.cfg.setdefault("voice", {}))
         try:
             if self.args.config:
                 p = Path(self.args.config)
                 disk = json.loads(p.read_text(encoding="utf-8"))
-                _ziel(disk.setdefault("voice", {}))["enabled"] = bool(value)
+                _setzen(disk.setdefault("voice", {}))
                 p.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
                              encoding="utf-8")
         except Exception as e:
@@ -3230,7 +3412,7 @@ class TXServer:
         """Schaltet den Bot per Funkbefehl und quittiert per Stimme."""
         turn_on = (cmd == "on")
         self._bot_set_enabled(turn_on)
-        log.info("[%s] KI-Funker per Funk %s", room_name,
+        log.info("[%s] KI-Funker per Funk %s (nur dieser Raum)", room_name,
                  "geweckt" if turn_on else "stummgeschaltet")
         ctl = bot.get("control") or {}
         if ctl.get("confirm", True):
@@ -3505,6 +3687,11 @@ class TXServer:
                                   detail="Sprachsteuerung: aus", final=True)
             asyncio.create_task(self._bot_apply_command(room, room_name, bot, "off"))
             return
+        if cmd == "on" and not bot.get("enabled") and not bot.get("_an_global", True):
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
+                                  detail="Sprachsteuerung: an -- global ausgeschaltet, "
+                                         "nur über die Einstellungen", final=True)
+            return
         if cmd == "on" and not bot.get("enabled"):
             self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
                                   detail="Sprachsteuerung: an", final=True)
@@ -3695,7 +3882,7 @@ class TXServer:
             return
         if getattr(self, "_vorwaerm_laeuft", False):
             return
-        bot = self._bot_cfg()
+        bot = self._bot_cfg(raum=room_name)
         if not bot.get("enabled") or not bot.get("vorwaermen", True):
             return
         if (bot.get("provider") or "ollama").strip().lower() != "ollama":
@@ -3709,9 +3896,11 @@ class TXServer:
         bid = max(self._bot_ids(), key=lambda i: self._bot_zust.get(i, {})
                   .get("last_reply", {}).get(room_name, 0.0))
         tok = self._bot_im(bid)
+        rtok = self._raum_setzen(room_name)
         try:
             asyncio.create_task(self._bot_vorwaermen(self._bot_cfg(), room_name))
         finally:
+            _BOT_RAUM.reset(rtok)
             _BOT_KONTEXT.reset(tok)
 
     # ── Statusseite (2026-09-28) ──────────────────────────────────────────
@@ -3921,13 +4110,26 @@ class TXServer:
             except OSError:
                 wartend = None
             llm = getattr(self, "_llm_letzte", None)
+            voice_ = self.cfg.get("voice", {})
+            aus_in = {(voice_.get("bot", {}).get("name") or "Robert"): self._aus_in_raeumen(voice_.get("bot"))}
+            for b in voice_.get("bots_weitere") or []:
+                if isinstance(b, dict) and b.get("id"):
+                    aus_in[b.get("name") or b["id"]] = self._aus_in_raeumen(b)
             return {"enabled": bool(bot.get("enabled")), "rooms": bot.get("rooms") or [],
+                    "aus_in": {k: v for k, v in aus_in.items() if v},
                     "tts": (self.cfg.get("voice", {}).get("tts_engine") or ""),
                     "xtts_speaker": self.cfg.get("voice", {}).get("xtts_speaker") or "",
                     "vorwaermen": bool(bot.get("vorwaermen", True)),
                     "gemini": self._gemini_status(bot),
                     "letzte_antwort": letzte, "warteschlange": wartend,
                     "llm_letzte": {"ts": llm[0], "s": round(llm[1], 2)} if llm else None,
+                    "ausweich": ({"modell": bot.get("mistral_model") or "mistral-large-4",
+                                  "nach_s": float(bot.get("ausweich_nach_s", 20) or 0),
+                                  "letzt": ({"ts": self._ausweich_letzt[0], "grund": self._ausweich_letzt[1],
+                                             "s": self._ausweich_letzt[2], "ok": self._ausweich_letzt[3]}
+                                            if self._ausweich_letzt else None)}
+                                 if (bot.get("ausweich_provider") or "").strip().lower() == "mistral"
+                                 and (bot.get("mistral_api_key") or "").strip() else None),
                     "frn_raeume": [{"name": r.name, "verbunden": bool(getattr(r, "_connected", False))}
                                    for r in self.rooms.values()]}
 
@@ -4151,6 +4353,7 @@ class TXServer:
     async def _nachlegen_lauf(self, room, room_name: str, bid: str, zusatz: str, t1: float,
                               vorher: float = 0.0, stempel: float = 0.0):
         _BOT_KONTEXT.set(bid)       # gilt nur fuer diesen Task
+        _BOT_RAUM.set(room_name)
 
         def jemand_sprach():
             return any(t > t1 and not w.endswith(" (du)")
@@ -4198,6 +4401,21 @@ class TXServer:
             self._nachlegen_zuletzt[room_name] = vorher
         log.info("[%s] Nachlegen abgebrochen -- %s", room_name, abbruch)
 
+    @staticmethod
+    def _eigene_vor_ruf(hist: list, trigger_ts: float | None, own_tag: str) -> tuple[list, int]:
+        """Endet der Verlauf mit eigenen Antworten, die NACH dem Ausloeser
+        liegen, kommen sie direkt vor den Ausloeser (Kopie, Raumverlauf bleibt
+        unveraendert). Gibt (Verlauf, Anzahl verschobener Eintraege) zurueck."""
+        if (trigger_ts is None or not hist or hist[-1][1] != own_tag
+                or not any(abs(t - trigger_ts) < 0.5 and w != own_tag for t, w, _x in hist)):
+            return hist, 0
+        spaeter = [e for e in hist if e[1] == own_tag and e[0] > trigger_ts + 0.5]
+        rest = [e for e in hist if not (e[1] == own_tag and e[0] > trigger_ts + 0.5)]
+        n = len(spaeter)
+        for i, (_t, _w, x) in enumerate(spaeter):
+            bisect.insort(rest, (trigger_ts - 0.01 * (n - i), own_tag, x), key=lambda e: e[0])
+        return rest, n
+
     async def _bot_reply(self, room: "FRNTXRoom", room_name: str, bot: dict,
                          search_query: str = "", trigger_ts: float | None = None,
                          zusatz: str = "", nachlegen: bool = False, vorrang: bool = False):
@@ -4213,6 +4431,18 @@ class TXServer:
         heard_ts = time.time()
         try:
             hist   = list(self._room_hist.get(room_name, []))
+            # Vorgemerkter Ruf (02.11.): der Ruf fiel in einen laufenden Lauf,
+            # die eigene Antwort darauf steht mit ihrem Sende-Ende (t1) also
+            # HINTER dem Ruf, obwohl sie ihn gar nicht kannte. Der Prompt
+            # endete dann mit der eigenen Antwort, gemma wiederholte sie
+            # woertlich (07:42, Aehnlichkeit 1.00) und die Wiederhol-Bremse
+            # verschluckte den Ruf. Eigene Saetze nach dem Ausloeser deshalb
+            # direkt vor den Ausloeser ruecken.
+            hist, n_ger = self._eigene_vor_ruf(hist, trigger_ts,
+                                               f"{bot.get('name') or 'Robert'} (du)")
+            if n_ger:
+                log.info("[%s] KI-Funker: %d eigene Antwort(en) vor den vorgemerkten Ruf "
+                         "gerueckt", room_name, n_ger)
             if hist:
                 # Ausloeser ausdruecklich uebergeben: hist ist jetzt nach Zeit
                 # sortiert, hist[-1] waere nicht mehr zwingend der Ausloeser.
@@ -4399,6 +4629,7 @@ class TXServer:
 
     async def _vorgemerkt_lauf(self, room_name: str, bid: str, room, search_query: str, ts: float):
         _BOT_KONTEXT.set(bid)       # gilt nur fuer diesen Task
+        _BOT_RAUM.set(room_name)
         await self._bot_reply(room, room_name, self._bot_cfg(), search_query,
                               trigger_ts=ts, vorrang=True)
 
@@ -5098,6 +5329,7 @@ class TXServer:
 
     async def _bot_begruessung(self, room, room_name: str, st: dict) -> None:
         """In der naechsten Funkpause einmal kurz in der Runde melden."""
+        _BOT_RAUM.set(room_name)    # gilt nur fuer diesen Task
         gesendet = False
         belegt = False
         try:
@@ -5129,10 +5361,7 @@ class TXServer:
                 "kurz in der Runde: dass du auch da und QRV bist. Ein Satz, locker und "
                 "passend zur Tageszeit; greif gern kurz auf, worüber gerade geredet "
                 "wird, aber stell niemandem eine direkte Frage. Antworte NICHT mit SKIP.")})
-            if (bot.get("provider") or "ollama").strip().lower() == "gemini":
-                roh = await self._llm_gemini(bot, system, messages)
-            else:
-                roh = await self._llm_ollama(bot, system, messages)
+            roh = await self._llm_neben(bot, system, messages)
             text, stimmung = self._emotion_abtrennen(roh or "", bot)
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip().strip('"')
             text = re.sub(r"^\[?\d{1,2}:\d{2}\]\s*", "", text).strip()
@@ -5222,6 +5451,7 @@ class TXServer:
         asyncio.create_task(self._mitschreiber_lauf(room_name, ts))
 
     async def _mitschreiber_lauf(self, room_name: str, treffer_ts: float) -> None:
+        _BOT_RAUM.set(room_name)    # gilt nur fuer diesen Task
         try:
             await asyncio.sleep(self._MITSCHREIBER_WARTE_S)
             self._mitschreiber_aufrufe.append(time.time())
@@ -5240,10 +5470,7 @@ class TXServer:
             system = self._MITSCHREIBER_PROMPT + "\n" + self._jetzt_satz()
             messages = [{"role": "user", "content": zeilen}]
             _t0 = time.time()
-            if (bot.get("provider") or "ollama").strip().lower() == "gemini":
-                roh = await self._llm_gemini(bot, system, messages)
-            else:
-                roh = await self._llm_ollama(bot, system, messages)
+            roh = await self._llm_neben(bot, system, messages)
             notizen = [z.strip()[2:].strip() for z in (roh or "").splitlines()
                        if z.strip().startswith("- ") and len(z.strip()) > 8]
             log.info("Mitschreiber [%s]: %.1fs, %d Vorschlag/Vorschläge aus %d Zeilen",
@@ -5375,7 +5602,8 @@ class TXServer:
                 return web.json_response({"error": "unbekannter Vorschlag/Aktion"}, status=400)
             if aktion == "uebernehmen":
                 text = str(body.get("text") or treffer["text"]).strip()
-                self._bot_save_note(text, ts=treffer.get("ts"))
+                self._bot_save_note(text, ts=treffer.get("ts"),
+                                    gruppe=self._gruppe_von(treffer.get("room") or ""))
             liste = [v for v in liste if v.get("id") != vid]
             self._vorschlaege_speichern(liste)
             log.info("Notiz-Vorschlag %s: %.70s", aktion, treffer["text"])
@@ -5385,7 +5613,16 @@ class TXServer:
         return web.json_response({"vorschlaege": liste,
                                   "notebook": self._bot_cfg().get("notebook") or []})
 
-    def _bot_save_note(self, text: str, ts: float | None = None) -> None:
+    def _notizbuch_ziel(self, voice: dict, gruppe: str) -> list:
+        """Notizbuch-Liste der Gruppe in einem voice-Block (Standardgruppe:
+        voice.bot.notebook, sonst voice.bot.gruppen[g].notebook)."""
+        blk = voice.setdefault("bot", {})
+        if gruppe:
+            blk = blk.setdefault("gruppen", {}).setdefault(gruppe, {})
+        return blk.setdefault("notebook", [])
+
+    def _bot_save_note(self, text: str, ts: float | None = None,
+                       gruppe: str | None = None) -> None:
         """Haengt eine Notiz ans Notizbuch (voice.bot.notebook) an -- im
         Speicher (fuer sofortige Wirkung) UND auf der Platte (ueberlebt
         Neustarts). Read-modify-write gegen die Disk-Datei wie in
@@ -5396,18 +5633,18 @@ class TXServer:
         if not text:
             return
         entry = {"ts": ts or time.time(), "text": text}
-        bot = self.cfg.setdefault("voice", {}).setdefault("bot", {})
-        notebook = bot.setdefault("notebook", [])
+        if gruppe is None:
+            gruppe = self._gruppe_von(_BOT_RAUM.get())
+        notebook = self._notizbuch_ziel(self.cfg.setdefault("voice", {}), gruppe)
         notebook.append(entry)
         del notebook[:-self._NOTEBOOK_MAX]
-        log.info("KI-Funker Notizbuch: %.80s", text)
+        log.info("KI-Funker Notizbuch%s: %.80s", f" [{gruppe}]" if gruppe else "", text)
         try:
             if not self.args.config:
                 return
             cfg_path = Path(self.args.config)
             disk = json.loads(cfg_path.read_text(encoding="utf-8"))
-            blk = disk.setdefault("voice", {}).setdefault("bot", {})
-            disk_notebook = blk.setdefault("notebook", [])
+            disk_notebook = self._notizbuch_ziel(disk.setdefault("voice", {}), gruppe)
             disk_notebook.append(entry)
             del disk_notebook[:-self._NOTEBOOK_MAX]
             cfg_path.write_text(
@@ -5579,7 +5816,23 @@ class TXServer:
         except Exception as e:
             log.warning("Tagesrückblick nicht gespeichert: %s", e)
 
-    def _rueckblick_zeilen(self, datum: str, rooms: list) -> list[str]:
+    def _rb_tage(self, gruppe: str = "") -> dict:
+        """Rueckblicke einer Gruppe (03.11.): Standardgruppe wie bisher unter
+        "tage", benannte Gruppen unter "gruppen"[g]["tage"]."""
+        if not gruppe:
+            return self._rueckblick.setdefault("tage", {})
+        return (self._rueckblick.setdefault("gruppen", {})
+                .setdefault(gruppe, {}).setdefault("tage", {}))
+
+    def _rb_raeume(self, gruppe: str) -> tuple[list, list]:
+        """(Raeume der Gruppe, auszuschliessende Raeume). Standardgruppe ohne
+        Raumliste = alle Raeume ausser denen benannter Gruppen."""
+        gr = self._gruppen()
+        if gruppe:
+            return gr.get(gruppe) or ["\0keiner"], []
+        return gr[""], [r for g, rs in gr.items() if g for r in rs]
+
+    def _rueckblick_zeilen(self, datum: str, rooms: list, ausser: list = ()) -> list[str]:
         """Durchsagen eines Tages als 'HH:MM Name: Text' (Name nur bei sicherer
         Sprecher-Erkennung, sonst '?')."""
         import sqlite3
@@ -5596,7 +5849,7 @@ class TXServer:
         zeilen = []
         for ts, room, cs, sp, tx in rows:
             tx = (tx or "").strip()
-            if rooms and room not in rooms:
+            if (rooms and room not in rooms) or room in ausser:
                 continue
             if len(re.findall(r"\w+", tx)) < 3:
                 continue
@@ -5646,15 +5899,19 @@ class TXServer:
         "nennen, wenn sie im Text eindeutig fallen. Schreib auf Deutsch, sachlich, "
         "ohne Einleitung.")
 
-    async def _rueckblick_bauen(self, datum: str) -> str | None:
+    async def _rueckblick_bauen(self, datum: str, gruppe: str = "") -> str | None:
         """Baut den Rueckblick fuer datum; None bei Erfolg, sonst Fehlertext."""
         if self._rueckblick_laeuft:
             return "läuft schon"
         self._rueckblick_laeuft = True
         try:
-            bot = self._bot_cfg()
+            rooms, ausser = self._rb_raeume(gruppe)
+            bot = self._bot_cfg(raum=rooms[0] if gruppe else "")
             zeilen = await asyncio.to_thread(self._rueckblick_zeilen, datum,
-                                             bot.get("rooms") or [])
+                                             rooms, ausser)
+            rb_system = self._RB_SYSTEM if not gruppe else self._RB_SYSTEM.replace(
+                "eines CB-Funk-Kanals (Kanal 74, Eickelborn/Lippstadt)",
+                f"einer Funkrunde ({', '.join(rooms)})")
             if len(zeilen) < 5:
                 return f"zu wenig Funkverkehr am {datum} ({len(zeilen)} Durchsagen)"
             # Bloecke von ~6000 Zeichen: passt auch in kleine Kontextfenster
@@ -5668,7 +5925,7 @@ class TXServer:
             notizen = []
             for b in bloecke:
                 von, bis = b[0][:5], b[-1][:5]
-                n = await self._ollama_text(bot, self._RB_SYSTEM,
+                n = await self._ollama_text(bot, rb_system,
                     f"Funkmitschrift {von}–{bis} Uhr:\n" + "\n".join(b) +
                     "\n\nNotiere stichpunktartig die Gesprächsthemen dieses Abschnitts "
                     "(je Punkt ein kurzer Satz, mit Uhrzeit, wer beteiligt war, falls "
@@ -5680,7 +5937,7 @@ class TXServer:
                 return "Modell lieferte keine Notizen"
             d = datetime.strptime(datum, "%Y-%m-%d")
             tag = f"{self._WOCHENTAGE[d.weekday()]}, {d:%d.%m.%Y}"
-            text = await self._ollama_text(bot, self._RB_SYSTEM,
+            text = await self._ollama_text(bot, rb_system,
                 f"Notizen zum Funktag {tag}:\n\n" + "\n\n".join(notizen) +
                 "\n\nSchreib daraus einen Tagesrückblick: höchstens 10 Stichpunkte, "
                 "die wichtigsten und auffälligsten Themen zuerst, jeweils mit ungefährer "
@@ -5690,17 +5947,18 @@ class TXServer:
                 num_predict=700)
             if not text:
                 return "Modell lieferte keinen Rückblick"
-            tage = self._rueckblick.setdefault("tage", {})
+            tage = self._rb_tage(gruppe)
             tage[datum] = {"gebaut": time.time(), "durchsagen": len(zeilen), "text": text}
             behalten = max(1, int(bot.get("rueckblick_tage", 30) or 30))
             for k in sorted(tage)[:-behalten]:
                 del tage[k]
             self._rueckblick_speichern()
-            log.info("Tagesrückblick %s gebaut (%d Durchsagen, %d Blöcke)",
-                     datum, len(zeilen), len(bloecke))
+            log.info("Tagesrückblick %s%s gebaut (%d Durchsagen, %d Blöcke)",
+                     datum, f" [{gruppe}]" if gruppe else "", len(zeilen), len(bloecke))
             return None
         except Exception as e:
-            log.warning("Tagesrückblick %s fehlgeschlagen: %s", datum, e)
+            log.warning("Tagesrückblick %s%s fehlgeschlagen: %s", datum,
+                        f" [{gruppe}]" if gruppe else "", e)
             return str(e)
         finally:
             self._rueckblick_laeuft = False
@@ -5711,8 +5969,11 @@ class TXServer:
         await asyncio.sleep(60)
         while True:
             try:
-                bot = self._bot_cfg()
-                if bot.get("rueckblick_enabled"):
+                # Je Gruppe (03.11.); Zeit global, an/aus nach dem ersten Raum
+                for gruppe, g_raeume in self._gruppen().items():
+                    bot = self._bot_cfg(raum=g_raeume[0] if gruppe and g_raeume else "")
+                    if not bot.get("rueckblick_enabled"):
+                        continue
                     try:
                         hh, mm = (int(x) for x in str(bot.get("rueckblick_zeit") or "03:00").split(":")[:2])
                     except ValueError:
@@ -5720,10 +5981,10 @@ class TXServer:
                     jetzt = datetime.now()
                     gestern = (jetzt - timedelta(days=1)).strftime("%Y-%m-%d")
                     if (jetzt.hour, jetzt.minute) >= (hh, mm) \
-                            and gestern not in (self._rueckblick.get("tage") or {}):
-                        fehler = await self._rueckblick_bauen(gestern)
+                            and gestern not in self._rb_tage(gruppe):
+                        fehler = await self._rueckblick_bauen(gestern, gruppe)
                         if fehler and fehler.startswith("zu wenig"):
-                            self._rueckblick.setdefault("tage", {})[gestern] = {
+                            self._rb_tage(gruppe)[gestern] = {
                                 "gebaut": time.time(), "durchsagen": 0,
                                 "text": "Kaum Funkverkehr an diesem Tag."}
                             self._rueckblick_speichern()
@@ -5775,6 +6036,7 @@ class TXServer:
                               warten_s: float = 300) -> bool:
         """In der naechsten Funkpause einen festen Satz senden, mit derselben
         Buchfuehrung wie eine normale Antwort."""
+        _BOT_RAUM.set(room_name)    # nur als eigener Task aufgerufen
         ende = time.time() + warten_s
         while time.time() < ende:
             await asyncio.sleep(2)
@@ -5864,6 +6126,7 @@ class TXServer:
                 await asyncio.sleep(warte)
             st = self._nachgang.pop(room_name)
             _BOT_KONTEXT.set("")      # gilt nur fuer diesen Task
+            _BOT_RAUM.set(room_name)
             await self._nachgang_auswerten(room_name, st["start"])
         except Exception as e:
             self._nachgang.pop(room_name, None)
@@ -6044,6 +6307,9 @@ class TXServer:
                 continue
             if not self._bot_raum_ok(nbid if nbid in self._bot_ids() else "", room_name):
                 continue
+            # Andere Funkrunde (Gruppe, 03.11.) kennt Absender und Empfaenger nicht
+            if n.get("raum") and self._gruppe_von(n["raum"]) != self._gruppe_von(room_name):
+                continue
             an = self._namen_norm(n["an"])
             sicher = (cs == an
                       or re.search(rf"\b(?:hier\s+(?:ist|spricht|sitzt)\s+(?:der\s+|die\s+)?|"
@@ -6066,6 +6332,8 @@ class TXServer:
                     if (not m.get("zugestellt") and not m.get("plan")
                             and self._namen_norm(m["an"]) == an
                             and (mbid if mbid in self._bot_ids() else "") == zbid
+                            and (not m.get("raum") or self._gruppe_von(m["raum"])
+                                 == self._gruppe_von(room_name))
                             and ts >= m.get("ts", 0) + 20 and jetzt >= m.get("naechster", 0)):
                         m["plan"] = True
                 asyncio.create_task(self._nachricht_zustellen(room, room_name, n["an"], zbid))
@@ -6076,16 +6344,18 @@ class TXServer:
         """Darf dieser Bot in dem Raum sprechen (voice.bot/bots_weitere rooms)?"""
         tok = self._bot_im(bid)
         try:
-            rooms = self._bot_cfg().get("rooms") or []
+            rooms = self._bot_cfg(raum=room_name).get("rooms") or []
         finally:
             _BOT_KONTEXT.reset(tok)
         return not rooms or room_name in rooms
 
     async def _nachricht_zustellen(self, room, room_name: str, an: str, bid: str = ""):
+        _BOT_RAUM.set(room_name)    # gilt nur fuer diesen Task
         offen = [n for n in self._nachrichten
                  if not n.get("zugestellt") and n.get("plan")
                  and self._namen_norm(n["an"]) == self._namen_norm(an)
-                 and ((n.get("bot") or "") if (n.get("bot") or "") in self._bot_ids() else "") == bid]
+                 and ((n.get("bot") or "") if (n.get("bot") or "") in self._bot_ids() else "") == bid
+                 and (not n.get("raum") or self._gruppe_von(n["raum"]) == self._gruppe_von(room_name))]
         if not offen:
             return
         saetze = " Und: ".join(n["satz"].rstrip(".!") + "." for n in offen)
@@ -6151,7 +6421,7 @@ class TXServer:
         daten = self._rueckblick_daten(text, jetzt)
         if not daten:
             return ""
-        tage = (self._rueckblick or {}).get("tage") or {}
+        tage = self._rb_tage(bot.get("_gruppe") or "")
         teile = []
         for datum in daten:
             d = datetime.strptime(datum, "%Y-%m-%d")
@@ -6402,7 +6672,10 @@ class TXServer:
         eigene = [x for _t, w, x in recent if w == own_tag][-2:]
         if (not zusatz and not any("?" in (x or "") for x in eigene)
                 and random.random() < float(bot.get("nachfragen", 0.5))):
-            spaet.append("Frag diesmal ruhig nach.")
+            # "zu dem, was gerade gesagt wurde" (02.11., Archivtest 16x2):
+            # Allerweltsfragen ("Plaene fuers Wochenende?") 9 -> 5 von 32,
+            # Fragen zum Gesagten 11 -> 24.
+            spaet.append("Frag diesmal ruhig nach, zu dem, was gerade gesagt wurde.")
         if zusatz:
             spaet.append(zusatz)
         hinweis = {"role": "user", "content": "[Hinweis, kein Funkspruch] " + "\n\n".join(spaet)}
@@ -6533,6 +6806,8 @@ class TXServer:
         _t0 = time.time()
         if provider == "gemini":
             raw = await self._llm_gemini(bot, system, messages, room_name, trace_ts)
+        elif provider == "mistral":
+            raw = await self._llm_mistral(bot, system, messages, room_name, trace_ts)
         else:
             # Schon automatisch gesucht UND etwas gefunden? Dann das Such-
             # werkzeug nicht nochmal anbieten (2026-09-24): das Modell suchte
@@ -6542,9 +6817,9 @@ class TXServer:
             llm_bot = bot
             if search_query and search_context and not search_context.startswith("(SUCHE FEHLGESCHLAGEN"):
                 llm_bot = dict(bot, websearch=dict(bot.get("websearch") or {}, enabled=False))
-            raw = await self._llm_ollama(llm_bot, system, messages,
-                                         room_name=room_name, trace_ts=trace_ts,
-                                         force_model=force_model)
+            raw = await self._llm_mit_ausweich(llm_bot, system, messages,
+                                               room_name=room_name, trace_ts=trace_ts,
+                                               force_model=force_model)
         _lldt = time.time() - _t0
         log.info("KI-Funker LLM (%s): %.1fs", provider, _lldt)
         if room_name:
@@ -6610,6 +6885,101 @@ class TXServer:
                                  (f"Antwort verworfen (Nachbearbeitung): {raw}" if dropped
                                   else ans or raw or "(keine Antwort)")[:300])
         return (ans, raw or "") if with_raw else ans
+
+    # Ausweich-Modell (03.11., User: "Mistral als Backup"): antwortet die Box
+    # nicht, meldet sie einen Fehler oder braucht sie laenger als
+    # ausweich_nach_s, antwortet Mistral (voice.bot.ausweich_provider =
+    # "mistral", mistral_api_key, mistral_model). Firmenlast auf der Box
+    # (bis ~20 s) und Ausfaelle wie das MTU-Problem am 30.10. faengt das ab.
+    # Nur fuer Antworten, nicht fuer Vorwaermen/Mitschreiber/Rueckblick.
+    _ausweich_letzt: tuple | None = None   # (Zeit, Grund, Sekunden Mistral, ok)
+
+    async def _llm_mit_ausweich(self, bot: dict, system: str, messages: list,
+                                room_name: str = "", trace_ts: float | None = None,
+                                force_model: bool = False) -> str:
+        aw = (bot.get("ausweich_provider") or "").strip().lower()
+        if aw != "mistral" or not (bot.get("mistral_api_key") or "").strip() or force_model:
+            return await self._llm_ollama(bot, system, messages, room_name=room_name,
+                                          trace_ts=trace_ts, force_model=force_model)
+        grenze = float(bot.get("ausweich_nach_s", 20) or 0)
+        aufruf = self._llm_ollama(bot, system, messages, room_name=room_name,
+                                  trace_ts=trace_ts, force_model=force_model)
+        _t0 = time.time()
+        try:
+            raw = await (asyncio.wait_for(aufruf, grenze) if grenze > 0 else aufruf)
+            if raw:
+                return raw
+            grund = "Box-Fehler oder leere Antwort"
+        except asyncio.TimeoutError:
+            grund = f"Box braucht länger als {grenze:.0f} s"
+        log.warning("KI-Funker: %s (%.1fs) -- Ausweich-Modell Mistral antwortet",
+                    grund, time.time() - _t0)
+        _t1 = time.time()
+        if room_name and trace_ts is not None:      # Box-Fehler ist ueberbrueckt
+            self._debug_trace_get(room_name, trace_ts).pop("llm_fehler", None)
+        raw = await self._llm_mistral(bot, system, messages, room_name, trace_ts)
+        dt = time.time() - _t1
+        self._ausweich_letzt = (time.time(), grund, round(dt, 1), bool(raw))
+        if room_name and trace_ts is not None:
+            self.debug_trace_step(room_name, trace_ts, "Ausweich-Modell",
+                                  "ok" if raw else "error", dt,
+                                  f"{grund} -- Mistral {bot.get('mistral_model') or 'mistral-large-4'}"
+                                  + ("" if raw else ": keine Antwort"))
+        return raw
+
+    async def _llm_neben(self, bot: dict, system: str, messages: list) -> str:
+        """Begruessung/Mitschreiber: gleicher Anbieter wie die Antworten,
+        mit Ausweich (nur bei Box-Fehlern, ohne Zeitgrenze)."""
+        provider = (bot.get("provider") or "ollama").strip().lower()
+        if provider == "gemini":
+            return await self._llm_gemini(bot, system, messages)
+        if provider == "mistral":
+            return await self._llm_mistral(bot, system, messages)
+        return await self._llm_mit_ausweich(dict(bot, ausweich_nach_s=0), system, messages)
+
+    async def _llm_mistral(self, bot: dict, system: str, messages: list,
+                           room_name: str = "", trace_ts: float | None = None) -> str:
+        """Chat-Aufruf an die Mistral-API (OpenAI-artig). Large 4 denkt immer
+        vorher nach -- abschalten geht nicht, nur reasoning_effort low; der
+        Denkteil kommt als eigener Inhaltsblock und wird hier weggelassen."""
+        key = (bot.get("mistral_api_key") or "").strip()
+        model = (bot.get("mistral_model") or "mistral-large-4").strip()
+        body = {"model": model,
+                "messages": [{"role": "system", "content": system}] + list(messages),
+                "temperature": float(bot.get("temperature", 0.4)),
+                "max_tokens": 1500}
+        effort = (bot.get("mistral_reasoning_effort") or "low").strip()
+        if effort:
+            body["reasoning_effort"] = effort
+        for versuch in range(2):
+            try:
+                timeout = aiohttp.ClientTimeout(total=45)
+                async with aiohttp.ClientSession(timeout=timeout) as sess:
+                    async with sess.post("https://api.mistral.ai/v1/chat/completions", json=body,
+                                         headers={"Authorization": f"Bearer {key}"}) as resp:
+                        status = resp.status
+                        data = await resp.json(content_type=None)
+            except Exception as e:
+                log.warning("KI-Funker: Mistral nicht erreichbar: %s", e)
+                self._llm_fehler_merken(room_name, trace_ts, f"Mistral nicht erreichbar: {e}")
+                return ""
+            if status == 200:
+                inhalt = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                if isinstance(inhalt, list):
+                    inhalt = "".join(t.get("text", "") for t in inhalt
+                                     if isinstance(t, dict) and t.get("type") == "text")
+                return str(inhalt).strip()
+            fehler = str(data.get("message") or data)[:160] if isinstance(data, dict) else str(data)[:160]
+            if status == 400 and "reasoning_effort" in fehler and "reasoning_effort" in body:
+                body.pop("reasoning_effort")      # Modell ohne Denk-Stufen
+                continue
+            if status == 429 and versuch == 0:
+                await asyncio.sleep(1.5)          # Freikontingent: <1 Anfrage/s
+                continue
+            log.warning("KI-Funker Mistral HTTP %d: %s", status, fehler)
+            self._llm_fehler_merken(room_name, trace_ts, f"Mistral HTTP {status}: {fehler}")
+            return ""
+        return ""
 
     async def _llm_ollama(self, bot: dict, system: str, messages: list,
                           room_name: str = "", trace_ts: float | None = None,
@@ -7590,6 +7960,330 @@ class TXServer:
             log.info("KI-Funker %s gespeichert: enabled=%s stimme=%s", name, b["enabled"], sprecher)
         return web.json_response({"bots": liste})
 
+    async def handle_admin_bot_raeume(self, request):
+        """Einstellungen je Raum (03.11.).
+        GET: Raeume mit ihren Abweichungen (Robert und weitere Bots), Gruppen
+        mit Notizbuch, die Grundwerte zum Anzeigen.
+        POST {raum, bot?, werte: {Schluessel: Wert|null}}: Abweichungen setzen
+        (null = Grundwert). POST {gruppe, notebook: [...]}: Notizbuch einer
+        benannten Gruppe zuruecksetzen/kuerzen (wie im Hauptpanel)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        voice = self.cfg.setdefault("voice", {})
+        if request.method == "POST":
+            try:
+                body = await request.json()
+                assert isinstance(body, dict)
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+            if "gruppe" in body and "notebook" in body:
+                g = str(body.get("gruppe") or "").strip()
+                if not g or g not in self._gruppen() or not isinstance(body["notebook"], list):
+                    return web.json_response({"error": "unbekannte Gruppe"}, status=400)
+                nb = []
+                for n in body["notebook"]:
+                    if isinstance(n, dict) and str(n.get("text") or "").strip():
+                        try:
+                            ts = float(n.get("ts") or time.time())
+                        except (TypeError, ValueError):
+                            ts = time.time()
+                        nb.append({"ts": ts, "text": str(n["text"]).strip()[:300]})
+                nb = nb[-self._NOTEBOOK_MAX:]
+
+                def _nb(v: dict) -> None:
+                    ziel = self._notizbuch_ziel(v, g)
+                    ziel[:] = nb
+                _nb(voice)
+                fehler = self._cfg_auf_platte(_nb)
+            else:
+                raum = str(body.get("raum") or "").strip()
+                bid = str(body.get("bot") or "").strip()
+                werte = body.get("werte")
+                if not raum or len(raum) > 80 or not isinstance(werte, dict):
+                    return web.json_response({"error": "raum und werte noetig"}, status=400)
+                if bid and self._bot_weitere_cfg(bid) is None:
+                    return web.json_response({"error": "unbekannter Bot"}, status=400)
+                neu, weg = {}, []
+                for k, v in werte.items():
+                    if k == "gruppe" and bid:
+                        continue              # Gruppe ist Raum-Eigenschaft (Robert)
+                    if v is None or (isinstance(v, str) and not v.strip()):
+                        weg.append(k)
+                    elif k in self._RAUM_BOOL or k == "websearch_enabled":
+                        neu[k] = bool(v)
+                    elif k in self._RAUM_ZAHL:
+                        try:
+                            neu[k] = self._begrenzt("bot", k, v)
+                        except (TypeError, ValueError, KeyError):
+                            return web.json_response({"error": f"{k}: keine Zahl"}, status=400)
+                    elif k in self._RAUM_TEXT and isinstance(v, str):
+                        neu[k] = v.strip()[:2000 if k == "persona" else 40]
+                    else:
+                        return web.json_response({"error": f"{k} gibt es je Raum nicht"}, status=400)
+                if neu.get("enabled") is True:
+                    weg.append("enabled")     # an = globaler Schalter gilt
+                    neu.pop("enabled")
+
+                def _raum(v: dict) -> None:
+                    z = v.setdefault("bot", {}) if not bid else next(
+                        (b for b in v.get("bots_weitere") or []
+                         if isinstance(b, dict) and b.get("id") == bid), {})
+                    raeume = z.setdefault("raeume", {})
+                    r = raeume.setdefault(raum, {})
+                    r.update(neu)
+                    for k in weg:
+                        r.pop(k, None)
+                    if not r:
+                        raeume.pop(raum, None)
+                    if not raeume:
+                        z.pop("raeume", None)
+                _raum(voice)
+                fehler = self._cfg_auf_platte(_raum)
+                log.info("KI-Funker Raum %s%s: gesetzt %s, Grundwert %s", raum,
+                         f" ({bid})" if bid else "", sorted(neu), sorted(weg))
+            if fehler:
+                return web.json_response({"error": f"Speichern fehlgeschlagen: {fehler}"},
+                                         status=500)
+
+        robert = voice.get("bot", {})
+        bekannte = list(dict.fromkeys(
+            [r.name for r in self.rooms.values()] + list(robert.get("rooms") or [])
+            + list((robert.get("raeume") or {}).keys())))
+        bots = [{"id": "", "name": robert.get("name") or "Robert",
+                 "raeume": robert.get("raeume") or {}}]
+        for b in voice.get("bots_weitere") or []:
+            if isinstance(b, dict) and b.get("id"):
+                bots.append({"id": b["id"], "name": b.get("name") or b["id"],
+                             "raeume": b.get("raeume") or {}})
+        basis = self._bot_cfg(raum="")
+        felder = list(self._RAUM_BOOL) + ["websearch_enabled"] + list(self._RAUM_ZAHL) + ["persona"]
+        standard = {k: (basis.get("websearch") or {}).get("enabled", False)
+                    if k == "websearch_enabled" else basis.get(k) for k in felder}
+        gruppen = {g: {"raeume": rs,
+                       "notebook": list(self._notizbuch_ziel(
+                           json.loads(json.dumps({"bot": robert})), g)) if g else []}
+                   for g, rs in self._gruppen().items()}
+        return web.json_response({
+            "raeume": bekannte, "bots": bots, "gruppen": gruppen,
+            "standard": standard,
+            "felder": {"bool": list(self._RAUM_BOOL) + ["websearch_enabled"],
+                       "zahl": list(self._RAUM_ZAHL), "text": list(self._RAUM_TEXT)},
+            "grenzen": {k: self._GRENZEN["bot"].get(k) for k in self._RAUM_ZAHL}})
+
+    # ── KI-Dienste im Ueberblick (03.11.) ─────────────────────────────────
+    # Eine Seite fuer alle Anbieter (Schluessel/URL, Erreichbarkeit) und welche
+    # Aufgabe welchen nutzt. Schreibt in die bestehenden config-Schluessel --
+    # keine neue Struktur, damit der uebrige Code unveraendert liest.
+    _KI_SCHLUESSEL = {"mistral": "mistral_api_key", "gemini": "gemini_api_key",
+                      "openrouter": "openrouter_api_key", "box": "ollama_token"}
+
+    def _ki_dienste_daten(self) -> dict:
+        v = self.cfg.get("voice", {})
+        b = {**self._BOT_DEFAULTS, **v.get("bot", {})}
+        w = self.cfg.get("whisper", {})
+        maske = lambda k: self._TOKEN_MASK if (b.get(k) or "").strip() else ""
+        prov = (b.get("provider") or "ollama").strip().lower()
+        modell = {"ollama": b.get("ollama_model"), "gemini": b.get("gemini_model"),
+                  "mistral": b.get("mistral_model") or "mistral-large-4"}.get(prov, "")
+        aw_l = self._ausweich_letzt
+        try:
+            import frn_transcription as _ft
+            aw_t = _ft.AUSWEICH_LETZT
+        except Exception:
+            aw_t = None
+        zeit = lambda a: ({"ts": a[0], "grund": a[1], "s": a[2], "ok": a[3]} if a else None)
+        return {
+            "anbieter": [
+                {"id": "box", "name": "GPU-Box (llama.cpp/Ollama)", "url": b.get("ollama_url") or "",
+                 "schluessel": maske("ollama_token"), "hinweis": "Firmenanfragen haben dort Vorrang"},
+                {"id": "mistral", "name": "Mistral (Frankreich)", "schluessel": maske("mistral_api_key"),
+                 "hinweis": "Freikontingent: Large 4 und Ministral 8B, Voxtral; ~0,85 Anfragen/s"},
+                {"id": "gemini", "name": "Google Gemini", "schluessel": maske("gemini_api_key"),
+                 "hinweis": "kostenlos nur mit Datennutzung durch Google"},
+                {"id": "openrouter", "name": "OpenRouter", "schluessel": maske("openrouter_api_key"),
+                 "hinweis": "ohne Guthaben nur :free-Modelle"},
+            ],
+            "aufgaben": [
+                {"id": "antworten", "name": "Antworten Robert & Susi", "anbieter": prov, "modell": modell,
+                 "optionen": ["ollama", "mistral", "gemini"],
+                 "modelle": {"ollama": b.get("ollama_model") or "", "gemini": b.get("gemini_model") or "",
+                             "mistral": b.get("mistral_model") or "mistral-large-4"},
+                 "info": "auch Begrüßung und Mitschreiber"},
+                {"id": "antworten_ausweich", "name": "Ausweich für Antworten",
+                 "anbieter": (b.get("ausweich_provider") or "aus").strip().lower() or "aus",
+                 "modell": b.get("mistral_model") or "mistral-large-4",
+                 "ausweich_nach_s": float(b.get("ausweich_nach_s", 20) or 0),
+                 "optionen": ["aus", "mistral"], "zuletzt": zeit(aw_l),
+                 "info": "springt ein bei Box-Fehler oder nach der Wartezeit (0 = nur bei Fehler)"},
+                {"id": "transkription", "name": "Transkription (Whisper)", "anbieter": "box",
+                 "modell": w.get("model") or "", "fest": True, "info": w.get("remote_url") or "lokal"},
+                {"id": "transkription_ausweich", "name": "Ausweich für Transkription",
+                 "anbieter": (w.get("ausweich") or "aus").strip().lower() or "aus",
+                 "modell": w.get("ausweich_modell") or "voxtral-mini-transcribe-3",
+                 "optionen": ["aus", "mistral"], "zuletzt": zeit(aw_t),
+                 "info": "wenn Whisper nicht erreichbar ist, Timeout oder Fehler"},
+                {"id": "tts", "name": "Sprachausgabe", "anbieter": "box",
+                 "modell": v.get("tts_engine") or "", "fest": True,
+                 "info": v.get("remote_url") or v.get("xtts_url") or ""},
+                {"id": "tts_ausweich", "name": "Ausweich für Sprachausgabe",
+                 "anbieter": ("mistral" if (v.get("tts_ausweich") or "").strip().lower() == "mistral"
+                              else "piper" if v.get("tts_fallback_local", True) else "aus"),
+                 "optionen": ["aus", "piper", "mistral"], "zuletzt": zeit(self._tts_ausweich_letzt),
+                 "info": "Mistral: geklonte Stimme aus stimmen_ref/ ("
+                         + (", ".join(sorted(p.stem for p in self._STIMMEN_REF.glob("*.wav"))) or "keine")
+                         + "), danach Piper lokal (andere Stimme)"},
+                {"id": "rueckblick", "name": "Rückblick, Nachgang, Vorwärmen", "anbieter": "box",
+                 "modell": b.get("ollama_model"), "fest": True, "info": "immer die GPU-Box"},
+                {"id": "sprecher", "name": "Sprecher-Erkennung (ECAPA)", "anbieter": "box", "fest": True,
+                 "info": (v.get("speaker_id") or {}).get("server_url") or ""},
+                {"id": "websuche", "name": "Websuche (SearXNG)", "anbieter": "lokal", "fest": True,
+                 "info": (b.get("websearch") or {}).get("searxng_url") or ""},
+            ]}
+
+    async def _ki_pruefen(self, aid: str) -> tuple[bool, str]:
+        b = self.cfg.get("voice", {}).get("bot", {})
+        to = aiohttp.ClientTimeout(total=10)
+        try:
+            async with aiohttp.ClientSession(timeout=to) as sess:
+                if aid == "box":
+                    url = (b.get("ollama_url") or "").rstrip("/")
+                    async with sess.get(f"{url}/api/tags",
+                                        headers=self._ollama_headers(b.get("ollama_token"))) as r:
+                        d = await r.json(content_type=None)
+                        return r.status == 200, ", ".join(m.get("name", "") for m in d.get("models", []))[:200]
+                key = (b.get(self._KI_SCHLUESSEL.get(aid, "")) or "").strip()
+                if not key:
+                    return False, "kein Schlüssel"
+                if aid == "mistral":
+                    async with sess.get("https://api.mistral.ai/v1/models",
+                                        headers={"Authorization": f"Bearer {key}"}) as r:
+                        d = await r.json(content_type=None)
+                        return r.status == 200, f"{len(d.get('data') or [])} Modelle" if r.status == 200 else str(d)[:120]
+                if aid == "gemini":
+                    async with sess.get("https://generativelanguage.googleapis.com/v1beta/models",
+                                        headers={"x-goog-api-key": key}) as r:
+                        d = await r.json(content_type=None)
+                        return r.status == 200, f"{len(d.get('models') or [])} Modelle" if r.status == 200 else str(d)[:120]
+                if aid == "openrouter":
+                    async with sess.get("https://openrouter.ai/api/v1/key",
+                                        headers={"Authorization": f"Bearer {key}"}) as r:
+                        d = (await r.json(content_type=None)).get("data") or {}
+                        if r.status != 200:
+                            return False, f"HTTP {r.status}"
+                        return True, (f"Guthaben-Limit {d.get('limit')}, verbraucht {d.get('usage')}"
+                                      + (", nur Gratis-Modelle" if d.get("is_free_tier") else ""))
+        except Exception as e:
+            return False, str(e)[:120]
+        return False, "unbekannter Anbieter"
+
+    async def handle_admin_ki_dienste(self, request):
+        """GET: Anbieter + Aufgaben. POST {pruefen: id} | {anbieter: id,
+        schluessel} | {aufgabe: id, anbieter, modell?, ausweich_nach_s?}."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        antwort = {}
+        if request.method == "POST":
+            try:
+                body = await request.json()
+                assert isinstance(body, dict)
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+            if body.get("pruefen"):
+                ok, text = await self._ki_pruefen(str(body["pruefen"]))
+                return web.json_response({"ok": ok, "text": text})
+            aenderung = None
+            if "schluessel" in body:
+                feld = self._KI_SCHLUESSEL.get(str(body.get("anbieter") or ""))
+                wert = str(body.get("schluessel") or "").strip()
+                if not feld:
+                    return web.json_response({"error": "unbekannter Anbieter"}, status=400)
+                if wert == self._TOKEN_MASK:
+                    return web.json_response({"error": "unverändert"}, status=400)
+
+                def aenderung(v: dict) -> None:
+                    v.setdefault("bot", {})[feld] = wert
+                log.info("KI-Dienste: Schlüssel für %s %s", body.get("anbieter"),
+                         "gesetzt" if wert else "gelöscht")
+            elif body.get("aufgabe"):
+                a = str(body["aufgabe"])
+                an = str(body.get("anbieter") or "").strip().lower()
+                modell = str(body.get("modell") or "").strip()[:80]
+                if a == "antworten" and an in ("ollama", "mistral", "gemini"):
+                    def aenderung(v: dict) -> None:
+                        bb = v.setdefault("bot", {})
+                        bb["provider"] = an
+                        if modell:
+                            bb[{"ollama": "ollama_model", "gemini": "gemini_model",
+                                "mistral": "mistral_model"}[an]] = modell
+                elif a == "antworten_ausweich" and an in ("aus", "mistral"):
+                    def aenderung(v: dict) -> None:
+                        bb = v.setdefault("bot", {})
+                        bb["ausweich_provider"] = "" if an == "aus" else an
+                        if modell:
+                            bb["mistral_model"] = modell
+                        if "ausweich_nach_s" in body:
+                            bb["ausweich_nach_s"] = self._begrenzt("bot", "ausweich_nach_s",
+                                                                  body["ausweich_nach_s"])
+                elif a == "transkription_ausweich" and an in ("aus", "mistral"):
+                    def aenderung(v: dict) -> None:
+                        pass
+
+                    def aenderung_whisper(c: dict) -> None:
+                        ww = c.setdefault("whisper", {})
+                        ww["ausweich"] = "" if an == "aus" else an
+                        if modell:
+                            ww["ausweich_modell"] = modell
+                    aenderung_whisper(self.cfg)
+                    fehler = self._cfg_ganz_auf_platte(aenderung_whisper)
+                    if fehler:
+                        return web.json_response({"error": fehler}, status=500)
+                elif a == "tts_ausweich" and an in ("aus", "piper", "mistral"):
+                    def aenderung(v: dict) -> None:
+                        v["tts_ausweich"] = "mistral" if an == "mistral" else ""
+                        v["tts_fallback_local"] = an != "aus"   # Piper bleibt letzte Stufe
+                else:
+                    return web.json_response({"error": "Aufgabe/Anbieter passt nicht"}, status=400)
+                log.info("KI-Dienste: %s -> %s %s", a, an, modell)
+            if aenderung:
+                aenderung(self.cfg.setdefault("voice", {}))
+                fehler = self._cfg_auf_platte(aenderung)
+                if fehler:
+                    return web.json_response({"error": fehler}, status=500)
+                antwort["gespeichert"] = True
+        return web.json_response({**self._ki_dienste_daten(), **antwort})
+
+    def _cfg_ganz_auf_platte(self, aendern) -> str:
+        """Wie _cfg_auf_platte, aber aendern() bekommt die ganze config."""
+        try:
+            if not self.args.config:
+                return "kein --config Pfad"
+            p = Path(self.args.config)
+            disk = json.loads(p.read_text(encoding="utf-8"))
+            aendern(disk)
+            p.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            return ""
+        except Exception as e:
+            log.warning("config.json nicht gespeichert: %s", e)
+            return str(e)
+
+    def _cfg_auf_platte(self, aendern) -> str:
+        """config.json lesen, aendern(voice) anwenden, zurueckschreiben
+        (indent=2, wie ueberall). Fehlertext oder ""."""
+        try:
+            if not self.args.config:
+                return "kein --config Pfad"
+            p = Path(self.args.config)
+            disk = json.loads(p.read_text(encoding="utf-8"))
+            aendern(disk.setdefault("voice", {}))
+            p.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
+                         encoding="utf-8")
+            return ""
+        except Exception as e:
+            log.warning("config.json nicht gespeichert: %s", e)
+            return str(e)
+
     async def handle_admin_rueckblick(self, request):
         """GET: gespeicherte Tagesrueckblicke; POST {datum}: diesen Tag (Standard
         gestern) jetzt neu bauen."""
@@ -7597,21 +8291,26 @@ class TXServer:
         if err:
             return err
         fehler = None
+        gruppe = str(request.rel_url.query.get("gruppe") or "").strip()
         if request.method == "POST":
             try:
                 body = await request.json()
             except Exception:
                 body = {}
+            gruppe = str(body.get("gruppe") or gruppe).strip()
+            if gruppe and gruppe not in self._gruppen():
+                return web.json_response({"error": f"unbekannte Gruppe {gruppe}"}, status=400)
             datum = str(body.get("datum") or
                         (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"))
             if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", datum):
                 return web.json_response({"error": "datum muss JJJJ-MM-TT sein"}, status=400)
             if self._rueckblick_laeuft:
                 return web.json_response({"error": "Rückblick wird gerade schon gebaut"}, status=409)
-            fehler = await self._rueckblick_bauen(datum)
-        tage = (self._rueckblick or {}).get("tage") or {}
+            fehler = await self._rueckblick_bauen(datum, gruppe)
+        tage = dict(self._rb_tage(gruppe)) if (not gruppe or gruppe in self._gruppen()) else {}
         return web.json_response({
             "tage": [dict(v, datum=k) for k, v in sorted(tage.items(), reverse=True)],
+            "gruppe": gruppe, "gruppen": sorted(self._gruppen()),
             "fehler": fehler})
 
     async def handle_admin_bot_probe(self, request):
@@ -7622,11 +8321,13 @@ class TXServer:
             body = {}
         text = str(body.get("text") or "").lower() if isinstance(body, dict) else ""
         room = str(body.get("room") or "") if isinstance(body, dict) else ""
+        rtok = self._raum_setzen(room)      # Raumwerte wie im Betrieb (03.11.)
         tok = self._bot_im(self._bot_waehlen(room, text) if len(self._bot_ids()) > 1 else "")
         try:
             return await self._admin_bot_probe_einer(request)
         finally:
             _BOT_KONTEXT.reset(tok)
+            _BOT_RAUM.reset(rtok)
 
     async def _admin_bot_probe_einer(self, request):
         """POST /api/admin/bot/probe {room, text, wer?} -- tut so, als haette
@@ -7671,11 +8372,13 @@ class TXServer:
             body = {}
         text = str(body.get("text") or "").lower() if isinstance(body, dict) else ""
         room = str(body.get("room") or "") if isinstance(body, dict) else ""
+        rtok = self._raum_setzen(room)      # Raumwerte wie im Betrieb (03.11.)
         tok = self._bot_im(self._bot_waehlen(room, text) if len(self._bot_ids()) > 1 else "")
         try:
             return await self._admin_bot_test_einer(request)
         finally:
             _BOT_KONTEXT.reset(tok)
+            _BOT_RAUM.reset(rtok)
 
     async def _admin_bot_test_einer(self, request):
         """Trockenlauf: Satz einwerfen → Entscheidung + Antwort (sendet NICHT).
@@ -10159,8 +10862,9 @@ class TXServer:
                 "total_s":  tr["total_s"],
                 "steps":    tr["steps"],
                 "replayable": bool(tr.get("hist")),
+                "namen":    tr.get("namen", []),
             })
-        return web.json_response({"traces": traces})
+        return web.json_response({"traces": traces, "bot_namen": list(self._bot_namen())})
 
     async def handle_admin_debug_audio(self, request):
         """GET /api/admin/debug-audio/{name} — spielt die WAV-Aufnahme zu
@@ -10204,15 +10908,28 @@ class TXServer:
         groups = [
             {"title": "KI-Funker (Robert)", "tab": "bot", "icon": "🤖",
              "items": [
-                ("Aktiv",            "AN" if bot.get("enabled") else "AUS",
+                ("Aktiv",            ("AN" if bot.get("enabled") else "AUS") + (
+                                         f" (aus in: {', '.join(self._aus_in_raeumen(voice.get('bot')))})"
+                                         if bot.get("enabled") and self._aus_in_raeumen(voice.get("bot")) else ""),
                                      bool(bot.get("enabled"))),
                 ("Name",             bot.get("name"), None),
                 ("Trigger-Wörter",   ", ".join(bot.get("trigger", [])), None),
                 ("Stimme",           voice.get("xtts_speaker") or "—", None),
                 ("Stimmung (nur Piper)", bot.get("speaker") or "—", None),
                 ("KI-Modell",        (bot.get("gemini_model") if gemini
+                                      else (bot.get("mistral_model") or "mistral-large-4")
+                                      if (bot.get("provider") or "").strip().lower() == "mistral"
                                       else bot.get("ollama_model")), None),
-                ("KI-Server",        "Gemini" if gemini else _host(bot.get("ollama_url")), None),
+                ("KI-Server",        "Gemini" if gemini else "Mistral"
+                                     if (bot.get("provider") or "").strip().lower() == "mistral"
+                                     else _host(bot.get("ollama_url")), None),
+                ("Ausweich-Modell",  (f"Mistral {bot.get('mistral_model') or 'mistral-large-4'}, "
+                                      + (f"wenn die Box nach {float(bot.get('ausweich_nach_s', 20)):g} s "
+                                         "nicht geantwortet hat oder ausfällt"
+                                         if float(bot.get('ausweich_nach_s', 20) or 0) > 0
+                                         else "nur wenn die Box ausfällt"))
+                                     if (bot.get("ausweich_provider") or "").strip().lower() == "mistral"
+                                     and (bot.get("mistral_api_key") or "").strip() else "aus", None),
                 ("Cooldown",         f"{int(bot.get('cooldown_s', 0))} s", None),
                 ("Gesprächsfenster", f"{int(bot.get('conversation_window_s', 0))} s", None),
                 ("Räume",            ", ".join(bot.get("rooms")) or "alle", None),
@@ -10231,7 +10948,10 @@ class TXServer:
             {"title": f"KI-Funkerin/-Funker ({b.get('name') or b['id']})", "tab": "bot",
              "icon": "🤖",
              "items": [
-                ("Aktiv",          "AN" if b.get("enabled") else "AUS", bool(b.get("enabled"))),
+                ("Aktiv",          ("AN" if b.get("enabled") else "AUS") + (
+                                       f" (aus in: {', '.join(self._aus_in_raeumen(b))})"
+                                       if b.get("enabled") and self._aus_in_raeumen(b) else ""),
+                                   bool(b.get("enabled"))),
                 ("Trigger-Wörter", ", ".join(b.get("trigger") or []) or "—", None),
                 ("Stimme",         b.get("xtts_speaker") or "—", None),
                 ("Alles andere",   f"wie {bot.get('name') or 'Robert'} (Modell, Räume, Bremsen)",
@@ -10246,6 +10966,34 @@ class TXServer:
                 ("Nachlegen höchstens alle",
                               f"{int(bot.get('nachlegen_abstand_s', 180))} s je Raum", None),
              ]})
+        # Einstellungen je Raum (03.11.): nur Abweichungen und Gruppen
+        je_raum = []
+        alle_bots = [voice.get("bot", {})] + [b for b in voice.get("bots_weitere") or []
+                                               if isinstance(b, dict) and b.get("id")]
+        for b in alle_bots:
+            wer = b.get("name") or b.get("id") or "Robert"
+            for raum, w in (b.get("raeume") or {}).items():
+                if not isinstance(w, dict) or not w:
+                    continue
+                teile = []
+                for k, v in w.items():
+                    if k == "enabled":
+                        teile.append("aus")
+                    elif isinstance(v, bool):
+                        teile.append(f"{self._RAUM_LABEL.get(k, k)} {'an' if v else 'aus'}")
+                    elif k == "persona":
+                        teile.append("eigene Persona")
+                    else:
+                        teile.append(f"{self._RAUM_LABEL.get(k, k)} {v:g}" if isinstance(v, (int, float))
+                                     else f"{self._RAUM_LABEL.get(k, k)} {v}")
+                je_raum.append((f"{wer} · {raum}", ", ".join(teile), None))
+        for g, rs in self._gruppen().items():
+            if g:
+                je_raum.append((f"Gruppe {g}", ", ".join(rs) + " (eigenes Notizbuch und Rückblick)", None))
+        if not je_raum:
+            je_raum.append(("Abweichungen", "keine, überall gelten die Grundwerte", None))
+        groups.append({"title": "KI-Funker je Raum", "tab": "bot", "icon": "🏠",
+                       "items": je_raum})
         groups += [
             {"title": "Roberts Quellen", "tab": "bot", "icon": "📰",
              "items": [
@@ -11125,9 +11873,20 @@ class TXServer:
         search = q.get("search", "")
         date_from = q.get("from", "")
         date_to   = q.get("to",   "")
+        # name=Robert oder name=alle: nur Durchsagen, in denen der KI-Funker
+        # genannt wird -- seine eigenen und die der anderen Bots nicht.
+        bot_namen = self._bot_namen()
+        name = q.get("name", "")
+        namen = None
+        if name == "alle":
+            namen = [t for trig in bot_namen.values() for t in trig]
+        elif name in bot_namen:
+            namen = bot_namen[name]
+        ohne = list(bot_namen) if namen else None
         loop = asyncio.get_running_loop()
         entries, total = await loop.run_in_executor(
-            None, _archive.query_entries, limit, offset, room, search, date_from, date_to
+            None, _archive.query_entries, limit, offset, room, search, date_from, date_to,
+            namen, ohne
         )
         rooms = await loop.run_in_executor(None, _archive.get_rooms)
         # Sprecher-Details (Aehnlichkeiten) nur fuer Admins -- das Archiv ist
@@ -11140,7 +11899,7 @@ class TXServer:
         wav_dir = Path(self.cfg.get("transcription", {}).get("wav_dir", "/opt/FRN/recordings"))
         pending = len(list(wav_dir.glob("*.meta")))
         return web.json_response({"entries": entries, "total": total, "rooms": rooms,
-                                  "pending": pending})
+                                  "pending": pending, "bot_namen": list(bot_namen)})
 
     async def handle_archive_stats(self, request):
         if not _ARCHIVE_AVAILABLE:
@@ -11392,6 +12151,10 @@ class TXServer:
         app.router.add_get ("/api/admin/tagesprogramm", self.handle_admin_tagesprogramm)
         app.router.add_post("/api/admin/tagesprogramm", self.handle_admin_tagesprogramm)
         app.router.add_post("/api/admin/bot",       self.handle_admin_bot)
+        app.router.add_get ("/api/admin/bot/raeume", self.handle_admin_bot_raeume)
+        app.router.add_get ("/api/admin/ki_dienste", self.handle_admin_ki_dienste)
+        app.router.add_post("/api/admin/ki_dienste", self.handle_admin_ki_dienste)
+        app.router.add_post("/api/admin/bot/raeume", self.handle_admin_bot_raeume)
         app.router.add_post("/api/admin/bot/test",  self.handle_admin_bot_test)
         app.router.add_post("/api/admin/bot/zwiegespraech", self.handle_admin_bot_zwiegespraech)
         app.router.add_post("/api/admin/bot/probe", self.handle_admin_bot_probe)

@@ -286,6 +286,8 @@ def query_entries(
     search: str = "",
     date_from: str = "",   # "YYYY-MM-DD"
     date_to: str = "",
+    namen: list[str] | None = None,        # einer dieser Begriffe faellt im Text
+    ohne_callsigns: list[str] | None = None,
 ) -> list[dict]:
     clauses = []
     params  = []
@@ -296,6 +298,12 @@ def query_entries(
     if search:
         clauses.append("(text LIKE ? OR callsign LIKE ?)")
         params.extend([f"%{search}%", f"%{search}%"])
+    if namen:
+        clauses.append("(" + " OR ".join("text LIKE ?" for _ in namen) + ")")
+        params.extend(f"%{n}%" for n in namen)
+    if ohne_callsigns:
+        clauses.append("callsign NOT IN (" + ",".join("?" for _ in ohne_callsigns) + ")")
+        params.extend(ohne_callsigns)
     if date_from:
         try:
             has_time = "T" in date_from

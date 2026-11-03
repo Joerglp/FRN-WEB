@@ -335,13 +335,18 @@ function darstellen(d) {
   document.getElementById("robert").innerHTML = `
     <div class="wert"><div class="l">Robert</div>
       <div class="v" style="color:${r.enabled ? "var(--green2)" : "var(--yellow)"}">${r.enabled ? "an" : "aus"}</div>
-      <div class="s">${esc((r.rooms || []).join(", ") || "alle Räume")}</div></div>
+      <div class="s">${esc((r.rooms || []).join(", ") || "alle Räume")}${Object.entries(r.aus_in || {}).map(([wer, rs]) =>
+        `<br>${esc(wer)} aus in: ${esc(rs.join(", "))}`).join("")}</div></div>
     <div class="wert"><div class="l">Letzte Antwort</div>
       <div class="v">${la ? vor(la.ts) : "–"}</div>
       <div class="s">${la ? esc(uhr(la.ts) + " · " + la.room) : "noch keine"}</div></div>
     <div class="wert"><div class="l">Letzte Modell-Antwort</div>
       <div class="v">${llm ? llm.s.toFixed(1).replace(".", ",") + " s" : "–"}</div>
-      <div class="s">${llm ? vor(llm.ts) : "seit Neustart keine"}</div></div>
+      <div class="s">${llm ? vor(llm.ts) : "seit Neustart keine"}${r.ausweich
+        ? (r.ausweich.letzt
+            ? `<br>Ausweich Mistral ${vor(r.ausweich.letzt.ts)}: ${esc(r.ausweich.letzt.grund)}${r.ausweich.letzt.ok ? "" : " (ohne Antwort)"}`
+            : "<br>Ausweich Mistral bereit")
+        : ""}</div></div>
     <div class="wert"><div class="l">Warten auf Whisper</div>
       <div class="v" style="color:${r.warteschlange > 5 ? "var(--yellow)" : "inherit"}">${r.warteschlange ?? "?"}</div>
       <div class="s">Aufnahmen in der Warteschlange</div></div>
