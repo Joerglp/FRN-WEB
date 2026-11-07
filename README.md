@@ -56,6 +56,21 @@ Die KI-Server (Whisper, Voice-TTS, Ollama) laufen als **eigenständige Dienste**
 
 ## Schnellstart (Docker)
 
+> **Tester gesucht:** Der Docker-Stack wurde am 07.11.2026 auf Python 3.13
+> nachgezogen. Geprüft sind bisher nur die beiden Images einzeln (Bau auf
+> einem Raspberry Pi 5, Start des TX-Servers mit Beispiel-Konfiguration).
+> Der komplette Stack mit `docker compose up` — FRN_Server, Icecast, Streams,
+> Aufnahme und Transkription zusammen — ist **noch nicht getestet**; im
+> Produktivbetrieb läuft alles per systemd. Wer es ausprobiert, gibt bitte
+> per Issue Bescheid, ob es läuft. Interessant sind vor allem:
+>
+> - Verbinden sich die Streams mit dem FRN_Server (`host.docker.internal`)?
+> - Kommt der MP3-Stream bei Icecast an (`http://localhost:8000`)?
+> - Landen Durchsagen als Aufnahme, Transkript und Archiv-Zeile im Funkarchiv?
+> - Bleiben Nachrichten, Rückblick und Anmeldung nach
+>   `docker compose up -d --build` erhalten (Volume `frn-daten`)?
+> - Läuft es auch auf x86-64 (bisher nur ARM64 gebaut)?
+
 ```bash
 # 1. Repo klonen
 git clone https://github.com/Joerglp/FRN-WEB.git
