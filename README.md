@@ -62,7 +62,7 @@ Die KI-Server (Whisper, Voice-TTS, Ollama) laufen als **eigenständige Dienste**
 > Der komplette Stack mit `docker compose up` — FRN_Server, Icecast, Streams,
 > Aufnahme und Transkription zusammen — ist **noch nicht getestet**; im
 > Produktivbetrieb läuft alles per systemd. Wer es ausprobiert, gibt bitte
-> per Issue Bescheid, ob es läuft. Interessant sind vor allem:
+> in [Issue #1](https://github.com/Joerglp/FRN-WEB/issues/1) Bescheid, ob es läuft. Interessant sind vor allem:
 >
 > - Verbinden sich die Streams mit dem FRN_Server (`host.docker.internal`)?
 > - Kommt der MP3-Stream bei Icecast an (`http://localhost:8000`)?
