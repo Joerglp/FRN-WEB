@@ -4123,13 +4123,12 @@ class TXServer:
                     "gemini": self._gemini_status(bot),
                     "letzte_antwort": letzte, "warteschlange": wartend,
                     "llm_letzte": {"ts": llm[0], "s": round(llm[1], 2)} if llm else None,
-                    "ausweich": ({"modell": bot.get("mistral_model") or "mistral-large-4",
+                    "ausweich": ({"modell": " → ".join(f"{n} {m}" for n, m, _f in self._ausweich_stufen(bot)),
                                   "nach_s": float(bot.get("ausweich_nach_s", 20) or 0),
                                   "letzt": ({"ts": self._ausweich_letzt[0], "grund": self._ausweich_letzt[1],
                                              "s": self._ausweich_letzt[2], "ok": self._ausweich_letzt[3]}
                                             if self._ausweich_letzt else None)}
-                                 if (bot.get("ausweich_provider") or "").strip().lower() == "mistral"
-                                 and (bot.get("mistral_api_key") or "").strip() else None),
+                                 if self._ausweich_stufen(bot) else None),
                     "frn_raeume": [{"name": r.name, "verbunden": bool(getattr(r, "_connected", False))}
                                    for r in self.rooms.values()]}
 
@@ -6808,6 +6807,8 @@ class TXServer:
             raw = await self._llm_gemini(bot, system, messages, room_name, trace_ts)
         elif provider == "mistral":
             raw = await self._llm_mistral(bot, system, messages, room_name, trace_ts)
+        elif provider == "ollama_cloud":
+            raw = await self._llm_ollama_cloud(bot, system, messages, room_name, trace_ts)
         else:
             # Schon automatisch gesucht UND etwas gefunden? Dann das Such-
             # werkzeug nicht nochmal anbieten (2026-09-24): das Modell suchte
@@ -6897,8 +6898,8 @@ class TXServer:
     async def _llm_mit_ausweich(self, bot: dict, system: str, messages: list,
                                 room_name: str = "", trace_ts: float | None = None,
                                 force_model: bool = False) -> str:
-        aw = (bot.get("ausweich_provider") or "").strip().lower()
-        if aw != "mistral" or not (bot.get("mistral_api_key") or "").strip() or force_model:
+        stufen = self._ausweich_stufen(bot)
+        if not stufen or force_model:
             return await self._llm_ollama(bot, system, messages, room_name=room_name,
                                           trace_ts=trace_ts, force_model=force_model)
         grenze = float(bot.get("ausweich_nach_s", 20) or 0)
@@ -6912,20 +6913,82 @@ class TXServer:
             grund = "Box-Fehler oder leere Antwort"
         except asyncio.TimeoutError:
             grund = f"Box braucht länger als {grenze:.0f} s"
-        log.warning("KI-Funker: %s (%.1fs) -- Ausweich-Modell Mistral antwortet",
-                    grund, time.time() - _t0)
-        _t1 = time.time()
-        if room_name and trace_ts is not None:      # Box-Fehler ist ueberbrueckt
-            self._debug_trace_get(room_name, trace_ts).pop("llm_fehler", None)
-        raw = await self._llm_mistral(bot, system, messages, room_name, trace_ts)
-        dt = time.time() - _t1
-        self._ausweich_letzt = (time.time(), grund, round(dt, 1), bool(raw))
-        if room_name and trace_ts is not None:
-            self.debug_trace_step(room_name, trace_ts, "Ausweich-Modell",
-                                  "ok" if raw else "error", dt,
-                                  f"{grund} -- Mistral {bot.get('mistral_model') or 'mistral-large-4'}"
-                                  + ("" if raw else ": keine Antwort"))
+        log.warning("KI-Funker: %s (%.1fs) -- Ausweich-Modell %s antwortet",
+                    grund, time.time() - _t0, stufen[0][0])
+        raw = ""
+        for name, modell, aufruf_aw in stufen:
+            _t1 = time.time()
+            if room_name and trace_ts is not None:      # Box-Fehler ist ueberbrueckt
+                self._debug_trace_get(room_name, trace_ts).pop("llm_fehler", None)
+            raw = await aufruf_aw(bot, system, messages, room_name, trace_ts)
+            dt = time.time() - _t1
+            self._ausweich_letzt = (time.time(), f"{grund} -> {name}", round(dt, 1), bool(raw))
+            if room_name and trace_ts is not None:
+                self.debug_trace_step(room_name, trace_ts, "Ausweich-Modell",
+                                      "ok" if raw else "error", dt,
+                                      f"{grund} -- {name} {modell}"
+                                      + ("" if raw else ": keine Antwort"))
+            if raw:
+                return raw
+            grund = f"{name} ohne Antwort"
         return raw
+
+    # Zweiter Ausweich (07.11.2026): Ollama Cloud mit Reflection "beam" --
+    # dort voruebergehend kostenlos, danach HTTP 402 "Add usage credits".
+    # Getestet auf 16 Archiv-Faellen: Median 4,6 s, keine Leerantworten.
+    _cloud_gesperrt_bis: float = 0.0
+
+    def _ausweich_stufen(self, bot: dict) -> list:
+        """[(Name, Modell, Aufruf)] in Reihenfolge; leer = kein Ausweich."""
+        st = []
+        if ((bot.get("ausweich_provider") or "").strip().lower() == "mistral"
+                and (bot.get("mistral_api_key") or "").strip()):
+            st.append(("Mistral", bot.get("mistral_model") or "mistral-large-4", self._llm_mistral))
+        if ((bot.get("ausweich2_provider") or "").strip().lower() == "ollama_cloud"
+                and (bot.get("ollama_cloud_api_key") or "").strip()
+                and time.time() >= self._cloud_gesperrt_bis):
+            st.append(("Ollama Cloud", bot.get("ollama_cloud_model") or "beam", self._llm_ollama_cloud))
+        return st
+
+    _EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F]")
+
+    async def _llm_ollama_cloud(self, bot: dict, system: str, messages: list,
+                                room_name: str = "", trace_ts: float | None = None) -> str:
+        """Chat ueber ollama.com (gleiche /api/chat wie ein eigener Ollama).
+        Beam denkt immer; das Denken kommt in message.thinking, nicht im Text."""
+        key = (bot.get("ollama_cloud_api_key") or "").strip()
+        model = (bot.get("ollama_cloud_model") or "beam").strip()
+        url = (bot.get("ollama_cloud_url") or "https://ollama.com").rstrip("/")
+        body = {"model": model, "stream": False,
+                "messages": [{"role": "system", "content": system}] + list(messages),
+                "options": {"temperature": float(bot.get("temperature", 0.4))}}
+        for versuch in range(2):
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as sess:
+                    async with sess.post(f"{url}/api/chat", json=body,
+                                         headers={"Authorization": f"Bearer {key}"}) as resp:
+                        status = resp.status
+                        data = await resp.json(content_type=None)
+            except Exception as e:
+                log.warning("KI-Funker: Ollama Cloud nicht erreichbar: %s", e)
+                self._llm_fehler_merken(room_name, trace_ts, f"Ollama Cloud nicht erreichbar: {e}")
+                return ""
+            if status == 200 and isinstance(data, dict):
+                text = ((data.get("message") or {}).get("content") or "").strip()
+                # Emojis wuerde die Sprachausgabe vorlesen (im Test: "😄")
+                return re.sub(r"\s{2,}", " ", self._EMOJI_RE.sub("", text)).strip()
+            fehler = str((data or {}).get("error") if isinstance(data, dict) else data)[:160]
+            if status in (429, 500, 502, 503) and versuch == 0:
+                await asyncio.sleep(2)
+                continue
+            if status in (401, 402, 403):
+                # Gratis-Zeit vorbei oder Schluessel ungueltig: eine Stunde
+                # ueberspringen, statt bei jedem Ausfall erneut zu warten
+                self._cloud_gesperrt_bis = time.time() + 3600
+            log.warning("KI-Funker Ollama Cloud HTTP %d: %s", status, fehler)
+            self._llm_fehler_merken(room_name, trace_ts, f"Ollama Cloud HTTP {status}: {fehler}")
+            return ""
+        return ""
 
     async def _llm_neben(self, bot: dict, system: str, messages: list) -> str:
         """Begruessung/Mitschreiber: gleicher Anbieter wie die Antworten,
@@ -6935,6 +6998,8 @@ class TXServer:
             return await self._llm_gemini(bot, system, messages)
         if provider == "mistral":
             return await self._llm_mistral(bot, system, messages)
+        if provider == "ollama_cloud":
+            return await self._llm_ollama_cloud(bot, system, messages)
         return await self._llm_mit_ausweich(dict(bot, ausweich_nach_s=0), system, messages)
 
     async def _llm_mistral(self, bot: dict, system: str, messages: list,
@@ -7634,6 +7699,30 @@ class TXServer:
                 k = body["gemini_api_key"].strip()
                 if k != self._TOKEN_MASK:   # Maske = unverändert lassen
                     bot["gemini_api_key"] = k
+            # Mistral (05.11.2026): Hauptanbieter oder Ausweich bei GPU-Box-Ausfall
+            if "mistral_api_key" in body and isinstance(body["mistral_api_key"], str):
+                k = body["mistral_api_key"].strip()
+                if k != self._TOKEN_MASK:
+                    bot["mistral_api_key"] = k
+            if isinstance(body.get("mistral_model"), str) and body["mistral_model"].strip():
+                bot["mistral_model"] = body["mistral_model"].strip()
+            if body.get("mistral_reasoning_effort") in ("low", "medium", "high"):
+                bot["mistral_reasoning_effort"] = body["mistral_reasoning_effort"]
+            if body.get("ausweich_provider") in ("", "mistral"):
+                bot["ausweich_provider"] = body["ausweich_provider"]
+            if body.get("ausweich2_provider") in ("", "ollama_cloud"):
+                bot["ausweich2_provider"] = body["ausweich2_provider"]
+            if isinstance(body.get("ollama_cloud_model"), str) and body["ollama_cloud_model"].strip():
+                bot["ollama_cloud_model"] = body["ollama_cloud_model"].strip()
+            if "ollama_cloud_api_key" in body and isinstance(body["ollama_cloud_api_key"], str):
+                k = body["ollama_cloud_api_key"].strip()
+                if k != self._TOKEN_MASK:
+                    bot["ollama_cloud_api_key"] = k
+            if "ausweich_nach_s" in body:
+                try:
+                    bot["ausweich_nach_s"] = self._begrenzt("bot", "ausweich_nach_s", body["ausweich_nach_s"])
+                except (TypeError, ValueError):
+                    pass
             if "speaker" in body and isinstance(body["speaker"], str):
                 # Sprecher-IDs sind strikt [a-z0-9_-]: Tippfehler wie
                 # "Aaron,dreschner" leise reparieren statt spaeter TTS-400
@@ -7794,6 +7883,15 @@ class TXServer:
         out["control"]   = dict(self._BOT_DEFAULTS["control"], **(bot.get("control") or {}))
         out["ollama_token"]   = self._TOKEN_MASK if bot.get("ollama_token") else ""
         out["gemini_api_key"] = self._TOKEN_MASK if bot.get("gemini_api_key") else ""
+        for geheim in ("mistral_api_key", "openrouter_api_key", "ollama_cloud_api_key"):
+            if geheim in out:
+                out[geheim] = self._TOKEN_MASK if bot.get(geheim) else ""
+        out.setdefault("mistral_model", "mistral-large-4")
+        out.setdefault("mistral_reasoning_effort", "low")
+        out.setdefault("ausweich_provider", "")
+        out.setdefault("ausweich_nach_s", 15)
+        out.setdefault("ausweich2_provider", "")
+        out.setdefault("ollama_cloud_model", "beam")
         # Leere System-Anweisung → Standardvorlage anzeigen (zum Anpassen)
         if not (out.get("system_prompt") or "").strip():
             out["system_prompt"] = self._BOT_SYSTEM_DEFAULT
@@ -8076,7 +8174,8 @@ class TXServer:
     # Aufgabe welchen nutzt. Schreibt in die bestehenden config-Schluessel --
     # keine neue Struktur, damit der uebrige Code unveraendert liest.
     _KI_SCHLUESSEL = {"mistral": "mistral_api_key", "gemini": "gemini_api_key",
-                      "openrouter": "openrouter_api_key", "box": "ollama_token"}
+                      "openrouter": "openrouter_api_key", "box": "ollama_token",
+                      "ollama_cloud": "ollama_cloud_api_key"}
 
     def _ki_dienste_daten(self) -> dict:
         v = self.cfg.get("voice", {})
@@ -8099,6 +8198,10 @@ class TXServer:
                  "schluessel": maske("ollama_token"), "hinweis": "Firmenanfragen haben dort Vorrang"},
                 {"id": "mistral", "name": "Mistral (Frankreich)", "schluessel": maske("mistral_api_key"),
                  "hinweis": "Freikontingent: Large 4 und Ministral 8B, Voxtral; ~0,85 Anfragen/s"},
+                {"id": "ollama_cloud", "name": "Ollama Cloud (USA)", "schluessel": maske("ollama_cloud_api_key"),
+                 "hinweis": "ohne Guthaben nur beam (vorübergehend gratis)"
+                            + (", gesperrt bis " + time.strftime("%H:%M", time.localtime(self._cloud_gesperrt_bis))
+                               if time.time() < self._cloud_gesperrt_bis else "")},
                 {"id": "gemini", "name": "Google Gemini", "schluessel": maske("gemini_api_key"),
                  "hinweis": "kostenlos nur mit Datennutzung durch Google"},
                 {"id": "openrouter", "name": "OpenRouter", "schluessel": maske("openrouter_api_key"),
@@ -8116,6 +8219,11 @@ class TXServer:
                  "ausweich_nach_s": float(b.get("ausweich_nach_s", 20) or 0),
                  "optionen": ["aus", "mistral"], "zuletzt": zeit(aw_l),
                  "info": "springt ein bei Box-Fehler oder nach der Wartezeit (0 = nur bei Fehler)"},
+                {"id": "antworten_ausweich2", "name": "Zweiter Ausweich für Antworten",
+                 "anbieter": (b.get("ausweich2_provider") or "aus").strip().lower() or "aus",
+                 "modell": b.get("ollama_cloud_model") or "beam",
+                 "optionen": ["aus", "ollama_cloud"],
+                 "info": "wenn auch der erste Ausweich nichts liefert (oder keiner eingestellt ist)"},
                 {"id": "transkription", "name": "Transkription (Whisper)", "anbieter": "box",
                  "modell": w.get("model") or "", "fest": True, "info": w.get("remote_url") or "lokal"},
                 {"id": "transkription_ausweich", "name": "Ausweich für Transkription",
@@ -8160,6 +8268,11 @@ class TXServer:
                                         headers={"Authorization": f"Bearer {key}"}) as r:
                         d = await r.json(content_type=None)
                         return r.status == 200, f"{len(d.get('data') or [])} Modelle" if r.status == 200 else str(d)[:120]
+                if aid == "ollama_cloud":
+                    async with sess.get("https://ollama.com/api/tags",
+                                        headers={"Authorization": f"Bearer {key}"}) as r:
+                        d = await r.json(content_type=None)
+                        return r.status == 200, f"{len(d.get('models') or [])} Modelle" if r.status == 200 else str(d)[:120]
                 if aid == "gemini":
                     async with sess.get("https://generativelanguage.googleapis.com/v1beta/models",
                                         headers={"x-goog-api-key": key}) as r:
@@ -8226,6 +8339,12 @@ class TXServer:
                         if "ausweich_nach_s" in body:
                             bb["ausweich_nach_s"] = self._begrenzt("bot", "ausweich_nach_s",
                                                                   body["ausweich_nach_s"])
+                elif a == "antworten_ausweich2" and an in ("aus", "ollama_cloud"):
+                    def aenderung(v: dict) -> None:
+                        bb = v.setdefault("bot", {})
+                        bb["ausweich2_provider"] = "" if an == "aus" else an
+                        if modell:
+                            bb["ollama_cloud_model"] = modell
                 elif a == "transkription_ausweich" and an in ("aus", "mistral"):
                     def aenderung(v: dict) -> None:
                         pass
@@ -8502,23 +8621,20 @@ class TXServer:
                 status=404)
         bot = dict(self._bot_cfg())
         provider = (body.get("provider") or "").strip().lower()
-        if provider in ("ollama", "gemini"):
+        if provider in ("ollama", "gemini", "mistral", "ollama_cloud"):
             bot["provider"] = provider
         if model:
-            if (bot.get("provider") or "ollama") == "gemini":
-                bot["gemini_model"] = model
-            else:
-                bot["ollama_model"] = model
+            bot[self._REPLAY_MODELL_FELD.get(bot.get("provider") or "ollama", "ollama_model")] = model
         t0 = time.time()
         answer, raw = await self._bot_ollama(
             bot, tr["hist"], with_raw=True,
-            force_model=bool(model) and (bot.get("provider") or "ollama") != "gemini",
+            force_model=bool(model) and (bot.get("provider") or "ollama") == "ollama",
             jetzt_ts=float(tr.get("started") or ts))
         return web.json_response({
             "would_reply": bool(answer),
             "answer": answer or "SKIP",
             "raw": raw,
-            "model": bot.get("ollama_model"),
+            "model": bot.get(self._REPLAY_MODELL_FELD.get(bot.get("provider") or "ollama", "ollama_model")),
             "seconds": round(time.time() - t0, 1)})
 
     async def handle_admin_speaker_id(self, request):
@@ -9200,6 +9316,17 @@ class TXServer:
                     except OSError:
                         pass
 
+    async def handle_admin_mistral_models(self, request):
+        """Mistral-Chat-Modelle fuer das Nachspielen auf der Analyse-Seite;
+        leer, solange kein Schluessel eingetragen ist."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        key = (self._bot_cfg().get("mistral_api_key") or "").strip()
+        cloud = (self._bot_cfg().get("ollama_cloud_api_key") or "").strip()
+        return web.json_response({"models": list(self._MISTRAL_REPLAY_MODELLE) if key else [],
+                                  "cloud": [self._bot_cfg().get("ollama_cloud_model") or "beam"] if cloud else []})
+
     async def handle_admin_gemini_models(self, request):
         """Verfügbare Gemini-Modell-IDs (Text-Chat) für das Dropdown.
         Verhindert, dass versehentlich ein Anzeigename statt der API-ID
@@ -9772,6 +9899,12 @@ class TXServer:
         finally:
             _BOT_KONTEXT.reset(tok)
 
+    # Nachspielen mit gewaehltem Anbieter (Mistral seit 05.11.2026)
+    _REPLAY_MODELL_FELD = {"ollama": "ollama_model", "gemini": "gemini_model",
+                           "mistral": "mistral_model", "ollama_cloud": "ollama_cloud_model"}
+    # Fest, weil im Gratis-Zugang nur diese Chat-Modelle Anfragen erlauben
+    _MISTRAL_REPLAY_MODELLE = ("mistral-large-4", "ministral-14b-latest", "ministral-8b-latest")
+
     async def _bot_replay_archiv(self, eintrag, rows, model, provider):
         name = self._bot_cfg().get("name") or "Robert"
         hist = [(r["timestamp"], f"{name} (du)" if r["callsign"] == name else (r["callsign"] or "Funker"),
@@ -9779,17 +9912,14 @@ class TXServer:
         bot = dict(self._bot_cfg())
         # Anbieter waehlbar (2026-09-17): vorher konnte nur das Ollama-Modell
         # getauscht werden, obwohl Gemini konfiguriert ist und antwortet.
-        if provider in ("ollama", "gemini"):
+        if provider in ("ollama", "gemini", "mistral", "ollama_cloud"):
             bot["provider"] = provider
         if model:
-            if (bot.get("provider") or "ollama") == "gemini":
-                bot["gemini_model"] = model
-            else:
-                bot["ollama_model"] = model
+            bot[self._REPLAY_MODELL_FELD.get(bot.get("provider") or "ollama", "ollama_model")] = model
         t0 = time.time()
         answer, raw = await self._bot_ollama(
             bot, hist, with_raw=True,
-            force_model=bool(model) and (bot.get("provider") or "ollama") != "gemini",
+            force_model=bool(model) and (bot.get("provider") or "ollama") == "ollama",
             jetzt_ts=float(eintrag["timestamp"]) + 3)   # Uhrzeit von damals, nicht von jetzt
         # Stimmungs-Markierung wie im Funkbetrieb abtrennen (2026-09-25: die
         # Analyse-Seite zeigte "[neutral] Stimmt, ..." roh an).
@@ -9798,8 +9928,7 @@ class TXServer:
             "provider": bot.get("provider") or "ollama",
             "damals": eintrag.get("text", ""),
             "jetzt": answer.strip() or "SKIP", "stimmung": stimmung, "raw": raw,
-            "model": (bot.get("gemini_model") if (bot.get("provider") or "ollama") == "gemini"
-                      else bot.get("ollama_model")),
+            "model": bot.get(self._REPLAY_MODELL_FELD.get(bot.get("provider") or "ollama", "ollama_model")),
             "seconds": round(time.time() - t0, 1),
             "kontext": [{"wer": w, "text": t} for _ts, w, t in hist],
         })
@@ -9811,7 +9940,7 @@ class TXServer:
     # "gemini" (2026-09-17): unabhaengige zweite Meinung ohne Whisper. Gemessen:
     # sauberer Clip #23120 korrekt (1.1s), verrauschter #23415 ehrlich
     # "[unverständlich]", wo Whisper dreimal Verschiedenes geraten hatte.
-    _WHISPER_QUELLEN = ("remote", "tiny", "base", "small", "medium", "gemini")
+    _WHISPER_QUELLEN = ("remote", "tiny", "base", "small", "medium", "gemini", "mistral")
     _GEMINI_TRANSKRIPT_PROMPT = (
         "Transkribiere diese Aufnahme aus dem deutschen CB-Funk wortgetreu. "
         "Gib nur den gesprochenen Text aus, ohne Kommentar. Ist nichts "
@@ -9888,6 +10017,30 @@ class TXServer:
         parts = (cands[0].get("content", {}) or {}).get("parts", []) or []
         return "".join(p.get("text", "") for p in parts).strip()
 
+    def _transkribiere_voxtral(self, wav_path: str):
+        """Voxtral (Mistral) fuer den Vergleich, ROH -- ohne die Filter des
+        Live-Ausweichs, damit man sieht, was Voxtral wirklich liefert.
+        Liefert (text, modell)."""
+        import requests
+        key = ((self.cfg.get("voice", {}) or {}).get("bot", {}) or {}).get("mistral_api_key", "").strip()
+        if not key:
+            raise RuntimeError("kein mistral_api_key gesetzt")
+        modell = ((self.cfg.get("whisper", {}) or {}).get("ausweich_modell")
+                  or "voxtral-mini-transcribe-3").strip()
+        for versuch in range(2):
+            with open(wav_path, "rb") as f:
+                r = requests.post("https://api.mistral.ai/v1/audio/transcriptions",
+                                  headers={"Authorization": f"Bearer {key}"},
+                                  files={"file": ("a.wav", f, "audio/wav")},
+                                  data={"model": modell, "language": "de"}, timeout=60)
+            if r.status_code == 429 and not versuch:
+                time.sleep(3)
+                continue
+            break
+        if r.status_code != 200:
+            raise RuntimeError(f"Mistral HTTP {r.status_code}: {r.text[:100]}")
+        return (r.json().get("text") or "").strip(), modell
+
     async def handle_admin_transcribe_compare(self, request):
         """POST /api/admin/transcribe-compare {entry_id, sources:[…]} —
         transkribiert eine Archiv-Aufnahme erneut ueber mehrere Quellen und
@@ -9942,6 +10095,9 @@ class TXServer:
                         text = await transcribe_wav(wav_path, "medium", "de")
                     elif quelle == "gemini":
                         text, modell = await self._transkribiere_gemini_mit_ausweich(opus)
+                    elif quelle == "mistral":
+                        text, modell = await loop.run_in_executor(
+                            None, self._transkribiere_voxtral, wav_path)
                     else:
                         text = await loop.run_in_executor(
                             None, self._transkribiere_lokal, quelle, wav_path)
@@ -10923,13 +11079,12 @@ class TXServer:
                 ("KI-Server",        "Gemini" if gemini else "Mistral"
                                      if (bot.get("provider") or "").strip().lower() == "mistral"
                                      else _host(bot.get("ollama_url")), None),
-                ("Ausweich-Modell",  (f"Mistral {bot.get('mistral_model') or 'mistral-large-4'}, "
+                ("Ausweich-Modell",  (" → ".join(f"{n} {m}" for n, m, _f in self._ausweich_stufen(bot)) + ", "
                                       + (f"wenn die Box nach {float(bot.get('ausweich_nach_s', 20)):g} s "
                                          "nicht geantwortet hat oder ausfällt"
                                          if float(bot.get('ausweich_nach_s', 20) or 0) > 0
                                          else "nur wenn die Box ausfällt"))
-                                     if (bot.get("ausweich_provider") or "").strip().lower() == "mistral"
-                                     and (bot.get("mistral_api_key") or "").strip() else "aus", None),
+                                     if self._ausweich_stufen(bot) else "aus", None),
                 ("Cooldown",         f"{int(bot.get('cooldown_s', 0))} s", None),
                 ("Gesprächsfenster", f"{int(bot.get('conversation_window_s', 0))} s", None),
                 ("Räume",            ", ".join(bot.get("rooms")) or "alle", None),
@@ -12177,6 +12332,7 @@ class TXServer:
         app.router.add_get ("/api/admin/crosslink", self.handle_admin_crosslink)
         app.router.add_post("/api/admin/crosslink", self.handle_admin_crosslink)
         app.router.add_get ("/api/admin/gemini-models", self.handle_admin_gemini_models)
+        app.router.add_get ("/api/admin/mistral-models", self.handle_admin_mistral_models)
 
         return app
 

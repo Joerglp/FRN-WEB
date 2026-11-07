@@ -344,8 +344,8 @@ function darstellen(d) {
       <div class="v">${llm ? llm.s.toFixed(1).replace(".", ",") + " s" : "–"}</div>
       <div class="s">${llm ? vor(llm.ts) : "seit Neustart keine"}${r.ausweich
         ? (r.ausweich.letzt
-            ? `<br>Ausweich Mistral ${vor(r.ausweich.letzt.ts)}: ${esc(r.ausweich.letzt.grund)}${r.ausweich.letzt.ok ? "" : " (ohne Antwort)"}`
-            : "<br>Ausweich Mistral bereit")
+            ? `<br>Ausweich ${vor(r.ausweich.letzt.ts)}: ${esc(r.ausweich.letzt.grund)}${r.ausweich.letzt.ok ? "" : " (ohne Antwort)"}`
+            : `<br>Ausweich bereit: ${esc(r.ausweich.modell || "")}`)
         : ""}</div></div>
     <div class="wert"><div class="l">Warten auf Whisper</div>
       <div class="v" style="color:${r.warteschlange > 5 ? "var(--yellow)" : "inherit"}">${r.warteschlange ?? "?"}</div>

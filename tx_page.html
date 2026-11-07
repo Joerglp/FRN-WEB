@@ -1996,7 +1996,29 @@ audio {
           <select id="bot-provider" onchange="updateBotProvider()" autocomplete="off">
             <option value="ollama">Lokal / eigener Server (Ollama)</option>
             <option value="gemini">Google Gemini (Cloud, schnell)</option>
+            <option value="mistral">Mistral (Frankreich, Cloud)</option>
+            <option value="ollama_cloud">Ollama Cloud (USA)</option>
           </select>
+        </div>
+        <div class="form-grid prov-ausweich" style="margin-top:8px">
+          <div class="form-field" style="flex:0 0 260px">
+            <label>Ausweich, wenn die GPU-Box nicht antwortet</label>
+            <select id="bot-ausweich" onchange="updateBotProvider()" autocomplete="off">
+              <option value="">aus (schweigen)</option>
+              <option value="mistral">Mistral (Modell und Schlüssel unten)</option>
+            </select>
+          </div>
+          <div class="form-field" style="flex:0 0 160px">
+            <label>spätestens nach <span style="color:var(--muted)">(s)</span></label>
+            <input type="number" id="bot-ausweich-s" min="0" max="180" placeholder="15" autocomplete="off">
+          </div>
+          <div class="form-field" style="flex:0 0 260px">
+            <label>Zweiter Ausweich, wenn auch der erste nichts liefert</label>
+            <select id="bot-ausweich2" onchange="updateBotProvider()" autocomplete="off">
+              <option value="">aus</option>
+              <option value="ollama_cloud">Ollama Cloud (Modell und Schlüssel unten)</option>
+            </select>
+          </div>
         </div>
       <!-- Ollama-Felder -->
       <div class="prov-ollama">
@@ -2045,6 +2067,49 @@ audio {
         </div>
       </div>
       <!-- Gemini-Felder -->
+      <div class="prov-cloud">
+        <div class="form-grid" style="margin-top:8px">
+          <div class="form-field" style="flex:2">
+            <label>Ollama-Cloud-Modell</label>
+            <input type="text" id="bot-cloud-model" placeholder="beam" autocomplete="off">
+          </div>
+          <div class="form-field" style="flex:2">
+            <label>Ollama-Cloud API-Key <span style="color:var(--muted)">(ollama.com/settings/keys)</span></label>
+            <input type="password" id="bot-cloud-key" autocomplete="new-password" placeholder="Ollama-Schlüssel">
+          </div>
+        </div>
+        <div class="form-field" style="margin-top:2px;font-size:.72rem;color:var(--muted);line-height:1.4">
+          Ohne Guthaben geht nur beam, und das nur vorübergehend kostenlos (Server in den USA).
+          Endet das Angebot, wird Ollama Cloud für eine Stunde übersprungen und es bleibt beim Schweigen.
+        </div>
+      </div>
+      <div class="prov-mistral">
+        <div class="form-grid" style="margin-top:8px">
+          <div class="form-field" style="flex:2">
+            <label>Mistral-Modell</label>
+            <input type="text" id="bot-mistral-model" list="mistral-model-list" placeholder="mistral-large-4" autocomplete="off">
+            <datalist id="mistral-model-list">
+              <option value="mistral-large-4"><option value="ministral-14b-latest"><option value="ministral-8b-latest">
+            </datalist>
+          </div>
+          <div class="form-field" style="flex:0 0 160px">
+            <label>Nachdenken <span style="color:var(--muted)">(Large 4)</span></label>
+            <select id="bot-mistral-effort" autocomplete="off">
+              <option value="low">wenig (schnell)</option>
+              <option value="medium">mittel</option>
+              <option value="high">viel (langsam)</option>
+            </select>
+          </div>
+          <div class="form-field" style="flex:2">
+            <label>Mistral API-Key <span style="color:var(--muted)">(console.mistral.ai)</span></label>
+            <input type="password" id="bot-mistral-key" autocomplete="new-password" placeholder="Mistral-Schlüssel">
+          </div>
+        </div>
+        <div class="form-field" style="margin-top:2px;font-size:.72rem;color:var(--muted);line-height:1.4">
+          Im Gratis-Zugang gehen nur mistral-large-4 und die Ministral-Modelle, etwa eine Anfrage pro Sekunde.
+          Large 4 denkt vor jeder Antwort nach, das lässt sich nicht abschalten. Die Felder gelten auch für den Ausweich.
+        </div>
+      </div>
       <div class="prov-gemini">
         <div class="form-grid" style="margin-top:8px">
           <div class="form-field" style="flex:2">
@@ -4270,6 +4335,8 @@ function rbZeile(x, farbe) {
             onclick="compareTranscript(${x.id}, this, true)" title="zusätzlich lokale Modelle (langsam, ca. 1 Min.)">+LOKAL</button>
     <button class="btn-save" style="padding:1px 6px;font-size:.62rem;margin-left:3px"
             onclick="compareTranscript(${x.id}, this, 'gemini')" title="zwei GPU-Läufe plus Gemini als unabhängige zweite Meinung">+GEMINI</button>
+    <button class="btn-save" style="padding:1px 6px;font-size:.62rem;margin-left:3px"
+            onclick="compareTranscript(${x.id}, this, 'mistral')" title="zwei GPU-Läufe plus Voxtral (Mistral), roh ohne Filter">+VOXTRAL</button>
     <div class="rb-cmp" style="display:none;margin:4px 0 4px 18px"></div></div>`;
 }
 
@@ -4318,11 +4385,13 @@ async function compareTranscript(id, btn, mitLokal) {
   // modus: false = 3× GPU-Box, true = + lokale Modelle, "gemini" = + Gemini
   const modus = mitLokal;
   const hinweis = modus === "gemini" ? "prüft über GPU-Box und Gemini …"
+                : modus === "mistral" ? "prüft über GPU-Box und Voxtral …"
                 : modus ? "prüft über GPU-Box und lokale Modelle, dauert etwa eine Minute …"
                 : "prüft mit drei Läufen über die GPU-Box …";
   out.innerHTML = `<span style='color:var(--muted)'>${hinweis}</span>`;
   btn.disabled = true;
   const quellen = modus === "gemini" ? ["remote", "remote", "gemini"]
+                : modus === "mistral" ? ["remote", "remote", "mistral"]
                 : modus ? ["remote", "remote", "base", "medium"] : ["remote", "remote", "remote"];
   try {
     const r = await adminFetch("/api/admin/transcribe-compare", {
@@ -4891,6 +4960,12 @@ function updateBotProvider() {
   const p = document.getElementById("bot-provider").value;
   document.querySelectorAll(".prov-ollama").forEach(e => e.style.display = p === "ollama" ? "" : "none");
   document.querySelectorAll(".prov-gemini").forEach(e => e.style.display = p === "gemini" ? "" : "none");
+  // Mistral-Felder auch zeigen, wenn Mistral nur als Ausweich dient
+  const aw = document.getElementById("bot-ausweich").value === "mistral";
+  document.querySelectorAll(".prov-mistral").forEach(e => e.style.display = (p === "mistral" || (p === "ollama" && aw)) ? "" : "none");
+  document.querySelectorAll(".prov-ausweich").forEach(e => e.style.display = p === "ollama" ? "" : "none");
+  const aw2 = document.getElementById("bot-ausweich2").value === "ollama_cloud";
+  document.querySelectorAll(".prov-cloud").forEach(e => e.style.display = (p === "ollama_cloud" || (p === "ollama" && aw2)) ? "" : "none");
 }
 
 async function loadBotAdmin() {
@@ -4969,6 +5044,14 @@ async function loadBotAdmin() {
     loadBotsWeitere();
     document.getElementById("bot-gemini-model").value = d.gemini_model || "";
     document.getElementById("bot-gemini-key").value   = d.gemini_api_key || "";
+    document.getElementById("bot-mistral-model").value  = d.mistral_model || "mistral-large-4";
+    document.getElementById("bot-mistral-effort").value = d.mistral_reasoning_effort || "low";
+    document.getElementById("bot-mistral-key").value    = d.mistral_api_key || "";
+    document.getElementById("bot-ausweich").value       = d.ausweich_provider || "";
+    document.getElementById("bot-ausweich-s").value     = d.ausweich_nach_s ?? 15;
+    document.getElementById("bot-ausweich2").value      = d.ausweich2_provider || "";
+    document.getElementById("bot-cloud-model").value    = d.ollama_cloud_model || "beam";
+    document.getElementById("bot-cloud-key").value      = d.ollama_cloud_api_key || "";
     loadGeminiModels();   // Datalist mit echten Modell-IDs füllen
     updateBotProvider();
     loadTts();            // TTS-Engine-Dropdown
@@ -5429,6 +5512,14 @@ async function saveBotAdmin() {
     ollama_token:          document.getElementById("bot-ollama-token").value,
     gemini_model:          document.getElementById("bot-gemini-model").value,
     gemini_api_key:        document.getElementById("bot-gemini-key").value,
+    mistral_model:         document.getElementById("bot-mistral-model").value,
+    mistral_reasoning_effort: document.getElementById("bot-mistral-effort").value,
+    mistral_api_key:       document.getElementById("bot-mistral-key").value,
+    ausweich_provider:     document.getElementById("bot-ausweich").value,
+    ausweich_nach_s:       numOderStandard("bot-ausweich-s", 15),
+    ausweich2_provider:    document.getElementById("bot-ausweich2").value,
+    ollama_cloud_model:    document.getElementById("bot-cloud-model").value,
+    ollama_cloud_api_key:  document.getElementById("bot-cloud-key").value,
     ollama_keep_alive:     keepAliveWert(document.getElementById("bot-ollama-keepalive").value),
     control: {
       enabled:   document.getElementById("ctl-enabled").checked,
@@ -5628,7 +5719,8 @@ async function nachrichtLoeschen(id) {
 
 // ── KI-Dienste (03.11.) ──────────────────────────────────────────────────
 const KI_NAMEN = {ollama: "GPU-Box", box: "GPU-Box", mistral: "Mistral", gemini: "Gemini",
-                  openrouter: "OpenRouter", aus: "aus", piper: "Piper lokal", lokal: "lokal"};
+                  openrouter: "OpenRouter", aus: "aus", piper: "Piper lokal", lokal: "lokal",
+                  ollama_cloud: "Ollama Cloud"};
 const KI_NAMEN_TTS = {mistral: "Mistral, dann Piper", piper: "Piper lokal", aus: "aus"};
 let kiDaten = null;
 
@@ -6235,6 +6327,8 @@ async function loadDebugModelList() {
   } catch(e) { /* still */ }
 }
 let gemModels = [];
+let misModels = [];
+let cloudModels = [];
 // Auch die Gemini-Modelle anbieten (2026-09-17): der Replay konnte vorher nur
 // Ollama-Modelle tauschen, obwohl Gemini konfiguriert ist und antwortet.
 // Gemini-Einträge tragen im Wert das Präfix "gemini:".
@@ -6247,6 +6341,13 @@ async function loadReplayModelLists() {
       if (r.ok && !d.error) gemModels = d.models || [];
     } catch(e) { /* Gemini optional */ }
   }
+  if (!misModels.length) {
+    try {
+      const r = await adminFetch("/api/admin/mistral-models");
+      const d = await r.json();
+      if (r.ok && !d.error) { misModels = d.models || []; cloudModels = d.cloud || []; }
+    } catch(e) { /* Mistral optional */ }
+  }
   document.querySelectorAll(".dbg-replay-model, .rb-model").forEach(fillDebugModelSelect);
 }
 function dbgModelOptions() {
@@ -6258,21 +6359,29 @@ function dbgModelOptions() {
   if (gemModels.length)
     html += '<optgroup label="Gemini (Google)">' +
       gemModels.map(m => `<option value="gemini:${esc(m)}">${esc(m)}</option>`).join("") + "</optgroup>";
+  if (misModels.length)
+    html += '<optgroup label="Mistral (Frankreich)">' +
+      misModels.map(m => `<option value="mistral:${esc(m)}">${esc(m)}</option>`).join("") + "</optgroup>";
+  if (cloudModels.length)
+    html += '<optgroup label="Ollama Cloud (USA)">' +
+      cloudModels.map(m => `<option value="cloud:${esc(m)}">${esc(m)}</option>`).join("") + "</optgroup>";
   return html;
 }
 function fillDebugModelSelect(sel) {
-  if (dbgModels.length || gemModels.length) sel.innerHTML = dbgModelOptions();
+  if (dbgModels.length || gemModels.length || misModels.length || cloudModels.length) sel.innerHTML = dbgModelOptions();
 }
 // Auswahlwert -> {provider, model}
 function replayAuswahl(wert) {
   const v = (wert || "").trim();
-  return v.startsWith("gemini:") ? { provider: "gemini", model: v.slice(7) }
-                                 : { provider: v ? "ollama" : "", model: v };
+  if (v.startsWith("gemini:"))  return { provider: "gemini",  model: v.slice(7) };
+  if (v.startsWith("mistral:")) return { provider: "mistral", model: v.slice(8) };
+  if (v.startsWith("cloud:"))   return { provider: "ollama_cloud", model: v.slice(6) };
+  return { provider: v ? "ollama" : "", model: v };
 }
 async function replayTrace(room, ts, btn) {
   _dbgPauseBis = Infinity;   // waehrend des Laufs nie neu laden (ein Modell braucht auch mal > 60 s)
   const wrap  = btn.closest(".dbg-replay");
-  const model = wrap.querySelector(".dbg-replay-model").value.trim();
+  const wahl  = replayAuswahl(wrap.querySelector(".dbg-replay-model").value);
   const out   = wrap.querySelector(".dbg-replay-result");
   btn.disabled = true;
   out.style.display = "";
@@ -6281,7 +6390,7 @@ async function replayTrace(room, ts, btn) {
     const r = await adminFetch("/api/admin/debug-replay", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ room, ts, model }),
+      body: JSON.stringify({ room, ts, model: wahl.model, provider: wahl.provider }),
     });
     const d = await r.json();
     if (d.error) { out.textContent = "Fehler: " + d.error; }
