@@ -11291,20 +11291,45 @@ class TXServer:
                                  city: str, description: str = "FRN WebTX",
                                  band_channel: str = "PC Only",
                                  country: str = "Germany") -> bytes:
+        # Aufbau wie im aktuellen Java-FRN_Client (Build 02/2026, aus dem
+        # Bytecode gelesen, 07.11.2026): ohne den <U8TF>-Block, den der
+        # im Mai mitgeschnittene aeltere Client noch anhaengte -- der Sysman
+        # lehnte damit drei Registrierungen mit "NOK" ab.
         on_field   = f"{callsign}, {name}"
-        city_field = f"{city} - -"
-        fields = [
-            (0, email), (2, on_field), (3, band_channel),
-            (4, description), (5, country), (6, city_field),
-        ]
-        u8tf = "".join(f"{fid:X}{len(v):02X}{v}" for fid, v in fields)
+        city_field = f"{city} - "
         msg = (
             f"IG:<ON>{on_field}</ON><EA>{email}</EA>"
             f"<BC>{band_channel}</BC><DS>{description}</DS>"
-            f"<NN>{country}</NN><CT>{city_field}</CT>"
-            f"<U8TF>{u8tf}</U8TF>\r\n"
+            f"<NN>{country}</NN><CT>{city_field}</CT>\r\n"
         )
-        return msg.encode()
+        # Der Client laeuft laut Anleitung mit -Dfile.encoding=CP1252 und
+        # schickt Umlaute so. Als UTF-8 kam "Jörg" beim Sysman als "JÃ¶rg"
+        # an -- verletzt die Namensregel (Gross-/Kleinschreibung je
+        # Buchstabenfolge) und gibt NOK.
+        try:
+            return msg.encode("cp1252")
+        except UnicodeEncodeError:
+            return msg.encode()
+
+    @staticmethod
+    def _frn_operator_fehler(callsign: str, name: str) -> str:
+        """Regeln des FRN-Systems DE fuer neue Passwortanfragen (seit
+        01.01.2025, freeradionetwork.de/please_read.html#operatorname).
+        Liefert eine Fehlermeldung oder "" wenn alles passt."""
+        erlaubt = re.compile(r"^[^\W_]+(?:[ \-/][^\W_]+)*$")   # Buchstaben/Ziffern, Leerzeichen - /
+        if len(callsign) < 2 or callsign.isdigit():
+            return "Rufzeichen: mindestens 2 Zeichen und nicht nur Ziffern."
+        if not (callsign[0].isdigit() or callsign[0].isupper()) or callsign != callsign.upper():
+            return "Rufzeichen: nur Großbuchstaben, erstes Zeichen Großbuchstabe oder Ziffer."
+        if not erlaubt.match(callsign):
+            return "Rufzeichen: nur Buchstaben, Ziffern, Leerzeichen, - und / (keine Satzzeichen)."
+        if not erlaubt.match(name):
+            return "Name: nur Buchstaben, Ziffern, Leerzeichen, - und / (keine Satzzeichen wie . , ;)."
+        for folge in re.findall(r"[^\W\d_]+", name):
+            if not (folge[0].isupper() and (len(folge) == 1 or folge[1:].islower())):
+                return (f"Name: „{folge}“ — jede Buchstabenfolge beginnt mit einem Großbuchstaben, "
+                        "der Rest klein (z. B. „Jörg“, „Repeater Lp1“ statt „REPEATER LP1“).")
+        return ""
 
     async def handle_admin_register(self, request):
         """POST /api/admin/register — request a new FRN account password via sysman."""
@@ -11322,6 +11347,9 @@ class TXServer:
         city     = str(body.get("city",     "")).strip()
         if not callsign or not name or not email or not city:
             return web.json_response({"error": "callsign, name, email und city sind Pflichtfelder"}, status=400)
+        regel = self._frn_operator_fehler(callsign, name)
+        if regel:
+            return web.json_response({"error": regel}, status=400)
 
         # Prüfe ob die MX-Server der Email-Domain per IPv4 erreichbar sind (Sysman ist IPv4-only)
         email_domain = email.split("@")[-1]
@@ -11404,7 +11432,8 @@ class TXServer:
         sysman_host = "sysman.freeradionetwork.de"
         sysman_port = 10025
         msg = self._build_frn_register_msg(callsign, name, email, city)
-        log.info("FRN-Registrierung: %s <%s> via %s:%d", callsign, email, sysman_host, sysman_port)
+        log.info("FRN-Registrierung: %r <%s> Stadt %r via %s:%d", f"{callsign}, {name}", email, city,
+                 sysman_host, sysman_port)
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(sysman_host, sysman_port), timeout=10
@@ -11428,8 +11457,9 @@ class TXServer:
         elif resp_text.upper() == "NOK":
             return web.json_response({
                 "error": "Sysman hat abgelehnt (NOK). Mögliche Ursachen: "
-                         "Rufzeichen oder E-Mail bereits vergeben, IP-Sperre nach vorheriger Registrierung, "
-                         "oder der Account ist gerade online. "
+                         "Rufzeichen+Name schon mit anderer E-Mail vergeben, Wegwerf-Adresse, "
+                         "Name verstößt gegen die FRN-Regeln (freeradionetwork.de/please_read.html), "
+                         "zu viele Anfragen, oder der Account ist gerade online. "
                          "Bitte direkt auf freeradionetwork.de registrieren."
             }, status=400)
         else:
