@@ -1,0 +1,10 @@
+# Nur Programmdateien gehoeren ins Image -- Zugangsdaten, Laufzeit-Daten
+# und Sicherungen nie (die kommen per Volume).
+*
+!*.py
+!*.html
+!*.js
+!requirements*.txt
+*.bak*
+*.vor-*
+__pycache__

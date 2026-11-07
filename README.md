@@ -51,7 +51,7 @@ Die KI-Server (Whisper, Voice-TTS, Ollama) laufen als **eigenständige Dienste**
 
 - Laufender **FRN_Server** (Java JAR, nicht in diesem Repo enthalten)
 - **Icecast2** — im Docker-Stack enthalten, oder extern
-- Python ≥ 3.11 mit `aiohttp`, `numpy`, `scipy`
+- Python 3.13 (Debian 13, so im Betrieb getestet; mindestens 3.10) mit den Paketen aus `requirements.txt`
 - `libgsm1` und `ffmpeg` installiert
 
 ## Schnellstart (Docker)
@@ -75,12 +75,16 @@ cp config/config.json.example config/config.json
 #    → frn.server: Adresse des FRN_Server (host.docker.internal = lokaler Host)
 #    → frn_stream_account: FRN-Zugangsdaten für Auto-Discovery und Streams
 
-# 4. Starten (Basis, ohne Whisper)
-docker compose up -d
-
-# 4b. Starten MIT Whisper-Transkription (KI-Variante)
-WITH_WHISPER=true docker compose up -d --build
+# 4. Bauen und starten (TX-Server, Streams, Icecast, lokales Whisper auf der CPU)
+docker compose up -d --build
+#    GPU-Whisper woanders? WHISPER_REMOTE_URL in .env setzen (siehe unten)
 ```
+
+Laufzeit-Daten des TX-Servers (Nachrichten, Tagesrückblick, Tagesprogramm,
+Stimmproben, Sprachvorlagen in `stimmen_ref/` und `voices/`, Anmelde-Tokens)
+liegen im Volume `frn-daten` (`/app/daten`, Umgebungsvariable `FRN_DATEN`),
+Archiv und Aufnahmen in `frn-archive` und `frn-recordings`. Ohne `FRN_DATEN`
+(Betrieb per systemd) liegen die Daten wie bisher neben dem Programm.
 
 Danach erreichbar unter:
 - **Web-UI / PTT:** `http://localhost:8765`
@@ -90,7 +94,7 @@ Danach erreichbar unter:
 ## Schnellstart (ohne Docker / Raspberry Pi)
 
 ```bash
-pip install aiohttp numpy scipy
+pip install -r requirements.txt   # optional: requirements-whisper.txt
 apt install libgsm1 ffmpeg
 
 # TX-Server starten

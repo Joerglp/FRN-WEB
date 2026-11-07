@@ -18,6 +18,10 @@ import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Wie beim TX-Server: im Docker-Image liegt die config unter /app/config/
+# (FRN_CONFIG), sonst neben dem Programm.
+_CFG_PFAD = Path(os.environ.get("FRN_CONFIG") or Path(__file__).parent / "config.json")
+
 log = logging.getLogger(__name__)
 
 # ── Remote Whisper API ────────────────────────────────────────────────────────
@@ -158,7 +162,7 @@ def _get_whisper_remote_url() -> str:
     if env_url:
         return env_url
     try:
-        cfg_path = Path(__file__).parent / "config.json"
+        cfg_path = _CFG_PFAD
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         return cfg.get("whisper", {}).get("remote_url", "").strip()
     except Exception:
@@ -167,7 +171,7 @@ def _get_whisper_remote_url() -> str:
 
 def _get_whisper_initial_prompt() -> str:
     try:
-        cfg_path = Path(__file__).parent / "config.json"
+        cfg_path = _CFG_PFAD
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         return cfg.get("whisper", {}).get("initial_prompt", "").strip()
     except Exception:
@@ -181,7 +185,7 @@ def _get_whisper_hotwords() -> str:
     weder im Standardwortschatz noch im initial_prompt.
     """
     try:
-        cfg_path = Path(__file__).parent / "config.json"
+        cfg_path = _CFG_PFAD
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         return cfg.get("whisper", {}).get("hotwords", "").strip()
     except Exception:
@@ -598,7 +602,7 @@ AUSWEICH_LETZT: tuple | None = None   # (Zeit, Grund, Sekunden, Text vorhanden)
 
 def _ausweich_cfg() -> dict | None:
     try:
-        cfg = json.loads((Path(__file__).parent / "config.json").read_text(encoding="utf-8"))
+        cfg = json.loads((_CFG_PFAD).read_text(encoding="utf-8"))
     except Exception:
         return None
     w = cfg.get("whisper", {})
@@ -771,8 +775,8 @@ class TranscriptionPipeline:
         self.cfg      = cfg
         self.wav_dir  = Path(cfg.get("wav_dir", "/opt/FRN/recordings"))
         self.wav_dir.mkdir(parents=True, exist_ok=True)
-        self.log_file = Path(cfg.get("log_file",
-                                     "/opt/FRN/stream/transcription.log"))
+        self.log_file = Path(cfg.get("log_file", os.path.join(
+            os.environ.get("FRN_DATEN") or "/opt/FRN/stream", "transcription.log")))
         self._setup_cleanup()
 
     def _setup_cleanup(self):

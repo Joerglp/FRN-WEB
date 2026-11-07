@@ -1,0 +1,8 @@
+# Laufzeit-Abhaengigkeiten von TX-Server, Stream und Transkription.
+# Gilt fuer den Betrieb per systemd (pip install -r requirements.txt)
+# und fuer das Docker-Image. Getestet mit Python 3.13 (Debian 13).
+aiohttp>=3.13,<4
+numpy>=2.2,<3
+scipy>=1.15,<2
+requests>=2.32,<3
+paho-mqtt>=2.1,<3

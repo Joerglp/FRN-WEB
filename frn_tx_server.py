@@ -69,6 +69,11 @@ except Exception:
 
 log = logging.getLogger("frn_tx")
 
+# Laufzeit-Daten (Notizbuch-Vorschlaege, Nachrichten, Rueckblick, Stimmproben,
+# Tokens ...). Ohne FRN_DATEN wie bisher neben dem Programm; im Docker-Image
+# zeigt es auf ein Volume, sonst waeren die Daten nach jedem Neubau weg.
+_DATEN = Path(os.environ.get("FRN_DATEN") or Path(__file__).parent)
+
 # ── FRN protocol constants ──────────────────────────────────────────────────
 FRN_PROTO_VERSION = "2014003"
 FRN_TYPE_PC_ONLY  = "2"
@@ -876,7 +881,7 @@ class TXServer:
         self._user_tx_locks: dict[str, asyncio.Lock] = {}
         self._users_path: Path | None = None
         self._rooms_path: Path | None = None
-        self._tokens_path: Path = Path(__file__).parent / "tx_tokens.json"
+        self._tokens_path: Path = _DATEN / "tx_tokens.json"
         self._load_tokens()
         # Brute-Force-Schutz: Login-Fehlversuche pro Client-IP (Zeitstempel)
         self._login_fails: dict[str, list[float]] = {}
@@ -892,12 +897,12 @@ class TXServer:
         self._bot_zust: dict[str, dict] = {}
         self._bot_own_tx: dict[str, list] = {}      # Raum → [(t0, t1, text), …], alle Bots
         self._bot_tx_wer: dict[float, str] = {}     # t0 einer eigenen Sendung → Bot-Name
-        self._bot_protokoll_pfad = Path(__file__).parent / "bot_replies.jsonl"
+        self._bot_protokoll_pfad = _DATEN / "bot_replies.jsonl"
         self._prompt_anker: dict = {}   # Raumname (sonst id(Verlauf)) -> ts des ersten Spruchs
         # Stiller Mitschreiber (2026-09-24): Vorschlaege, die erst nach
         # Freigabe im Web ins Notizbuch wandern. Eigene Datei statt config.json,
         # das sind Daten, keine Einstellungen.
-        self._notiz_vorschlaege_pfad = Path(__file__).parent / "notiz_vorschlaege.json"
+        self._notiz_vorschlaege_pfad = _DATEN / "notiz_vorschlaege.json"
         self._mitschreiber_offen: dict[str, float] = {}   # Raum -> Treffer-ts (Lauf geplant)
         # Whisper-Verlaesslichkeit je Verlaufszeile (Schluessel: ts), fuer den
         # Vermerk "[schlecht verstanden]" im Prompt (2026-09-25).
@@ -906,15 +911,15 @@ class TXServer:
         # Gedaechtnis ueber Neustarts retten (2026-09-17): 19 von 90
         # Vorstellungen seit 13.08. kamen direkt nach einem Dienst-Neustart,
         # weil diese drei Speicher nur im Arbeitsspeicher lagen.
-        self._bot_state_path = Path(__file__).parent / "bot_state.json"
-        self._tagesprogramm_pfad = Path(__file__).parent / "tagesprogramm.json"
+        self._bot_state_path = _DATEN / "bot_state.json"
+        self._tagesprogramm_pfad = _DATEN / "tagesprogramm.json"
         self._tagesprogramm: dict = {}
         self._tagesprogramm_laden()
-        self._rueckblick_pfad = Path(__file__).parent / "tagesrueckblick.json"
+        self._rueckblick_pfad = _DATEN / "tagesrueckblick.json"
         self._rueckblick: dict = {}
         self._rueckblick_laeuft = False
         self._rueckblick_laden()
-        self._nachrichten_pfad = Path(__file__).parent / "nachrichten.json"
+        self._nachrichten_pfad = _DATEN / "nachrichten.json"
         self._nachrichten: list[dict] = []
         self._nachgang: dict[str, dict] = {}       # Raum → laufendes Gespraech mit Robert
         self._nachgang_bis: dict[str, float] = {}  # Raum → bis hierhin ausgewertet
@@ -935,7 +940,7 @@ class TXServer:
         # _speaker_identify/_speaker_enroll. Enrollments (Name -> Liste von
         # 256-dim Embedding-Vektoren) liegen in einer eigenen Datei, nicht in
         # config.json (waere dort zu gross/unhandlich).
-        self._speaker_enrollments_path = Path(__file__).parent / "speaker_enrollments.json"
+        self._speaker_enrollments_path = _DATEN / "speaker_enrollments.json"
         self._speaker_enrollments: dict[str, list[list[float]]] = {}
         self._speaker_quellen: dict[str, list[str]] = {}
         self._sprecher_details: dict[str, dict] = {}   # wav_path -> Ergebnis der Erkennung
@@ -1215,13 +1220,13 @@ class TXServer:
 
     # ── Clips ──────────────────────────────────────────────────────────────
 
-    _CLIPS_DIR = Path(__file__).parent / "clips"
+    _CLIPS_DIR = _DATEN / "clips"
 
     def _load_clips(self) -> list[dict]:
         """Load clip list from config.ini [clips] section."""
         import configparser
         ini = configparser.ConfigParser()
-        ini_path = Path(__file__).parent / "config.ini"
+        ini_path = _DATEN / "config.ini"
         if not ini_path.exists():
             return []
         ini.read(ini_path, encoding="utf-8")
@@ -1443,7 +1448,7 @@ class TXServer:
         return buf.getvalue()
 
     _tts_ausweich_letzt: tuple | None = None   # (Zeit, Grund, Sekunden, ok)
-    _STIMMEN_REF = Path(__file__).parent / "stimmen_ref"
+    _STIMMEN_REF = _DATEN / "stimmen_ref"
 
     async def _mistral_tts_wav(self, text: str, speaker: str, grund: str) -> bytes | None:
         """Sprachausgabe ueber Mistral Voxtral mit geklonter Stimme. None, wenn
@@ -7450,7 +7455,7 @@ class TXServer:
         # Vorhandene ID behalten (Voice-Server kennt sie schon)
         alt        = (user.get("voice") or {}).get("sample")
         spk        = Path(alt).stem if alt else self._speaker_id(uname)
-        voices_dir = Path(__file__).parent / "voices"
+        voices_dir = _DATEN / "voices"
         voices_dir.mkdir(exist_ok=True)
         ziel_path  = voices_dir / f"{spk}.wav"
         # Erst in eine Zwischendatei: ein zu kurzer Upload ueberschrieb und
@@ -9558,7 +9563,7 @@ class TXServer:
         if len(raw) < 10000:
             return web.json_response({"error": "Datei zu klein"}, status=400)
 
-        voices_dir = Path(__file__).parent / "voices"
+        voices_dir = _DATEN / "voices"
         voices_dir.mkdir(exist_ok=True)
         wav_path = voices_dir / f".{name}-{uuid.uuid4().hex[:8]}.wav"
         # Datei statt pipe: MP4/M4A braucht einen durchsuchbaren Eingang
@@ -10311,7 +10316,7 @@ class TXServer:
         cfg = None
         try:
             import configparser
-            ini = Path(__file__).parent / "config.ini"
+            ini = _DATEN / "config.ini"
             if ini.exists():
                 cp = configparser.ConfigParser()
                 cp.read(ini)
@@ -12371,7 +12376,7 @@ def main():
         if not transcfg:
             import configparser
             ini = configparser.ConfigParser()
-            ini_path = Path(__file__).parent / "config.ini"
+            ini_path = _DATEN / "config.ini"
             if ini_path.exists():
                 ini.read(ini_path)
                 if ini.has_section("transcription"):

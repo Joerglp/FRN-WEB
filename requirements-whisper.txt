@@ -1,0 +1,4 @@
+# Optional: lokales Whisper (faster-whisper auf der CPU) -- nur noetig ohne
+# GPU-Whisper (whisper.remote_url) bzw. fuer den Docker-Dienst "whisper".
+-r requirements.txt
+faster-whisper>=1.2,<2
