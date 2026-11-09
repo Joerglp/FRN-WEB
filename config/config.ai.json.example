@@ -20,9 +20,9 @@
     "mode": "both"
   },
   "frn_stream_account": {
-    "_comment": "Zugangsdaten für die Icecast-Stream-Clients (frn_stream_runner). Leer = aus tx_rooms.json.",
-    "email":           "deine@email.de",
-    "password":        "DEIN_FRN_PASSWORT",
+    "_comment": "Nur fuer die Auto-Discovery der Raeume, wenn tx_rooms.json leer ist. Die Konten fuer Senden und Streams stehen zentral in konten.json (setup.sh / Admin-Panel → FRN-Konten).",
+    "email":           "",
+    "password":        "",
     "callsign_prefix": "WEB"
   },
   "whisper": {

@@ -1,10 +1,13 @@
 {
+  "_comment": "Wird von setup.sh angelegt. Weitere Benutzer: python3 tx_add_user.py <name> <callsign> [--admin] oder im Admin-Panel.",
   "users": [
     {
-      "username":      "admin",
-      "password_hash": "<SHA-256 des Passworts — generieren mit: python3 server/tx_add_user.py>",
-      "callsign":      "WebTX-Admin",
-      "is_admin":      true
+      "username": "admin",
+      "callsign": "WebTX-Admin",
+      "is_admin": true,
+      "default_room": "",
+      "frn_only": false,
+      "password_hash": "pbkdf2_sha256$240000$<salt>$<hash>"
     }
   ]
 }

@@ -34,6 +34,8 @@ import re
 import secrets
 import signal
 import struct
+import shutil
+import sqlite3
 import subprocess
 import time
 import uuid
@@ -59,6 +61,11 @@ try:
     _TRANSCRIPTION_AVAILABLE = True
 except ImportError:
     _TRANSCRIPTION_AVAILABLE = False
+
+try:
+    import frn_konten as _konten   # zentrale FRN-Konten (2026-11-09)
+except Exception:
+    _konten = None
 
 try:
     import frn_archive as _archive
@@ -1141,13 +1148,14 @@ class TXServer:
         with open(path) as f:
             data = json.load(f)
         for r in data.get("rooms", []):
+            k = self._zentral_tx_konto(r["mount"])
             room = FRNTXRoom(
                 name       = r["name"],
                 frn_server = r.get("frn_server", self.args.frn_server),
                 frn_port   = r.get("frn_port",   self.args.frn_port),
-                email      = r["email"],
-                password   = r["password"],
-                callsign   = r["callsign"],
+                email      = k["email"] if k else r["email"],
+                password   = k["password"] if k else r.get("password", ""),
+                callsign   = k["name"] if k else r["callsign"],
             )
             self._set_room_callback(room)
             self.rooms[r["mount"]] = room
@@ -1176,21 +1184,30 @@ class TXServer:
             f.write("\n")
         Path(self._users_path).chmod(0o600)   # Passwort-Hashes: nicht world-readable
 
+    @staticmethod
+    def _zentral_tx_konto(mount: str) -> dict | None:
+        """TX-Konto aus der zentralen Kontenliste (konten.json), sonst None."""
+        try:
+            k = _konten.fuer(mount, "tx") if _konten else None
+        except Exception as e:
+            log.warning("Zentrale Konten nicht lesbar: %s", e)
+            return None
+        return k if k and k.get("password") else None
+
     def _save_rooms(self):
         if not self._rooms_path:
             return
-        data = {"rooms": [
-            {
-                "mount":      mount,
-                "name":       r.name,
-                "callsign":   r.callsign,
-                "email":      r.email,
-                "password":   r.password,
-                "frn_server": r.server,
-                "frn_port":   r.port,
-            }
-            for mount, r in self.rooms.items()
-        ]}
+        rows = []
+        for mount, r in self.rooms.items():
+            row = {"mount": mount, "name": r.name, "callsign": r.callsign,
+                   "email": r.email, "password": r.password,
+                   "frn_server": r.server, "frn_port": r.port}
+            # Zentral verwaltet: Zugangsdaten nicht doppelt ablegen
+            if self._zentral_tx_konto(mount):
+                row.pop("password")
+                row["konto"] = "zentral (konten.json)"
+            rows.append(row)
+        data = {"rooms": rows}
         with open(self._rooms_path, "w") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
@@ -1580,8 +1597,10 @@ class TXServer:
             low = text.lower()
             # Eigene Sendungen/Parrot nicht beantworten (sonst Endlosschleife)
             cs = (callsign or "").lower()
+            if _konten and _konten.rolle_von(cs):
+                return
             for pref in ar_g.get("ignore_callsigns",
-                                 ["tx-", "stream-", "web-", "audio test"]):
+                                 ["tx-", "stream-", "stream,", "stream2,", "stream3,", "web-", "audio test"]):
                 if cs.startswith(pref.lower()):
                     return
             room = next((r for r in self.rooms.values()
@@ -7559,7 +7578,7 @@ class TXServer:
         "enabled":          False,
         "auto_send":        False,
         "names":            ["jörg"],
-        "ignore_callsigns": ["tx-", "stream-", "web-", "audio test"],
+        "ignore_callsigns": ["tx-", "stream-", "stream,", "stream2,", "stream3,", "web-", "audio test"],
         "cooldown_s":       90,
         "ollama_url":       "http://192.0.0.17:11434",
         "ollama_model":     "llama3.2:3B",
@@ -10985,6 +11004,259 @@ class TXServer:
         log.info("Admin: deleted room '%s'", mount)
         return web.json_response({"ok": True})
 
+    # ── Zentrale FRN-Konten (2026-11-09) ────────────────────────────────────
+    # Passwoerter nur in der FRNPasswd.xml, Zuordnung in konten.json
+    # (frn_konten.py). Aenderungen werden erst bei Funkstille angewendet:
+    # Stream-/Server-Neustart bzw. TX-Raum neu verbinden.
+
+    _KONTEN_RUHE_S = 240
+
+    def _funkstille_s(self) -> float:
+        if any(r._tx_lock.locked() for r in self.rooms.values()):
+            return 0.0
+        letzte = max((r._rx_letzt for r in self.rooms.values()), default=0.0)
+        if _ARCHIVE_AVAILABLE:
+            try:
+                con = sqlite3.connect(str(_archive.DB_PATH), timeout=5)
+                try:
+                    t = con.execute("SELECT MAX(timestamp) FROM transmissions").fetchone()[0]
+                finally:
+                    con.close()
+                letzte = max(letzte, float(t or 0))
+            except Exception:
+                pass
+        return time.time() - letzte
+
+    def _konten_vormerken(self, aktionen):
+        offen = getattr(self, "_konten_offen", None)
+        if offen is None:
+            offen = self._konten_offen = set()
+        offen.update(aktionen)
+        task = getattr(self, "_konten_task", None)
+        if offen and (task is None or task.done()):
+            self._konten_task = asyncio.create_task(self._konten_anwenden_loop())
+
+    async def _konten_anwenden_loop(self, sofort: bool = False):
+        while getattr(self, "_konten_offen", None):
+            if sofort or self._funkstille_s() >= self._KONTEN_RUHE_S:
+                # Kein return: was waehrend des Anwendens neu dazukam, laeuft
+                # in der naechsten Runde mit (sonst blieb es liegen).
+                await self._konten_anwenden()
+                continue
+            await asyncio.sleep(15)
+
+    async def _systemctl(self, *args) -> str:
+        if not shutil.which("systemctl"):
+            return "systemctl fehlt – bitte manuell neu starten"
+        p = await asyncio.create_subprocess_exec(
+            "systemctl", *args, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        out, _ = await p.communicate()
+        return "" if p.returncode == 0 else (out.decode(errors="replace").strip() or f"rc={p.returncode}")
+
+    async def _konten_anwenden(self):
+        offen = sorted(self._konten_offen)
+        self._konten_offen = set()
+        ergebnis = []
+        if "server" in offen:
+            try:
+                k = _konten.konto(_konten.lade_zuordnung().get("server", ""))
+                if k and k["password"]:
+                    await asyncio.to_thread(_konten.setze_server_properties, k["email"], k["password"])
+                    fehler = await self._systemctl("restart", "frn-server")
+                    ergebnis.append(f"FRN-Server ({k['name']}): {fehler or 'neu gestartet'}")
+                    await asyncio.sleep(5)
+            except Exception as e:
+                ergebnis.append(f"FRN-Server: Fehler {e}")
+        for a in offen:
+            rolle, _, mount = a.partition(":")
+            if rolle == "stream":
+                fehler = await self._systemctl("restart", f"frn-stream@{mount}")
+                ergebnis.append(f"Stream {mount}: {fehler or 'neu gestartet'}")
+            elif rolle == "tx":
+                room = self.rooms.get(mount)
+                k = self._zentral_tx_konto(mount)
+                if room and k:
+                    room.email, room.password, room.callsign = k["email"], k["password"], k["name"]
+                    await room.disconnect()
+                    self._save_rooms()
+                    ergebnis.append(f"TX {mount}: {k['name']} (verbindet beim naechsten Senden)")
+        self._konten_ergebnis = {"zeit": time.time(), "text": ergebnis}
+        for zeile in ergebnis:
+            log.info("Konten angewendet: %s", zeile)
+
+    def _konten_betroffen(self, email: str) -> set:
+        z = _konten.lade_zuordnung()
+        e = (email or "").lower()
+        a = set()
+        for mount, raum in z.get("raeume", {}).items():
+            for rolle in _konten.ROLLEN:
+                if (raum.get(rolle) or "").lower() == e:
+                    a.add(f"{rolle}:{mount}")
+        if (z.get("server") or "").lower() == e:
+            a.add("server")
+        return a
+
+    def _konten_verwendung(self, z: dict) -> dict:
+        v = {}
+        def add(email, text):
+            if email:
+                v.setdefault(email.lower(), []).append(text)
+        for mount, raum in z.get("raeume", {}).items():
+            name = self.rooms[mount].name if mount in self.rooms else mount
+            add(raum.get("stream"), f"Stream {name}")
+            add(raum.get("tx"), f"TX {name}")
+        add(z.get("server"), "FRN-Server")
+        for e in z.get("repeater", []):
+            add(e, "Repeater")
+        return v
+
+    async def handle_admin_konten(self, request):
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if not _konten:
+            return web.json_response({"error": "frn_konten.py fehlt"}, status=500)
+        z = _konten.lade_zuordnung()
+        try:
+            konten = _konten.lade_konten(z)
+        except Exception as e:
+            return web.json_response({"error": f"FRNPasswd.xml: {e}"}, status=500)
+        verw = self._konten_verwendung(z)
+        return web.json_response({
+            "aktiv": _konten.aktiv(),
+            "passwd_xml": str(_konten.passwd_pfad(z)),
+            "konten": [{"name": k["name"], "email": k["email"], "disabled": k["disabled"],
+                        "passwort": bool(k["password"]),
+                        "verwendet": verw.get(k["email"].lower(), [])} for k in konten],
+            "zuordnung": {"server": z.get("server", ""),
+                          "raeume": z.get("raeume", {}),
+                          "repeater": z.get("repeater", [])},
+            "raeume": [{"mount": m, "name": r.name} for m, r in self.rooms.items()],
+            "offen": sorted(getattr(self, "_konten_offen", set()) or []),
+            "funkstille_s": round(self._funkstille_s()),
+            "ruhe_s": self._KONTEN_RUHE_S,
+            "ergebnis": getattr(self, "_konten_ergebnis", None),
+        })
+
+    async def handle_admin_konten_zuordnung(self, request):
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        alt = _konten.lade_zuordnung()
+        konten = _konten.lade_konten(alt)
+        def pruefe(email):
+            email = (email or "").strip()
+            if email and not _konten.konto(email, konten):
+                raise ValueError(f"Konto {email} steht nicht in der FRNPasswd.xml")
+            return email
+        try:
+            neu = {
+                "passwd_xml": alt.get("passwd_xml", str(_konten.passwd_pfad(alt))),
+                "server_properties": alt.get("server_properties", "/opt/FRN/server.properties"),
+                "server": pruefe(body.get("server")),
+                "raeume": {},
+                "repeater": [pruefe(e) for e in body.get("repeater", []) if (e or "").strip()],
+            }
+            for mount, raum in (body.get("raeume") or {}).items():
+                if mount not in self.rooms:
+                    continue
+                neu["raeume"][mount] = {r: pruefe(raum.get(r)) for r in _konten.ROLLEN
+                                        if (raum.get(r) or "").strip()}
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        # Ein Konto darf nur einmal gleichzeitig online sein (AL=BLOCK)
+        benutzt = [e.lower() for raum in neu["raeume"].values() for e in raum.values()]
+        doppelt = sorted({e for e in benutzt if benutzt.count(e) > 1})
+        if doppelt:
+            return web.json_response(
+                {"error": "Konto mehrfach zugeordnet (FRN erlaubt pro Konto nur eine "
+                          "Verbindung): " + ", ".join(doppelt)}, status=400)
+        aktionen = set()
+        if (alt.get("server") or "").lower() != neu["server"].lower() and neu["server"]:
+            aktionen.add("server")
+        for mount in set(alt.get("raeume", {})) | set(neu["raeume"]):
+            a = alt.get("raeume", {}).get(mount, {})
+            n = neu["raeume"].get(mount, {})
+            for rolle in _konten.ROLLEN:
+                if (a.get(rolle) or "").lower() != (n.get(rolle) or "").lower():
+                    aktionen.add(f"{rolle}:{mount}")
+        _konten.speichere_zuordnung(neu)
+        self._konten_vormerken(aktionen)
+        log.info("Admin: Kontenzuordnung gespeichert, offen: %s", sorted(aktionen))
+        return web.json_response({"ok": True, "offen": sorted(aktionen)})
+
+    async def handle_admin_konten_konto(self, request):
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        email = (body.get("email") or "").strip()
+        name = (body.get("name") or "").strip()
+        pw = body.get("password") or ""
+        if not re.fullmatch(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+", email):
+            return web.json_response({"error": "E-Mail ungültig"}, status=400)
+        if not name or len(name) > 60 or any(c in name for c in "<>\r\n\t"):
+            return web.json_response({"error": "Name fehlt oder ungültig (max. 60 Zeichen)"}, status=400)
+        if any(c in pw for c in "\r\n"):
+            return web.json_response({"error": "Passwort ungültig"}, status=400)
+        z = _konten.lade_zuordnung()
+        konten = [dict(k) for k in _konten.lade_konten(z)]
+        k = _konten.konto(email, konten)
+        if k is None:
+            if not pw:
+                return web.json_response({"error": "Neues Konto braucht ein Passwort"}, status=400)
+            konten.append({"name": name, "email": email, "password": pw,
+                           "disabled": bool(body.get("disabled"))})
+            aktionen = set()
+        else:
+            pw_neu = bool(pw and pw != k["password"])
+            geaendert = k["name"] != name or pw_neu \
+                or k["disabled"] != bool(body.get("disabled", k["disabled"]))
+            k["name"] = name
+            if pw:
+                k["password"] = pw
+            k["disabled"] = bool(body.get("disabled", k["disabled"]))
+            aktionen = self._konten_betroffen(email) if geaendert else set()
+            if not pw_neu:
+                aktionen.discard("server")   # Name zaehlt nur fuer Clients, nicht fuer sysman
+        await asyncio.to_thread(_konten.speichere_konten, konten, z)
+        self._konten_vormerken(aktionen)
+        log.info("Admin: Konto %s gespeichert (%s), offen: %s", email, name, sorted(aktionen))
+        return web.json_response({"ok": True, "offen": sorted(aktionen)})
+
+    async def handle_admin_konten_konto_delete(self, request):
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        email = (request.query.get("email") or "").strip()
+        z = _konten.lade_zuordnung()
+        if self._konten_verwendung(z).get(email.lower()):
+            return web.json_response({"error": "Konto ist noch zugeordnet"}, status=409)
+        konten = [k for k in _konten.lade_konten(z) if k["email"].lower() != email.lower()]
+        await asyncio.to_thread(_konten.speichere_konten, konten, z)
+        log.info("Admin: Konto %s gelöscht", email)
+        return web.json_response({"ok": True})
+
+    async def handle_admin_konten_anwenden(self, request):
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if not getattr(self, "_konten_offen", None):
+            return web.json_response({"ok": True, "text": "nichts offen"})
+        task = getattr(self, "_konten_task", None)
+        if task and not task.done():
+            task.cancel()
+        self._konten_task = asyncio.create_task(self._konten_anwenden_loop(sofort=True))
+        return web.json_response({"ok": True})
+
     async def handle_admin_status(self, request):
         _, err = await self._require_admin(request)
         if err:
@@ -12300,6 +12572,11 @@ class TXServer:
         app.router.add_get   ("/api/admin/rooms",         self.handle_admin_rooms_list)
         app.router.add_post  ("/api/admin/rooms",         self.handle_admin_rooms_create)
         app.router.add_delete("/api/admin/rooms/{mount}", self.handle_admin_rooms_delete)
+        app.router.add_get   ("/api/admin/konten",            self.handle_admin_konten)
+        app.router.add_post  ("/api/admin/konten/zuordnung",  self.handle_admin_konten_zuordnung)
+        app.router.add_post  ("/api/admin/konten/konto",      self.handle_admin_konten_konto)
+        app.router.add_delete("/api/admin/konten/konto",      self.handle_admin_konten_konto_delete)
+        app.router.add_post  ("/api/admin/konten/anwenden",   self.handle_admin_konten_anwenden)
 
         app.router.add_get("/api/admin/status", self.handle_admin_status)
         app.router.add_get("/api/admin/debug-traces", self.handle_admin_debug_traces)

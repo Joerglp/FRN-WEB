@@ -27,3 +27,13 @@ nachrichten.json
 # Raum-Konten mit Passwörtern (Vorlage: tx_rooms.json.example)
 tx_rooms.json
 stimmen_ref/
+
+# Zentrale Kontenzuordnung (ohne Passwoerter, aber lokal)
+konten.json
+
+# Von setup.sh erzeugt (Zugangsdaten / lokal)
+.env
+frn_konten.xml
+config/icecast.xml
+stream-*.env
+sicherung/

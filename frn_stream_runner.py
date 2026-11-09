@@ -12,6 +12,11 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    import frn_konten as _konten   # zentrale Konten (konten.json), optional
+except Exception:
+    _konten = None
+
 BASE        = Path(__file__).parent
 CONFIG_PATH = Path(os.environ.get("CONFIG",    BASE / "config" / "config.json"))
 ROOMS_PATH  = Path(os.environ.get("ROOMS",     BASE / "config" / "tx_rooms.json"))
@@ -39,6 +44,13 @@ def start_stream(room_cfg, cfg):
     callsign = room_cfg.get("callsign", f"Stream-{mount.title()}")
     email    = room_cfg.get("email",    f"stream-{mount}@local")
     password = room_cfg.get("password", "streampass")
+    # Eigenes Stream-Konto aus konten.json: FRN laesst jedes Konto nur einmal
+    # gleichzeitig zu -- mit dem TX-Konto aus tx_rooms.json gaebe es AL=BLOCK,
+    # sobald der TX-Server sendet.
+    k = _konten.fuer(mount, "stream") if _konten else None
+    if k and k.get("password"):
+        callsign, email, password = k["name"], k["email"], k["password"]
+        print(f"[runner] {mount}: Stream-Konto '{callsign}' aus konten.json", flush=True)
     record   = os.environ.get("ENABLE_RECORDING", "yes") == "yes"
 
     ice_url = f"icecast://source:{ice_pass}@{ice_host}:{ice_port}/{mount}.mp3"

@@ -1,0 +1,12 @@
+{
+  "_comment": "Wird von setup.sh angelegt. Zugangsdaten stehen zentral in konten.json + Kontenliste (frn_konten.xml), hier nur Raum und Anzeigename.",
+  "rooms": [
+    {
+      "mount": "quasel",
+      "name": "Quasel-Ecke",
+      "callsign": "Web-Funk, Quasel-Ecke",
+      "email": "tx-quasel@example.org",
+      "konto": "zentral (konten.json)"
+    }
+  ]
+}

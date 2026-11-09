@@ -692,6 +692,16 @@ audio {
 .btn-icon:hover { border-color: var(--red); color: var(--red); }
 .btn-icon.edit:hover { border-color: var(--accent); color: var(--accent); }
 
+/* FRN-Konten (2026-11-09) */
+.konten-wrap { overflow-x: auto; }
+.konten-tab select, .konten-tab input[type=text], .konten-tab input[type=password] {
+  background: var(--bg, #0b1220); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 4px 6px; font: inherit; width: 100%; min-width: 0; box-sizing: border-box;
+}
+.konten-tab td small { color: var(--muted); }
+.konten-status { font-size: .82rem; margin: 0 0 14px; line-height: 1.5; }
+.konten-status .warn { color: var(--amber, #ffb74d); }
+
 /* Add-form */
 .admin-section-title {
   font-family: 'Share Tech Mono', monospace;
@@ -1394,6 +1404,50 @@ audio {
     </div>
 
     <!-- ── Server tab ── -->
+    <div id="admin-tab-konten" class="admin-tab-content konten-tab">
+      <div class="konten-status" id="konten-status">Lade …</div>
+
+      <div class="admin-section-title">Zuordnung</div>
+      <div class="konten-wrap">
+      <table class="admin-table">
+        <thead><tr><th>Raum</th><th>Stream (Mithören/Archiv)</th><th>TX (Robert, Susi, Web-Sender)</th></tr></thead>
+        <tbody id="konten-zuordnung"></tbody>
+      </table>
+      </div>
+      <div class="form-grid">
+        <div class="form-field">
+          <label>FRN-Server (Anmeldung am SystemManager)</label>
+          <select id="konten-server"></select>
+        </div>
+        <div class="form-field">
+          <label>Repeater (nur zur Erkennung, Konto liegt auf PiCQ)</label>
+          <div id="konten-repeater" style="display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.85rem"></div>
+        </div>
+      </div>
+      <button class="btn-save" onclick="kontenZuordnungSpeichern()">ZUORDNUNG SPEICHERN</button>
+      <div class="admin-msg" id="msg-konten-z"></div>
+
+      <div class="admin-section-title" style="margin-top:22px">Konten (FRNPasswd.xml)</div>
+      <div style="font-size:.78rem;color:var(--muted);margin-bottom:8px">
+        Name und E-Mail müssen zum beim SystemManager registrierten Konto passen.
+        Passwörter werden nie angezeigt – Feld leer lassen = unverändert.
+      </div>
+      <div class="konten-wrap">
+      <table class="admin-table">
+        <thead><tr><th>Name (Rufname, Name)</th><th>E-Mail</th><th>Passwort</th><th>Gesperrt</th><th>Verwendet</th><th></th></tr></thead>
+        <tbody id="konten-liste"></tbody>
+      </table>
+      </div>
+      <div class="admin-section-title">Neues Konto</div>
+      <div class="form-grid">
+        <div class="form-field"><label>Name *</label><input type="text" id="nk-name" placeholder="Webradio, Quasel-Ecke"></div>
+        <div class="form-field"><label>E-Mail *</label><input type="text" id="nk-email" placeholder="stream@example.org"></div>
+        <div class="form-field"><label>Passwort *</label><input type="password" id="nk-password" autocomplete="new-password"></div>
+      </div>
+      <button class="btn-save" onclick="kontoNeu()">KONTO ANLEGEN</button>
+      <div class="admin-msg" id="msg-konten"></div>
+    </div>
+
     <div id="admin-tab-server" class="admin-tab-content">
       <div class="admin-section-title">FRN-Server</div>
       <div class="form-grid">
@@ -4424,7 +4478,7 @@ function showBotSubTab(name) {
 // unveraendert, nur die Leiste oben ist neu geordnet.
 const ADMIN_GROUPS = [
   {id: "start",  icon: "🏠", label: "Übersicht", tabs: [["overview", "Übersicht"]]},
-  {id: "zugang", icon: "👥", label: "Zugang",    tabs: [["users", "Benutzer"], ["rooms", "Räume"], ["server", "FRN-Server"], ["crosslink", "Crosslink"]]},
+  {id: "zugang", icon: "👥", label: "Zugang",    tabs: [["users", "Benutzer"], ["rooms", "Räume"], ["konten", "FRN-Konten"], ["server", "FRN-Server"], ["crosslink", "Crosslink"]]},
   {id: "robert", icon: "🤖", label: "Robert",    tabs: [["bot", "KI-Funker"], ["robert", "Gespräche analysieren"], ["prompt", "Kompletter Prompt"], ["autoreply", "Namens-Antwort"]]},
   {id: "audio",  icon: "🎙", label: "Funk & Audio", tabs: [["audio", "Transkription & Archiv"], ["sprecher", "Sprecher-Erkennung"]]},
   {id: "system", icon: "🛠", label: "System",    tabs: [["ki", "KI-Dienste"], ["dienste", "Dienste & Geräte"], ["status", "Räume & Verbindungen"], ["debug", "Ablaufverfolgung"]]},
@@ -4464,6 +4518,7 @@ function showAdminTab(name) {
     if (name === "dienste")   statusSeiteLaden(false);
     if (name === "ki")        kiLaden();
     if (name === "rooms")     loadRooms();
+    if (name === "konten")    kontenLaden();
     if (name === "server")    loadServerTab();
     if (name === "autoreply") loadAutoReplyAdmin();
     if (name === "bot")       loadBotAdmin();
@@ -6706,6 +6761,127 @@ async function loadDebugTraces() {
   } catch(e) {
     box.innerHTML = `<div style="color:var(--red);font-size:0.85em">Fehler beim Laden: ${esc(String(e))}</div>`;
   }
+}
+
+// ── Zentrale FRN-Konten (2026-11-09) ───────────────────────────────────────
+let KONTEN = null;
+function kontoOptionen(gewaehlt, leer) {
+  const g = (gewaehlt || "").toLowerCase();
+  return `<option value="">${esc(leer || "— keins —")}</option>` +
+    (KONTEN?.konten || []).map(k =>
+      `<option value="${esc(k.email)}"${k.email.toLowerCase() === g ? " selected" : ""}>${esc(k.name)} &lt;${esc(k.email)}&gt;</option>`
+    ).join("");
+}
+const KONTEN_AKTION = a => {
+  const [r, m] = a.split(":");
+  const raum = (KONTEN?.raeume || []).find(x => x.mount === m)?.name || m;
+  return r === "server" ? "FRN-Server neu starten" : r === "stream" ? `Stream ${raum} neu starten` : `TX ${raum} neu verbinden`;
+};
+async function kontenLaden() {
+  const r = await adminFetch("/api/admin/konten");
+  const d = await r.json();
+  const st = document.getElementById("konten-status");
+  if (!r.ok) { st.innerHTML = `<span class="warn">${esc(d.error || "Fehler")}</span>`; return; }
+  KONTEN = d;
+  let html = `Quelle: <code>${esc(d.passwd_xml)}</code> · Funkstille: ${Math.floor(d.funkstille_s / 60)} min`;
+  if (!d.aktiv) html += ` · <span class="warn">konten.json fehlt noch – wird beim ersten Speichern angelegt</span>`;
+  if (d.offen?.length) {
+    html += `<br><span class="warn">Wartet auf ${Math.round(d.ruhe_s / 60)} min Funkstille: ${d.offen.map(KONTEN_AKTION).map(esc).join(", ")}</span>
+      <button class="btn-icon edit" style="margin-left:8px" onclick="kontenJetzt()">JETZT ANWENDEN</button>`;
+  }
+  if (d.ergebnis?.text?.length) {
+    html += `<br><small>Zuletzt angewendet ${new Date(d.ergebnis.zeit * 1000).toLocaleTimeString("de-DE")}: ${d.ergebnis.text.map(esc).join(" · ")}</small>`;
+  }
+  st.innerHTML = html;
+  document.getElementById("konten-zuordnung").innerHTML = d.raeume.map(raum => {
+    const z = d.zuordnung.raeume[raum.mount] || {};
+    return `<tr data-mount="${esc(raum.mount)}"><td>${esc(raum.name)}<br><small>${esc(raum.mount)}</small></td>
+      <td><select data-rolle="stream">${kontoOptionen(z.stream, "— aus env-Datei —")}</select></td>
+      <td><select data-rolle="tx">${kontoOptionen(z.tx, "— aus tx_rooms.json —")}</select></td></tr>`;
+  }).join("");
+  document.getElementById("konten-server").innerHTML = kontoOptionen(d.zuordnung.server, "— nicht verwaltet —");
+  const rep = (d.zuordnung.repeater || []).map(e => e.toLowerCase());
+  document.getElementById("konten-repeater").innerHTML = d.konten.map(k =>
+    `<label><input type="checkbox" value="${esc(k.email)}"${rep.includes(k.email.toLowerCase()) ? " checked" : ""}> ${esc(k.name)}</label>`).join("");
+  document.getElementById("konten-liste").innerHTML = d.konten.map((k, i) => `
+    <tr data-i="${i}">
+      <td><input type="text" data-f="name" value="${esc(k.name)}"></td>
+      <td><small>${esc(k.email)}</small></td>
+      <td><input type="password" data-f="password" placeholder="${k.passwort ? "unverändert" : "FEHLT"}" autocomplete="new-password"></td>
+      <td style="text-align:center"><input type="checkbox" data-f="disabled"${k.disabled ? " checked" : ""}></td>
+      <td><small>${k.verwendet.map(esc).join("<br>") || "—"}</small></td>
+      <td style="white-space:nowrap"><button class="btn-icon edit" onclick="kontoSpeichern(${i})">💾</button>
+        ${k.verwendet.length ? "" : `<button class="btn-icon" onclick="kontoLoeschen(${escJs(k.email)})">✕</button>`}</td>
+    </tr>`).join("");
+  if (d.offen?.length) setTimeout(() => {
+    if (document.getElementById("admin-tab-konten")?.classList.contains("active")) kontenLaden();
+  }, 20000);
+}
+function kontenMeldung(id, data, ok) {
+  const offen = data.offen?.length ? " – " + data.offen.map(KONTEN_AKTION).join(", ") + " bei Funkstille" : "";
+  showMsg(id, ok + offen, "ok");
+}
+async function kontenZuordnungSpeichern() {
+  const raeume = {};
+  document.querySelectorAll("#konten-zuordnung tr").forEach(tr => {
+    const z = {};
+    tr.querySelectorAll("select").forEach(s => { if (s.value) z[s.dataset.rolle] = s.value; });
+    raeume[tr.dataset.mount] = z;
+  });
+  const body = {
+    server: document.getElementById("konten-server").value,
+    raeume,
+    repeater: [...document.querySelectorAll("#konten-repeater input:checked")].map(c => c.value),
+  };
+  const r = await adminFetch("/api/admin/konten/zuordnung", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const data = await r.json();
+  if (!r.ok) { showMsg("msg-konten-z", data.error, "error"); return; }
+  kontenMeldung("msg-konten-z", data, "Gespeichert");
+  kontenLaden();
+}
+async function kontoSpeichern(i) {
+  const k = KONTEN.konten[i];
+  const tr = document.querySelector(`#konten-liste tr[data-i="${i}"]`);
+  const body = {
+    email: k.email,
+    name: tr.querySelector('[data-f="name"]').value.trim(),
+    password: tr.querySelector('[data-f="password"]').value,
+    disabled: tr.querySelector('[data-f="disabled"]').checked,
+  };
+  const r = await adminFetch("/api/admin/konten/konto", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const data = await r.json();
+  if (!r.ok) { showMsg("msg-konten", data.error, "error"); return; }
+  kontenMeldung("msg-konten", data, `${body.name} gespeichert`);
+  kontenLaden();
+}
+async function kontoNeu() {
+  const body = {
+    name: document.getElementById("nk-name").value.trim(),
+    email: document.getElementById("nk-email").value.trim(),
+    password: document.getElementById("nk-password").value,
+  };
+  const r = await adminFetch("/api/admin/konten/konto", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const data = await r.json();
+  if (!r.ok) { showMsg("msg-konten", data.error, "error"); return; }
+  ["nk-name", "nk-email", "nk-password"].forEach(id => document.getElementById(id).value = "");
+  showMsg("msg-konten", `Konto ${body.email} angelegt`, "ok");
+  kontenLaden();
+}
+async function kontoLoeschen(email) {
+  if (!confirm(`Konto ${email} aus der FRNPasswd.xml löschen?`)) return;
+  const r = await adminFetch("/api/admin/konten/konto?email=" + encodeURIComponent(email), {method: "DELETE"});
+  const data = await r.json();
+  if (!r.ok) { showMsg("msg-konten", data.error, "error"); return; }
+  showMsg("msg-konten", `Konto ${email} gelöscht`, "ok");
+  kontenLaden();
+}
+async function kontenJetzt() {
+  if (!confirm("Jetzt anwenden, ohne auf Funkstille zu warten? Laufende Verbindungen werden kurz getrennt.")) return;
+  await adminFetch("/api/admin/konten/anwenden", {method: "POST"});
+  setTimeout(kontenLaden, 8000);
 }
 
 function showMsg(id, text, cls) {

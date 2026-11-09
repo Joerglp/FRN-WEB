@@ -35,6 +35,14 @@ fi
 echo "[$(date)] Starting stream: room='${ROOM}' mount='/${MOUNT}.mp3' record=${ENABLE_RECORDING:-yes}" >&2
 
 while true; do
+    # Zentrale Konten (konten.json + FRNPasswd.xml) haben Vorrang vor den
+    # Aufrufparametern; bei jedem Neuverbinden neu gelesen (2026-11-09).
+    if KONTO="$(python3 "${SCRIPT_DIR}/frn_konten.py" env stream "${MOUNT}" 2>/dev/null)"; then
+        eval "${KONTO}"
+        CALLSIGN="${FRN_CALLSIGN}"; EMAIL="${FRN_EMAIL}"; PASSWORD="${FRN_PASSWORD}"
+        echo "[$(date)] Konto aus zentraler Verwaltung: '${CALLSIGN}' <${EMAIL}>" >&2
+    fi
+
     echo "[$(date)] Connecting FRN client to ${FRN_SERVER}:${FRN_PORT} room '${ROOM}'..." >&2
 
     python3 "${SCRIPT_DIR}/frn_stream.py" \

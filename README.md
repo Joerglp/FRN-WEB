@@ -28,6 +28,8 @@ Browser-basierter **PTT-Sender, Stream-Empfänger und Gesprächsarchiv** für da
 - **Raum per URL** — `?room=<mount>` wählt Raum automatisch nach Login
 - **Archiv-Statistiken** — Balkendiagramm, Top-Rufzeichen und -Räume, Gesamtzahlen
 - **Kommentare** — Notizen zu einzelnen Archiv-Einträgen hinzufügen
+- **Geführte Einrichtung** — `./setup.sh` fragt alles Nötige ab, für Docker oder systemd
+- **Zentrale FRN-Konten** — Zugangsdaten an einer Stelle, Zuordnung zu Räumen im Admin-Panel
 - **Docker-Support** — kompletter Stack mit `docker compose up`
 
 ## Zwei Betriebsarten: Basis oder mit KI
@@ -45,7 +47,7 @@ FRN-WEB läuft in **einer** Codebasis, die KI-Funktionen sind ein optionaler Zus
 
 Die KI-Server (Whisper, Voice-TTS, Ollama) laufen als **eigenständige Dienste** und werden nur über ihre Adresse in der Config eingebunden — die App selbst bringt **keine** KI-Bibliotheken mit (sie braucht nur `aiohttp`, `numpy`, `scipy`). Fehlt eine Adresse oder steht ein Feature auf `enabled: false`, ist es sauber aus und wird in der Oberfläche ausgeblendet. In der KI-Vorlage stehen alle KI-Features bewusst auf `enabled: false` — man schaltet sie einzeln frei, wenn der jeweilige Server läuft.
 
-**Umschalten** heißt einfach: die passende Vorlage nach `config/config.json` kopieren (siehe Schnellstart). Auch nachträglich kannst du KI in einer laufenden Basis-Installation dazuschalten, indem du die entsprechenden Blöcke ergänzt.
+**Umschalten** heißt einfach: die passende Vorlage nach `config/config.json` kopieren (siehe Einrichtung, `setup.sh` fragt danach). Auch nachträglich kannst du KI in einer laufenden Basis-Installation dazuschalten, indem du die entsprechenden Blöcke ergänzt.
 
 ## Voraussetzungen
 
@@ -54,16 +56,39 @@ Die KI-Server (Whisper, Voice-TTS, Ollama) laufen als **eigenständige Dienste**
 - Python 3.13 (Debian 13, so im Betrieb getestet; mindestens 3.10) mit den Paketen aus `requirements.txt`
 - `libgsm1` und `ffmpeg` installiert
 
-## Schnellstart (Docker)
+## Einrichtung mit `setup.sh` (empfohlen)
 
-> **Tester gesucht:** Der Docker-Stack wurde am 07.11.2026 auf Python 3.13
-> nachgezogen. Geprüft sind bisher nur die beiden Images einzeln (Bau auf
-> einem Raspberry Pi 5, Start des TX-Servers mit Beispiel-Konfiguration).
-> Der komplette Stack mit `docker compose up` — FRN_Server, Icecast, Streams,
-> Aufnahme und Transkription zusammen — ist **noch nicht getestet**; im
-> Produktivbetrieb läuft alles per systemd. Wer es ausprobiert, gibt bitte
-> in [Issue #1](https://github.com/Joerglp/FRN-WEB/issues/1) Bescheid, ob es läuft. Interessant sind vor allem:
+```bash
+git clone https://github.com/Joerglp/FRN-WEB.git
+cd FRN-WEB
+./setup.sh
+```
+
+Das Skript führt in sieben Schritten durch die Einrichtung und legt alles unter `config/` an:
+
+1. **Betriebsart** – Docker oder nativ (Python + systemd, z. B. Raspberry Pi). Prüft Docker bzw. Python ≥ 3.10, `ffmpeg`, `libgsm1` und die Python-Pakete; Fehlendes kann es per `apt` nachinstallieren.
+2. **Basis oder mit KI** – kopiert die passende Vorlage nach `config/config.json`.
+3. **FRN-Server** – Adresse und Port, mit Verbindungstest.
+4. **Icecast und Oberfläche** – bei Docker zufällige Icecast-Passwörter in `config/icecast.xml`, nativ wird das Passwort aus `/etc/icecast2/icecast.xml` übernommen.
+5. **Admin-Konto** für die Weboberfläche (Passwort als PBKDF2-Hash in `config/tx_users.json`).
+6. **Räume und FRN-Konten** – pro Raum ein TX- und ein Stream-Konto (siehe [FRN-Konten](#frn-konten)).
+7. **Starten** – Docker: `.env` schreiben und `docker compose up -d --build`; nativ: systemd-Dienste `frn-tx-server` und `frn-stream@<raum>` anlegen und starten.
+
+Vorhandene Dateien werden nur nach Rückfrage überschrieben und vorher gesichert (`*.bak-DATUM`), das Skript kann also gefahrlos erneut laufen – z. B. um Räume neu zu erfassen. Danach erreichbar unter:
+
+- **Web-UI / PTT:** `http://<rechner>:8765`
+- **Funkarchiv:** `http://<rechner>:8765/archive`
+- **Icecast:** `http://<rechner>:8000`
+
+> **Tester gesucht:** Im Produktivbetrieb läuft alles per systemd. Für Docker
+> geprüft sind der Bau des TX-Images (Raspberry Pi 5, ARM64), die Kontenauflösung
+> im Container und `docker compose config`; `setup.sh` ist in beiden Zweigen
+> mit Testdaten durchgelaufen. Der komplette Stack mit `docker compose up` –
+> FRN_Server, Icecast, Streams, Aufnahme und Transkription zusammen – ist
+> **noch nicht im Echtbetrieb getestet**. Wer es ausprobiert, gibt bitte in
+> [Issue #1](https://github.com/Joerglp/FRN-WEB/issues/1) Bescheid. Interessant sind vor allem:
 >
+> - Läuft `./setup.sh` bei dir ohne Stolpern durch?
 > - Verbinden sich die Streams mit dem FRN_Server (`host.docker.internal`)?
 > - Kommt der MP3-Stream bei Icecast an (`http://localhost:8000`)?
 > - Landen Durchsagen als Aufnahme, Transkript und Archiv-Zeile im Funkarchiv?
@@ -71,55 +96,36 @@ Die KI-Server (Whisper, Voice-TTS, Ollama) laufen als **eigenständige Dienste**
 >   `docker compose up -d --build` erhalten (Volume `frn-daten`)?
 > - Läuft es auch auf x86-64 (bisher nur ARM64 gebaut)?
 
-```bash
-# 1. Repo klonen
-git clone https://github.com/Joerglp/FRN-WEB.git
-cd FRN-WEB
-
-# 2. Benutzer und Räume konfigurieren
-cp config/tx_users.json.example config/tx_users.json
-python3 tx_add_user.py admin "DL0XYZ"   # Ersten Admin anlegen
-
-# 3. Konfiguration wählen und anlegen:
-#    Basis (ohne KI):
-cp config/config.json.example config/config.json
-#    ODER mit KI (Transkription/Sprachausgabe/KI-Funker):
-# cp config/config.ai.json.example config/config.json
-#
-#    Dann config/config.json editieren:
-#    → frn.server: Adresse des FRN_Server (host.docker.internal = lokaler Host)
-#    → frn_stream_account: FRN-Zugangsdaten für Auto-Discovery und Streams
-
-# 4. Bauen und starten (TX-Server, Streams, Icecast, lokales Whisper auf der CPU)
-docker compose up -d --build
-#    GPU-Whisper woanders? WHISPER_REMOTE_URL in .env setzen (siehe unten)
-```
+### Docker-Details
 
 Laufzeit-Daten des TX-Servers (Nachrichten, Tagesrückblick, Tagesprogramm,
 Stimmproben, Sprachvorlagen in `stimmen_ref/` und `voices/`, Anmelde-Tokens)
 liegen im Volume `frn-daten` (`/app/daten`, Umgebungsvariable `FRN_DATEN`),
-Archiv und Aufnahmen in `frn-archive` und `frn-recordings`. Ohne `FRN_DATEN`
-(Betrieb per systemd) liegen die Daten wie bisher neben dem Programm.
-
-Danach erreichbar unter:
-- **Web-UI / PTT:** `http://localhost:8765`
-- **Funkarchiv:** `http://localhost:8765/archive`
-- **Icecast:** `http://localhost:8000`
-
-## Schnellstart (ohne Docker / Raspberry Pi)
+Archiv und Aufnahmen in `frn-archive` und `frn-recordings`. `config/` wird
+nach `/app/config` eingebunden; dort liegen auch `konten.json` und die
+Kontenliste `frn_konten.xml` (`FRN_KONTEN=/app/config/konten.json`).
 
 ```bash
-pip install -r requirements.txt   # optional: requirements-whisper.txt
-apt install libgsm1 ffmpeg
+docker compose up -d --build      # bauen und starten
+docker compose logs -f frn-web    # Logs
+WHISPER_MODEL=small docker compose up -d   # anderes Whisper-Modell
+```
 
-# TX-Server starten
-python3 frn_tx_server.py \
-    --config config/config.json \
-    --users  config/tx_users.json \
-    --rooms  config/tx_rooms.json
+Ohne `FRN_DATEN` (Betrieb per systemd) liegen die Daten neben dem Programm.
 
-# Streams starten (je Raum, oder via systemd — siehe unten)
-bash run_stream.sh "Quasel-Ecke" quasel TX-Quasel tx@example.com passwort
+### Von Hand (ohne Skript)
+
+```bash
+apt install libgsm1 ffmpeg python3-aiohttp python3-numpy python3-scipy python3-requests python3-paho-mqtt
+cp config/config.json.example config/config.json          # oder config.ai.json.example
+cp config/tx_rooms.json.example config/tx_rooms.json
+cp config/konten.json.example config/konten.json          # passwd_xml anpassen!
+python3 tx_add_user.py admin "WebTX-Admin" --admin        # erster Admin
+
+export FRN_KONTEN=$PWD/config/konten.json
+python3 frn_tx_server.py --config config/config.json \
+    --users config/tx_users.json --rooms config/tx_rooms.json
+./run_stream.sh "Quasel-Ecke" quasel      # Stream je Raum, Konto aus konten.json
 ```
 
 ## Konfiguration
@@ -134,8 +140,8 @@ bash run_stream.sh "Quasel-Ecke" quasel TX-Quasel tx@example.com passwort
 | `icecast.host` | Icecast-Adresse |
 | `icecast.source_password` | Passwort für Stream-Einspeisung |
 | `auth.mode` | `local` / `frn` / `both` — Login-Methode |
-| `frn_stream_account.email` | FRN-Zugangsdaten für TX und Room-Discovery |
-| `frn_stream_account.password` | Passwort des Stream-Accounts |
+| `frn_stream_account.email` | Nur für Auto-Discovery der Räume (optional, sonst leer) |
+| `frn_stream_account.password` | Passwort dazu |
 | `ui.title` | Titel der Web-Oberfläche |
 | `whisper.remote_url` | URL des externen Whisper-Servers (leer = lokal) |
 | `whisper.model` | Modellgröße (`tiny`/`base`/`small`/`medium`) |
@@ -143,29 +149,74 @@ bash run_stream.sh "Quasel-Ecke" quasel TX-Quasel tx@example.com passwort
 
 ### `config/tx_users.json`
 
-Web-Benutzer mit SHA-256-Passwort-Hashes. Neuen Admin-Benutzer anlegen:
+Web-Benutzer mit PBKDF2-Passwort-Hashes. Benutzer anlegen oder Passwort ändern:
 
 ```bash
-python3 tx_add_user.py <benutzername> <callsign>
+python3 tx_add_user.py <benutzername> <callsign> [--admin]
 ```
 
 Oder über das Admin-Panel im Browser (⚙ ADMIN nach Login).
 
-### `config/tx_rooms.json` (optional)
+### `config/tx_rooms.json`
 
-Manuelle Raumliste. Leer lassen (`{"rooms":[]}`) damit der Server die Räume beim Start
-automatisch vom FRN-Server entdeckt (`frn_stream_account` muss gesetzt sein).
+Raumliste (Mount, FRN-Raumname, Anzeigename). Die Zugangsdaten stehen nicht
+hier, sondern zentral (siehe unten). Ohne Räume und mit gesetztem
+`frn_stream_account` entdeckt der Server die Räume beim Start selbst.
+
+### FRN-Konten
+
+Jeder Raum braucht **zwei** beim SystemManager registrierte FRN-Konten:
+
+| Rolle | Wofür | Beispielname |
+|-------|-------|--------------|
+| **TX** | Senden aus dem Browser, KI-Funker | `Web-Funk, Quasel-Ecke` |
+| **Stream** | Mithören, Icecast, Aufnahme fürs Archiv | `Webradio, Quasel-Ecke` |
+
+Ein FRN-Konto darf nur **einmal gleichzeitig** angemeldet sein – ein zweiter
+Login mit denselben Daten wird mit `AL=BLOCK` abgewiesen. Deshalb kann auch
+nicht ein Konto für mehrere Räume dienen.
+
+Die Zugangsdaten stehen an **einer** Stelle:
+
+- **Kontenliste** im Format der `FRNPasswd.xml` (Name, E-Mail, Passwort) –
+  `config/frn_konten.xml`, oder bei eigenem FRN-Server dessen
+  `acl/FRNPasswd.xml`.
+- **`config/konten.json`** (ohne Passwörter) ordnet die Konten zu: pro Raum
+  `stream` und `tx`, dazu optional das Konto, mit dem sich der eigene
+  FRN-Server beim SystemManager anmeldet (`server`), und Repeater-Konten.
+
+```json
+{
+  "passwd_xml": "/app/config/frn_konten.xml",
+  "server": "",
+  "raeume": { "quasel": { "stream": "stream@example.org", "tx": "tx@example.org" } },
+  "repeater": []
+}
+```
+
+TX-Server, Streams (`run_stream.sh`, Docker: `frn_stream_runner.py`) und Archiv
+lesen daraus. Eigene Konten erkennen sie an dieser Liste – Robert antwortet
+also nicht auf die eigenen Streams, egal wie die Konten heißen. Ändern lässt
+sich alles im Admin-Panel unter **Zugang → FRN-Konten**: Konten zuordnen,
+umbenennen, Passwort setzen, sperren, anlegen. Übernommen wird bei Funkstille
+(4 Minuten ohne Durchsage): Stream-Dienste und FRN-Server starten dann neu,
+TX-Konten verbinden sich neu. Docker hat kein systemd – dort nach einer
+Änderung `docker compose restart frn-streams`.
+
+Fehlt `konten.json`, gilt das alte Verhalten (Zugangsdaten in `tx_rooms.json`
+bzw. als Aufrufparameter von `run_stream.sh`).
 
 ## Admin-Panel
 
-Nach Login mit einem Admin-Account: **⚙ ADMIN**-Button oben rechts.
+Nach Login mit einem Admin-Account: **⚙ ADMIN**-Button oben rechts. Die Reiter sind in Gruppen sortiert:
 
-| Tab | Funktion |
-|-----|---------|
-| BENUTZER | Web-Benutzer anlegen / löschen / Passwort ändern |
-| RÄUME | TX-Räume hinzufügen / entfernen (live, kein Neustart) |
-| STATUS | FRN-Verbindungsstatus aller Räume + aktive Tokens |
-| SERVER | FRN-Server wechseln (inkl. Zugangsdaten) + neues FRN-Konto registrieren |
+| Gruppe | Reiter |
+|--------|--------|
+| Übersicht | Zustand aller Räume, Dienste und KI-Funker auf einen Blick |
+| Zugang | **Benutzer** (Web-Logins) · **Räume** (TX-Räume, live) · **FRN-Konten** (zentrale Konten, siehe oben) · **FRN-Server** (Server wechseln, Konto beim SystemManager beantragen) · **Crosslink** |
+| Robert | KI-Funker, Gespräche analysieren, kompletter Prompt, Namens-Antwort |
+| Funk & Audio | Transkription & Archiv, Sprecher-Erkennung |
+| System | KI-Dienste, Dienste & Geräte, Räume & Verbindungen, Ablaufverfolgung |
 
 ## Funkarchiv
 
@@ -373,27 +424,28 @@ Die GPU-Dienste (Whisper, XTTS, Piper, ECAPA, LLM) laufen optional auf einer sep
 
 ## Systemd (ohne Docker)
 
+`setup.sh` legt beide Dienste an:
+
 ```
 /etc/systemd/system/frn-tx-server.service   # Web TX Server
 /etc/systemd/system/frn-stream@.service     # Stream pro Raum (Template)
 ```
 
-Beispiel Stream-Service (`/etc/systemd/system/frn-stream@quasel.service`):
+Stream-Dienst (Auszug); Raum und Icecast-Daten kommen aus
+`config/stream-<mount>.env`, die FRN-Zugangsdaten aus `konten.json`:
 
 ```ini
-[Unit]
-Description=FRN Stream - %i
-After=network.target icecast2.service
-
 [Service]
-EnvironmentFile=/opt/FRN/stream/stream.env
-ExecStart=/opt/FRN/stream/run_stream.sh "Quasel-Ecke" %i TX-%i tx@example.com passwort
+WorkingDirectory=/opt/FRN-WEB
+Environment=FRN_KONTEN=/opt/FRN-WEB/config/konten.json
+EnvironmentFile=/opt/FRN-WEB/config/stream-%i.env
+ExecStart=/opt/FRN-WEB/run_stream.sh ${FRN_ROOM} ${FRN_MOUNT}
 Restart=on-failure
-RestartSec=30
-
-[Install]
-WantedBy=multi-user.target
 ```
+
+`${VAR}` als eigenes Wort bleibt in systemd **ein** Argument, auch mit
+Leerzeichen („Quasel-Ecke“, „stream, Joerg“); `$VAR` ohne Klammern würde an
+Leerzeichen getrennt.
 
 ## Sprecher-Zuordnung
 

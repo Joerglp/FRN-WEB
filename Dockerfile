@@ -30,6 +30,7 @@ COPY *.py *.html *.js ./
 # Tagesprogramm, Stimmproben, Sprachvorlagen (stimmen_ref/, voices/), Tokens
 ENV FRN_DATEN=/app/daten \
     FRN_CONFIG=/app/config/config.json \
+    FRN_KONTEN=/app/config/konten.json \
     PYTHONUNBUFFERED=1
 RUN mkdir -p /app/daten /opt/FRN/recordings /opt/FRN/archive/audio
 

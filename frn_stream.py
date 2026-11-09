@@ -33,6 +33,11 @@ import numpy as np
 from scipy.signal import butter, sosfiltfilt
 from pathlib import Path
 
+try:
+    import frn_konten as _konten   # zentrale Kontenliste (2026-11-09)
+except Exception:
+    _konten = None
+
 # --- Constants ---
 
 FRN_PROTO_VERSION = "2014003"
@@ -424,9 +429,14 @@ class FRNClient:
             return ""
         if sender.get("CL") == "1":
             return "@gateway"
+        rolle = _konten.rolle_von(name) if _konten else ""
+        if rolle == "tx":
+            return "@tx"
+        if rolle in ("stream", "server"):
+            return ""
         if name.lower().startswith(("tx-", "web-")):
             return "@tx"
-        if name.lower().startswith("stream-"):
+        if name.lower().startswith(("stream-", "stream,", "stream2,", "stream3,")):   # Alt-Fallback ohne konten.json
             return ""
         return name.split(",", 1)[1].strip() if "," in name else name
 

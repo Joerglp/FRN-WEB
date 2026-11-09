@@ -1,0 +1,11 @@
+{
+  "passwd_xml": "/app/config/frn_konten.xml",
+  "server": "",
+  "raeume": {
+    "quasel": {
+      "stream": "stream-quasel@example.org",
+      "tx": "tx-quasel@example.org"
+    }
+  },
+  "repeater": []
+}
