@@ -1784,11 +1784,31 @@ class TXServer:
             return False   # remote_url zeigt nach dem Umstellen evtl. noch auf XTTS)
         return bool(vcfg.get("xtts_url")) and (vcfg.get("remote_url") or "").strip() == (vcfg.get("xtts_url") or "").strip()
 
+    @staticmethod
+    def _weich_begrenzen(y, knie: float = 0.7, maxi: float = 0.95):
+        """Weicher Begrenzer statt hartem Abschneiden: bis zum Knie linear,
+        darueber per tanh sanft auf hoechstens maxi (keine Klirr-Kanten)."""
+        a = np.abs(y)
+        ueber = a > knie
+        if not ueber.any():
+            return y
+        r = maxi - knie
+        y = y.copy()
+        y[ueber] = np.sign(y[ueber]) * (knie + r * np.tanh((a[ueber] - knie) / r))
+        return y
+
     async def _xtts_stream_8k(self, text: str, lang: str, speaker: str, url: str):
         """Async-Generator: holt /tts_stream (24 kHz) und liefert 8-kHz-PCM
         (s16le) in Stuecken, sobald sie da sind."""
         basis = url[:-len("/tts")] if url.rstrip("/").endswith("/tts") else url.rstrip("/")
         h = self._tiefpass_24k()
+        # Pegel je Stimme (10.11.): voice.tts_pegel_db {speaker: dB} kommt auf
+        # die feste Anhebung drauf -- Susis Vorlage (tammie_ema) ist leiser.
+        try:
+            extra = float((self.cfg.get("voice", {}).get("tts_pegel_db") or {}).get(speaker, 0) or 0)
+        except (TypeError, ValueError):
+            extra = 0.0
+        gain = self._STREAM_GAIN * 10 ** (max(-12.0, min(12.0, extra)) / 20)
         rest = np.zeros(0, dtype=np.float32)       # Filter-Vorlauf aus dem letzten Stueck
         phase = 0                                   # Dezimierungs-Phase ueber Stueckgrenzen
         uebrig = b""
@@ -1817,7 +1837,7 @@ class TXServer:
                     rest = xx[-(len(h) - 1):]
                     y = y[phase::3]
                     phase = (phase - (len(xx) - len(h) + 1)) % 3
-                    y = np.clip(y * self._STREAM_GAIN, -0.95, 0.95)
+                    y = self._weich_begrenzen(y * gain)
                     if y.size:
                         yield (y * 32767.0).astype("<i2").tobytes()
 
@@ -3643,6 +3663,8 @@ class TXServer:
         bid = self._bot_waehlen(room_name, low) if len(self._bot_ids()) > 1 else ""
         tok = self._bot_im(bid)
         try:
+            if self._spiel_einwurf(room_name, callsign, text, ts, low):
+                return
             self._bot_entscheiden(room, room_name, text, ts, low)
         finally:
             _BOT_KONTEXT.reset(tok)
@@ -6876,6 +6898,9 @@ class TXServer:
                              flags=re.IGNORECASE).strip()
             # Emojis raus (werden vorgelesen, Prompt-Verbot reicht nicht immer)
             cleaned = self._EMOJI_RE.sub("", cleaned)
+            # Regieanweisungen "*Setzt sich neben ihn.*" raus (10.11., Spielwiese):
+            # wuerden sonst vorgelesen; einzelne Sternchen ebenso.
+            cleaned = re.sub(r"\*[^*\n]{1,300}\*", " ", cleaned).replace("*", "")
             # "am Start" ist per Persona verboten, das Modell setzt es aber
             # trotzdem gern (2026-09-30: bei "wer ist noch QRV" jedes Mal) --
             # "bin am Start" -> "bin dabei" passt grammatisch immer.
@@ -7034,8 +7059,13 @@ class TXServer:
         Denkteil kommt als eigener Inhaltsblock und wird hier weggelassen."""
         key = (bot.get("mistral_api_key") or "").strip()
         model = (bot.get("mistral_model") or "mistral-large-4").strip()
+        messages = list(messages)
+        if messages and messages[-1].get("role") == "assistant":
+            # Mistral verlangt user/tool als letzte Rolle (HTTP 400, 10.11.:
+            # Spielwiese beginnt nach der eigenen letzten Zeile)
+            messages.append({"role": "user", "content": "(weiter)"})
         body = {"model": model,
-                "messages": [{"role": "system", "content": system}] + list(messages),
+                "messages": [{"role": "system", "content": system}] + messages,
                 "temperature": float(bot.get("temperature", 0.4)),
                 "max_tokens": 1500}
         effort = (bot.get("mistral_reasoning_effort") or "low").strip()
@@ -8584,9 +8614,11 @@ class TXServer:
                        "anbieter": "", "modell": ""}
     _SPIEL_MODELL_FELD = {"ollama": "ollama_model", "mistral": "mistral_model",
                           "ollama_cloud": "ollama_cloud_model", "gemini": "gemini_model"}
-    _SPIEL_START = "Du bist mit {andere} im {raum}, eurem eigenen Funkraum. Fang ein lockeres Gespräch mit {andere} an{thema}."
+    _SPIEL_START = "Du wohnst mit {andere} zusammen und ihr funkt im {raum}, eurem eigenen Funkraum. Fang ein lockeres Gespräch mit {andere} an{thema}."
     _SPIEL_WEITER = "{von} unterhält sich mit dir. Antworte {von} wie in einem normalen Gespräch zu zweit."
     _SPIEL_ENDE = " Lass das Gespräch jetzt freundlich ausklingen."
+    _SPIEL_EINWURF = ("{wer} hat sich eben über Funk in euer Gespräch eingeschaltet. "
+                      "Geh auf {wer} ein und bezieh es in euer Gespräch ein.")
 
     def _spiel_cfg(self) -> dict:
         return {**self._SPIEL_DEFAULTS, **(self.cfg.get("voice", {}).get("spielwiese") or {})}
@@ -8667,6 +8699,27 @@ class TXServer:
         return any(t > grenze and not w.endswith(" (du)")
                    for t, w, _x in self._room_hist.get(c["raum"], []))
 
+    def _spiel_einwurf(self, room_name: str, callsign: str, text: str, ts: float, low: str) -> bool:
+        """Menschlicher Spruch waehrend eines Spielwiesen-Gespraechs: merken,
+        die Spielwiese antwortet. True = normale Antwortlogik ueberspringen.
+        Sprach-Steuerbefehle ("Robert aus") gehen weiter den normalen Weg."""
+        z = self._spiel_zust
+        if not z["laeuft"] or room_name != self._spiel_cfg()["raum"]:
+            return False
+        bot = self._bot_cfg()
+        if self._bot_command(bot, bot.get("name") or "Robert", low):
+            return False
+        gerufen = None
+        for bid, name in self._spiel_namen():
+            if re.search(r"\b" + re.escape(name.lower()) + r"\b", low):
+                gerufen = bid
+                break
+        z["einwurf"] = (ts, (callsign or "").strip() or "Funker", text, gerufen)
+        log.info("[%s] Spielwiese: Einwurf von %s aufgenommen", room_name, callsign or "?")
+        self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
+                              detail="Einwurf in die Spielwiese -- wird dort beantwortet", final=True)
+        return True
+
     def _spiel_namen(self) -> list[tuple[str, str]]:
         """[(bot_id, name)] der ersten beiden KI-Funker."""
         out = []
@@ -8713,7 +8766,8 @@ class TXServer:
             return "es gibt nur einen KI-Funker"
         if z["laeuft"]:
             return "läuft schon"
-        z.update(laeuft=True, stopp=False, wechsel=0, beginn=time.time())
+        z.update(laeuft=True, stopp=False, wechsel=0, beginn=time.time(),
+                 einwurf=None, einwurf_erledigt=0.0, einwurf_dran=False, einwuerfe=0)
         ende = "fertig"
         try:
             if thema is None:
@@ -8727,8 +8781,17 @@ class TXServer:
             for i in range(n):
                 if z["stopp"]:
                     ende = "gestoppt"; break
-                if i and self._spiel_mensch_aktiv({**c, "ruhe_nach_mensch_s": time.time() - z["beginn"]}):
-                    ende = "ein Funker hat sich gemeldet"; break
+                # Einwurf eines Menschen (10.11.): kein Abbruch mehr -- der
+                # naechste (oder der gerufene) Bot geht darauf ein, danach
+                # reden beide mit dem neuen Aufhaenger weiter.
+                einwurf = z.get("einwurf")
+                if einwurf and einwurf[0] > z.get("einwurf_erledigt", 0.0):
+                    z["einwurf_erledigt"] = einwurf[0]
+                    z["einwuerfe"] = z.get("einwuerfe", 0) + 1
+                    if einwurf[3] is not None:      # beim Namen gerufen
+                        erster = (next((k for k, (b, _n) in enumerate(namen) if b == einwurf[3]),
+                                       (erster + i) % 2) - i) % 2
+                    n = min(max(n, i + 4), i + 6, 40)
                 bid, name = namen[(erster + i) % 2]
                 _bid2, andere = namen[(erster + i + 1) % 2]
                 vorher = max((t1 for _t0, t1, _x in self._bot_own_tx.get(raum, [])), default=0.0)
@@ -8737,8 +8800,11 @@ class TXServer:
                     bot = self._spiel_ki(self._bot_cfg(), c)
                     if not bot.get("enabled"):
                         ende = f"{name} ist aus"; break
-                    await self._bot_reply(room, raum, bot, nachlegen=True,
-                                          zusatz=self._spiel_zusatz(i, n, andere, andere, raum, thema))
+                    zusatz = self._spiel_zusatz(i, n, andere, andere, raum, thema)
+                    if einwurf and z["einwurf_erledigt"] == einwurf[0] and not z.get("einwurf_dran"):
+                        z["einwurf_dran"] = True
+                        zusatz = self._SPIEL_EINWURF.format(wer=einwurf[1])
+                    await self._bot_reply(room, raum, bot, nachlegen=True, zusatz=zusatz)
                 finally:
                     _BOT_RAUM.reset(tok_r)
                     _BOT_KONTEXT.reset(tok_b)
@@ -8746,7 +8812,23 @@ class TXServer:
                 if nachher <= vorher:
                     ende = f"{name} hat nichts gesagt"; break
                 z["wechsel"] = i + 1
+                z["einwurf_dran"] = False
+                # Warten, solange jemand sendet; ein Einwurf braucht danach
+                # noch ein paar Sekunden bis zum Transkript.
                 await asyncio.sleep(random.uniform(2.0, 5.0))
+                # Nur Empfang NACH dem eigenen Sendeende zaehlt (das Echo der
+                # eigenen Sendung beginnt davor).
+                def fremd_rx():
+                    return self._rx_zuletzt.get(raum, 0.0) > nachher + 0.5
+                bis = time.time() + 25
+                while (time.time() < bis and fremd_rx()
+                       and time.time() - self._rx_letztes(raum, time.time(), raum) < 1.5):
+                    await asyncio.sleep(0.5)
+                if fremd_rx() and not z["stopp"]:
+                    t_warte = time.time() + 10
+                    alt = z.get("einwurf")
+                    while time.time() < t_warte and z.get("einwurf") is alt:
+                        await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             ende = "abgebrochen"
             raise
@@ -8757,7 +8839,8 @@ class TXServer:
             z["laeuft"] = False
             z["verlauf"].append({"beginn": z.get("beginn"), "ende_ts": time.time(),
                                  "thema": z.get("thema") or "(frei)",
-                                 "wechsel": z["wechsel"], "ende": ende})
+                                 "wechsel": z["wechsel"], "ende": ende
+                                 + (f", {z['einwuerfe']} Einwurf/-würfe" if z.get("einwuerfe") else "")})
             del z["verlauf"][:-20]
             log.info("[%s] Spielwiese: Gespräch zu Ende nach %d Wechseln (%s)",
                      raum, z["wechsel"], ende)
