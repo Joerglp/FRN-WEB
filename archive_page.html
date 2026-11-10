@@ -945,6 +945,31 @@ function sprecherChip(e) {
   return `<span class="msg-room" style="color:${farbe};border-color:${farbe}60" title="${esc(tip)}">${txt}</span>`;
 }
 
+// Raumfilter (10.11.2026): die Spielwiese der KI-Funker (KI-Raum) steht
+// gesondert und zaehlt nicht unter "Alle Räume" -- sonst fuellt das
+// Geplauder von Robert und Susi das echte Funkarchiv.
+function raumAuswahl(rooms, gesondert) {
+  gesondert = gesondert || [];
+  const sel = document.getElementById('f-room');
+  const cur = sel.value;
+  sel.innerHTML = '';
+  const opt = (wert, text, ziel) => {
+    const o = document.createElement('option');
+    o.value = wert; o.textContent = text;
+    if (wert === cur) o.selected = true;
+    (ziel || sel).appendChild(o);
+  };
+  opt('', gesondert.length ? 'Alle Räume (ohne Spielwiese)' : 'Alle Räume');
+  rooms.filter(r => !gesondert.includes(r)).forEach(r => opt(r, r));
+  const da = gesondert.filter(r => rooms.includes(r));
+  if (da.length) {
+    const g = document.createElement('optgroup');
+    g.label = 'Spielwiese (Robert & Susi)';
+    sel.appendChild(g);
+    da.forEach(r => opt(r, r + ' (Spielwiese)', g));
+  }
+}
+
 async function loadEntries(append = false) {
   if (isLoading) return;
   isLoading = true;
@@ -979,17 +1004,7 @@ async function loadEntries(append = false) {
       if (!resp.ok) throw new Error(resp.status);
       data = await resp.json();
       // Populate room dropdown from chat rooms
-      if (data.rooms && data.rooms.length) {
-        const sel = document.getElementById('f-room');
-        const cur = sel.value;
-        sel.innerHTML = '<option value="">Alle Räume</option>';
-        data.rooms.forEach(r => {
-          const o = document.createElement('option');
-          o.value = r; o.textContent = r;
-          if (r === cur) o.selected = true;
-          sel.appendChild(o);
-        });
-      }
+      if (data.rooms && data.rooms.length) raumAuswahl(data.rooms, data.gesondert);
       totalCount = data.total || 0;
       document.getElementById('stat-total').textContent = totalCount;
       document.getElementById('stat-pending-item').style.display = 'none';
@@ -1032,15 +1047,7 @@ async function loadEntries(append = false) {
 
       if (data.rooms && data.rooms.length > allRooms.length) {
         allRooms = data.rooms;
-        const sel = document.getElementById('f-room');
-        const cur = sel.value;
-        sel.innerHTML = '<option value="">Alle Räume</option>';
-        allRooms.forEach(r => {
-          const o = document.createElement('option');
-          o.value = r; o.textContent = r;
-          if (r === cur) o.selected = true;
-          sel.appendChild(o);
-        });
+        raumAuswahl(allRooms, data.gesondert);
       }
 
       const nameSel = document.getElementById('f-name');

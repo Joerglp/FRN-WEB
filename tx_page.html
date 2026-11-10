@@ -1404,6 +1404,72 @@ audio {
     </div>
 
     <!-- ── Server tab ── -->
+    <div id="admin-tab-spielwiese" class="admin-tab-content konten-tab">
+      <div class="admin-section-title">Spielwiese – Robert und Susi im eigenen Raum</div>
+      <div style="font-size:.8rem;color:var(--muted);margin-bottom:10px">
+        Die beiden unterhalten sich ab und zu im Spielwiesen-Raum, <b>echt per Funk</b>,
+        jedes Mal über ein neues Thema. Meldet sich dort ein Mensch, hören sie auf und
+        antworten ganz normal.
+      </div>
+      <div class="konten-status" id="spiel-status">Lade …</div>
+      <div class="form-grid">
+        <div class="form-field" style="flex:3"><label>Thema für ein Gespräch jetzt (leer = automatisch)</label>
+          <input type="text" id="spiel-jetzt-thema" placeholder="z. B. Lieblingsessen im Winter"></div>
+      </div>
+      <div style="display:flex;gap:8px;margin:8px 0 18px">
+        <button class="btn-save" onclick="spielStart()" id="spiel-start-btn">JETZT LOSREDEN</button>
+        <button class="btn-save" onclick="spielStopp()" id="spiel-stopp-btn"
+                style="background:#b42318;border-color:#b42318;color:#fff">STOPP</button>
+      </div>
+
+      <div class="admin-section-title">Einstellungen</div>
+      <div class="form-grid">
+        <div class="form-field"><label><input type="checkbox" id="spiel-enabled"> Automatisch unterhalten</label></div>
+        <div class="form-field"><label>Raum</label><select id="spiel-raum"></select></div>
+        <div class="form-field"><label>Pause zwischen Gesprächen (Min.) von</label><input type="number" id="spiel-pause-min" min="5" max="1440"></div>
+        <div class="form-field"><label>bis</label><input type="number" id="spiel-pause-max" min="5" max="1440"></div>
+        <div class="form-field"><label>Wechsel pro Gespräch von</label><input type="number" id="spiel-wechsel-min" min="2" max="20"></div>
+        <div class="form-field"><label>bis</label><input type="number" id="spiel-wechsel-max" min="2" max="20"></div>
+        <div class="form-field"><label>Uhrzeit von</label><input type="text" id="spiel-von" placeholder="08:00"></div>
+        <div class="form-field"><label>bis</label><input type="text" id="spiel-bis" placeholder="21:00"></div>
+        <div class="form-field"><label>Ruhe, nachdem ein Mensch sprach (Min.)</label><input type="number" id="spiel-ruhe" min="0" max="120"></div>
+        <div class="form-field"><label><input type="checkbox" id="spiel-nachrichten"> Auch Schlagzeilen (tagesschau) als Thema</label></div>
+        <div class="form-field"><label>Sprachmodell – Anbieter</label>
+          <select id="spiel-anbieter" onchange="spielModellListe()">
+            <option value="">wie Robert &amp; Susi sonst</option>
+            <option value="ollama">GPU-Box (Ollama / llama.cpp)</option>
+            <option value="mistral">Mistral (Cloud)</option>
+            <option value="ollama_cloud">Ollama Cloud</option>
+            <option value="gemini">Google Gemini</option>
+          </select></div>
+        <div class="form-field"><label>Modell (leer = Standard des Anbieters)</label>
+          <input type="text" id="spiel-modell" list="spiel-modelle" placeholder="z. B. mistral-large-4">
+          <datalist id="spiel-modelle"></datalist></div>
+        <div class="form-field full" style="font-size:.75rem;color:var(--muted)" id="spiel-ki-info"></div>
+        <div class="form-field full"><label>Eigene Themen (eins pro Zeile; leer = Schlagzeilen oder frei gewählt)</label>
+          <textarea id="spiel-themen" rows="6" style="background:var(--bg,#0b1220);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px;font:inherit"></textarea></div>
+      </div>
+      <button class="btn-save" onclick="spielSpeichern()">SPEICHERN</button>
+      <div class="admin-msg" id="msg-spiel"></div>
+
+      <div class="admin-section-title" style="margin-top:22px">Trockentest (nur Text, sendet nichts)</div>
+      <div class="form-grid">
+        <div class="form-field" style="flex:3"><label>Thema (leer = automatisch)</label><input type="text" id="spiel-t-thema"></div>
+        <div class="form-field" style="flex:0 0 90px"><label>Wechsel</label><input type="number" id="spiel-t-n" value="6" min="2" max="20"></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn-save" onclick="spielTrocken()" id="spiel-t-start">STARTEN</button>
+        <button class="btn-save" onclick="_spielT.halt=true;_spielT.ctrl&&_spielT.ctrl.abort()" id="spiel-t-halt" disabled
+                style="background:#b42318;border-color:#b42318;color:#fff">NOT-HALT</button>
+      </div>
+      <div id="spiel-t-verlauf" style="margin-top:10px;font-size:.85rem;display:none;padding:8px 10px;border:1px solid var(--border);border-radius:6px"></div>
+
+      <div class="admin-section-title" style="margin-top:22px">Mitschrift im Raum</div>
+      <div id="spiel-zeilen" style="font-size:.85rem;max-height:360px;overflow-y:auto"></div>
+      <div class="admin-section-title" style="margin-top:22px">Letzte Gespräche</div>
+      <div id="spiel-verlauf" style="font-size:.82rem"></div>
+    </div>
+
     <div id="admin-tab-konten" class="admin-tab-content konten-tab">
       <div class="konten-status" id="konten-status">Lade …</div>
 
@@ -4479,7 +4545,7 @@ function showBotSubTab(name) {
 const ADMIN_GROUPS = [
   {id: "start",  icon: "🏠", label: "Übersicht", tabs: [["overview", "Übersicht"]]},
   {id: "zugang", icon: "👥", label: "Zugang",    tabs: [["users", "Benutzer"], ["rooms", "Räume"], ["konten", "FRN-Konten"], ["server", "FRN-Server"], ["crosslink", "Crosslink"]]},
-  {id: "robert", icon: "🤖", label: "Robert",    tabs: [["bot", "KI-Funker"], ["robert", "Gespräche analysieren"], ["prompt", "Kompletter Prompt"], ["autoreply", "Namens-Antwort"]]},
+  {id: "robert", icon: "🤖", label: "Robert",    tabs: [["bot", "KI-Funker"], ["robert", "Gespräche analysieren"], ["prompt", "Kompletter Prompt"], ["autoreply", "Namens-Antwort"], ["spielwiese", "Spielwiese"]]},
   {id: "audio",  icon: "🎙", label: "Funk & Audio", tabs: [["audio", "Transkription & Archiv"], ["sprecher", "Sprecher-Erkennung"]]},
   {id: "system", icon: "🛠", label: "System",    tabs: [["ki", "KI-Dienste"], ["dienste", "Dienste & Geräte"], ["status", "Räume & Verbindungen"], ["debug", "Ablaufverfolgung"]]},
 ];
@@ -4519,6 +4585,7 @@ function showAdminTab(name) {
     if (name === "ki")        kiLaden();
     if (name === "rooms")     loadRooms();
     if (name === "konten")    kontenLaden();
+    if (name === "spielwiese") spielLaden();
     if (name === "server")    loadServerTab();
     if (name === "autoreply") loadAutoReplyAdmin();
     if (name === "bot")       loadBotAdmin();
@@ -6760,6 +6827,145 @@ async function loadDebugTraces() {
     }).join("");
   } catch(e) {
     box.innerHTML = `<div style="color:var(--red);font-size:0.85em">Fehler beim Laden: ${esc(String(e))}</div>`;
+  }
+}
+
+// ── Spielwiese (10.11.2026) ────────────────────────────────────────────────
+let _spielTimer = null;
+const _spielZeit = ts => new Date(ts * 1000).toLocaleTimeString("de-DE", {hour: "2-digit", minute: "2-digit"});
+let _spielModelle = {};
+function spielModellListe() {
+  const an = document.getElementById("spiel-anbieter").value;
+  const liste = _spielModelle[an] || [];
+  document.getElementById("spiel-modelle").innerHTML = liste.map(m => `<option value="${esc(m)}">`).join("");
+  const feld = document.getElementById("spiel-modell");
+  feld.disabled = !an;
+  feld.placeholder = an ? (liste[0] ? "z. B. " + liste[0] : "Modellname") : "";
+  if (!an) feld.value = "";
+  const info = document.getElementById("spiel-ki-info");
+  if (an && an !== "ollama" && !liste.length) info.innerHTML = "⚠ Für diesen Anbieter ist kein API-Schlüssel eingetragen (Reiter KI-Dienste).";
+  else info.innerHTML = an === "ollama" ? "GPU-Box: Firmenanfragen gehen vor; bei langer Wartezeit springt der Ausweich (KI-Dienste) ein." : "";
+}
+async function spielLaden(nurStatus) {
+  const r = await adminFetch("/api/admin/spielwiese" + (nurStatus ? "" : "?modelle=1"));
+  const d = await r.json();
+  if (!r.ok) { document.getElementById("spiel-status").textContent = d.error || "Fehler"; return; }
+  const c = d.cfg;
+  let st;
+  if (d.laeuft) st = `<b style="color:var(--green,#4ade80)">● Gespräch läuft</b> – Thema: ${esc(d.thema || "frei gewählt")} · Wechsel ${d.wechsel}`;
+  else if (!c.enabled) st = "Automatik ist aus – Gespräche nur per Knopf.";
+  else if (!d.im_fenster) st = `Außerhalb der Zeit (${esc(c.von)}–${esc(c.bis)}).`;
+  else st = d.naechster ? `Nächstes Gespräch gegen ${_spielZeit(d.naechster)}.` : "Wird geplant …";
+  document.getElementById("spiel-status").innerHTML = st + ` <small>(${esc(d.namen.join(" & "))} in ${esc(c.raum)} · KI: ${esc(d.ki)})</small>`;
+  document.getElementById("spiel-start-btn").disabled = d.laeuft;
+  document.getElementById("spiel-stopp-btn").disabled = !d.laeuft;
+  if (!nurStatus) {
+    document.getElementById("spiel-enabled").checked = !!c.enabled;
+    document.getElementById("spiel-raum").innerHTML = d.raeume.map(n =>
+      `<option${n === c.raum ? " selected" : ""}>${esc(n)}</option>`).join("");
+    document.getElementById("spiel-pause-min").value = c.pause_min;
+    document.getElementById("spiel-pause-max").value = c.pause_max;
+    document.getElementById("spiel-wechsel-min").value = c.wechsel_min;
+    document.getElementById("spiel-wechsel-max").value = c.wechsel_max;
+    document.getElementById("spiel-von").value = c.von;
+    document.getElementById("spiel-bis").value = c.bis;
+    document.getElementById("spiel-ruhe").value = Math.round(c.ruhe_nach_mensch_s / 60);
+    document.getElementById("spiel-nachrichten").checked = !!c.nachrichten;
+    document.getElementById("spiel-themen").value = (c.themen || []).join("\n");
+    _spielModelle = d.modelle || {};
+    document.getElementById("spiel-anbieter").options[0].textContent = "wie Robert & Susi sonst (" + d.ki_standard + ")";
+    document.getElementById("spiel-anbieter").value = c.anbieter || "";
+    document.getElementById("spiel-modell").value = c.modell || "";
+    spielModellListe();
+  }
+  const box = document.getElementById("spiel-zeilen");
+  const unten = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+  box.innerHTML = d.zeilen.length ? d.zeilen.map(z =>
+    `<div style="margin:3px 0"><span style="color:var(--muted);font-size:.75rem">${_spielZeit(z.t)}</span>
+     <b style="color:${z.bot ? "#e879f9" : "#38bdf8"}">${esc(z.wer)}:</b> ${esc(z.text)}</div>`).join("")
+    : "<small>Noch nichts gesprochen.</small>";
+  if (unten) box.scrollTop = box.scrollHeight;
+  document.getElementById("spiel-verlauf").innerHTML = d.verlauf.length ? d.verlauf.map(v =>
+    `<div>${_spielZeit(v.beginn)} · ${esc(v.thema)} · ${v.wechsel} Wechsel · <small>${esc(v.ende)}</small></div>`).join("")
+    : "<small>Noch keins.</small>";
+  clearTimeout(_spielTimer);
+  _spielTimer = setTimeout(() => {
+    if (document.getElementById("admin-tab-spielwiese")?.classList.contains("active")) spielLaden(true);
+  }, d.laeuft ? 4000 : 15000);
+}
+async function spielSpeichern() {
+  const v = id => document.getElementById(id).value;
+  const body = {
+    enabled: document.getElementById("spiel-enabled").checked, raum: v("spiel-raum"),
+    pause_min: +v("spiel-pause-min"), pause_max: +v("spiel-pause-max"),
+    wechsel_min: +v("spiel-wechsel-min"), wechsel_max: +v("spiel-wechsel-max"),
+    von: v("spiel-von").trim(), bis: v("spiel-bis").trim(),
+    ruhe_nach_mensch_s: Math.round(+v("spiel-ruhe") * 60),
+    nachrichten: document.getElementById("spiel-nachrichten").checked,
+    themen: v("spiel-themen").split("\n").map(t => t.trim()).filter(Boolean),
+    anbieter: v("spiel-anbieter"), modell: v("spiel-modell").trim(),
+  };
+  const r = await adminFetch("/api/admin/spielwiese", {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const d = await r.json();
+  if (!r.ok) { showMsg("msg-spiel", d.error, "error"); return; }
+  showMsg("msg-spiel", "Gespeichert", "ok");
+  spielLaden();
+}
+async function spielStart() {
+  const thema = document.getElementById("spiel-jetzt-thema").value.trim();
+  const r = await adminFetch("/api/admin/spielwiese/start", {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify({thema})});
+  const d = await r.json();
+  if (!r.ok) { showMsg("msg-spiel", d.error, "error"); return; }
+  document.getElementById("spiel-jetzt-thema").value = "";
+  setTimeout(() => spielLaden(true), 1500);
+}
+async function spielStopp() {
+  await adminFetch("/api/admin/spielwiese/stopp", {method: "POST"});
+  showMsg("msg-spiel", "Stopp – nach dem laufenden Satz ist Schluss", "ok");
+  setTimeout(() => spielLaden(true), 1500);
+}
+let _spielT = {halt: false, ctrl: null};
+async function spielTrocken() {
+  const box = document.getElementById("spiel-t-verlauf");
+  box.innerHTML = ""; box.style.display = "";
+  const n = Math.max(2, Math.min(20, +document.getElementById("spiel-t-n").value || 6));
+  let thema = document.getElementById("spiel-t-thema").value.trim() || null;
+  const verlauf = [];
+  const zeile = (wer, text, info, farbe) => {
+    const div = document.createElement("div"); div.style.margin = "4px 0";
+    div.innerHTML = `<b style="color:${farbe}">${esc(wer)}:</b> ${esc(text)}` +
+      (info ? ` <span style="color:var(--muted);font-size:.75rem">(${esc(info)})</span>` : "");
+    box.appendChild(div); return div;
+  };
+  _spielT = {halt: false, ctrl: null};
+  document.getElementById("spiel-t-start").disabled = true;
+  document.getElementById("spiel-t-halt").disabled = false;
+  try {
+    for (let i = 0; i < n && !_spielT.halt; i++) {
+      const warte = zeile("…", "KI denkt", "", "var(--muted)");
+      _spielT.ctrl = new AbortController();
+      let d;
+      try {
+        const r = await adminFetch("/api/admin/spielwiese/trocken", {method: "POST",
+          headers: {"Content-Type": "application/json"}, signal: _spielT.ctrl.signal,
+          body: JSON.stringify({verlauf, thema, n,
+            anbieter: document.getElementById("spiel-anbieter").value,
+            modell: document.getElementById("spiel-modell").value.trim()})});
+        d = await r.json();
+      } catch (e) { warte.remove(); zeile("■", _spielT.halt ? "NOT-HALT" : "Fehler: " + e, "", "#b42318"); return; }
+      warte.remove();
+      if (d.error) { zeile("■", "Fehler: " + d.error, "", "#b42318"); return; }
+      if (i === 0) { thema = d.thema; zeile("Thema", (d.thema || "frei gewählt") + "  ·  KI: " + d.ki, "", "var(--muted)"); }
+      if (!d.would_reply) { zeile(d.name, "SKIP – steigt aus", d.seconds + "s", "var(--muted)"); return; }
+      verlauf.push({bot: d.bot, wer: d.name, text: d.answer});
+      zeile(d.name, d.answer, d.seconds + "s" + (d.stimmung ? ", " + d.stimmung : ""), d.bot ? "#e879f9" : "#f0b429");
+    }
+    zeile("■", _spielT.halt ? "NOT-HALT" : "Ende", "", "var(--muted)");
+  } finally {
+    document.getElementById("spiel-t-start").disabled = false;
+    document.getElementById("spiel-t-halt").disabled = true;
   }
 }
 

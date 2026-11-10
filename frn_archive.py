@@ -288,6 +288,7 @@ def query_entries(
     date_to: str = "",
     namen: list[str] | None = None,        # einer dieser Begriffe faellt im Text
     ohne_callsigns: list[str] | None = None,
+    ohne_raeume: list[str] | None = None,  # z. B. Spielwiese (KI-Raum) nicht unter "alle"
 ) -> list[dict]:
     clauses = []
     params  = []
@@ -295,6 +296,9 @@ def query_entries(
     if room:
         clauses.append("room = ?")
         params.append(room)
+    elif ohne_raeume:
+        clauses.append("room NOT IN (" + ",".join("?" for _ in ohne_raeume) + ")")
+        params.extend(ohne_raeume)
     if search:
         clauses.append("(text LIKE ? OR callsign LIKE ?)")
         params.extend([f"%{search}%", f"%{search}%"])
@@ -385,11 +389,15 @@ def query_chat_messages(
     offset: int = 0,
     room: str = "",
     search: str = "",
+    ohne_raeume: list[str] | None = None,
 ) -> tuple[list[dict], int]:
     clauses, params = [], []
     if room:
         clauses.append("room = ?")
         params.append(room)
+    elif ohne_raeume:
+        clauses.append("room NOT IN (" + ",".join("?" for _ in ohne_raeume) + ")")
+        params.extend(ohne_raeume)
     if search:
         clauses.append("(text LIKE ? OR callsign LIKE ?)")
         params.extend([f"%{search}%", f"%{search}%"])
@@ -436,32 +444,42 @@ def get_rooms() -> list[str]:
 
 # ── Statistiken ───────────────────────────────────────────────────────────────
 
-def get_stats(days: int = 30) -> dict:
-    """Liefert Archiv-Statistiken für das Dashboard."""
+def get_stats(days: int = 30, ohne_raeume: list[str] | None = None) -> dict:
+    """Liefert Archiv-Statistiken für das Dashboard. ohne_raeume (Spielwiese)
+    zaehlen nicht mit, stehen aber gesondert unter "gesondert" und in den
+    Top-Raeumen."""
     since = time.time() - days * 86400
+    ohne = list(ohne_raeume or [])
+    platz = ",".join("?" for _ in ohne) or "''"
     with _get_conn() as conn:
-        total_tx = conn.execute("SELECT COUNT(*) FROM transmissions").fetchone()[0]
+        total_tx = conn.execute(f"SELECT COUNT(*) FROM transmissions WHERE room NOT IN ({platz})",
+                                ohne).fetchone()[0]
         total_dur = conn.execute(
-            "SELECT COALESCE(SUM(duration_s),0) FROM transmissions"
+            f"SELECT COALESCE(SUM(duration_s),0) FROM transmissions WHERE room NOT IN ({platz})", ohne
         ).fetchone()[0]
-        total_chat = conn.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0]
+        total_chat = conn.execute(f"SELECT COUNT(*) FROM chat_messages WHERE room NOT IN ({platz})",
+                                  ohne).fetchone()[0]
+        gesondert = [{"room": r[0], "count": r[1], "duration_s": round(r[2], 1)}
+                     for r in conn.execute(
+                         f"SELECT room, COUNT(*), COALESCE(SUM(duration_s),0) FROM transmissions "
+                         f"WHERE room IN ({platz}) GROUP BY room", ohne).fetchall()] if ohne else []
 
         # Übertragungen pro Tag (letzte `days` Tage)
         rows = conn.execute("""
             SELECT date(timestamp,'unixepoch','localtime') AS d, COUNT(*) AS n,
                    COALESCE(SUM(duration_s),0) AS dur
-            FROM transmissions WHERE timestamp >= ?
+            FROM transmissions WHERE timestamp >= ? AND room NOT IN (%s)
             GROUP BY d ORDER BY d
-        """, (since,)).fetchall()
+        """ % platz, (since, *ohne)).fetchall()
         per_day = [{"date": r["d"], "count": r["n"], "duration_s": round(r["dur"], 1)}
                    for r in rows]
 
         # Top-Rufzeichen
         top_cs = conn.execute("""
             SELECT callsign, COUNT(*) AS n, COALESCE(SUM(duration_s),0) AS dur
-            FROM transmissions WHERE callsign != ''
+            FROM transmissions WHERE callsign != '' AND room NOT IN (%s)
             GROUP BY callsign ORDER BY n DESC LIMIT 10
-        """).fetchall()
+        """ % platz, ohne).fetchall()
         top_callsigns = [{"callsign": r["callsign"], "count": r["n"],
                           "duration_s": round(r["dur"], 1)} for r in top_cs]
 
@@ -481,6 +499,7 @@ def get_stats(days: int = 30) -> dict:
         "per_day":             per_day,
         "top_callsigns":       top_callsigns,
         "top_rooms":           top_rooms,
+        "gesondert":           gesondert,
     }
 
 

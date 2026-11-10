@@ -695,6 +695,26 @@ async def transcribe_wav(wav_path: str, model_size: str = "medium",
 
 # ── MQTT-Publisher ────────────────────────────────────────────────────────────
 
+_MQTT_OHNE = [None, []]
+
+
+def mqtt_ohne_raeume() -> list[str]:
+    """Raeume, die NICHT per MQTT gemeldet werden (10.11.2026): die Spielwiese
+    der KI-Funker (voice.spielwiese.raum) plus optional mqtt_ohne_raeume."""
+    try:
+        mt = _CFG_PFAD.stat().st_mtime
+        if mt != _MQTT_OHNE[0]:
+            c = json.loads(_CFG_PFAD.read_text(encoding="utf-8"))
+            raeume = [str(r) for r in c.get("mqtt_ohne_raeume") or []]
+            r = (c.get("voice", {}).get("spielwiese") or {}).get("raum")
+            if r:
+                raeume.append(r)
+            _MQTT_OHNE[:] = [mt, raeume]
+    except Exception as e:
+        log.debug("mqtt_ohne_raeume: %s", e)
+    return _MQTT_OHNE[1]
+
+
 def mqtt_publish(broker: str, port: int, topic: str, payload: str,
                  user: str = "", password: str = ""):
     """Synchrones MQTT-Publish (läuft im ThreadPool)."""
@@ -1220,7 +1240,10 @@ class TranscriptionPipeline:
         except Exception as e:
             log.warning("[%s] Archiv-Fehler: %s", room, e)
 
-        # ── MQTT ──
+        # ── MQTT ── (nicht fuer die Spielwiese)
+        if room in mqtt_ohne_raeume():
+            log.debug("[%s] kein MQTT (Raum ausgenommen)", room)
+            return
         broker   = self.cfg.get("mqtt_broker", "localhost")
         port_m   = int(self.cfg.get("mqtt_port", 1883))
         user     = self.cfg.get("mqtt_user", "")
@@ -1316,7 +1339,10 @@ class TranscriptionPipeline:
         except Exception as e:
             log.warning("[%s] Archiv-Fehler: %s", room, e)
 
-        # ── MQTT ──
+        # ── MQTT ── (nicht fuer die Spielwiese)
+        if room in mqtt_ohne_raeume():
+            log.debug("[%s] kein MQTT (Raum ausgenommen)", room)
+            return
         broker   = self.cfg.get("mqtt_broker", "localhost")
         port_m   = int(self.cfg.get("mqtt_port", 1883))
         user     = self.cfg.get("mqtt_user", "")

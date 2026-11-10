@@ -3935,6 +3935,7 @@ class TXServer:
                         ("frn-stream@eickelborn", "Stream Eickelborn-Freenet"),
                         ("frn-stream@eickelborn_ch74", "Stream Eickelborn-CH74"),
                         ("frn-stream@quasel", "Stream Quasel-Ecke"),
+                        ("frn-stream@ki_raum", "Stream KI-Raum"),
                         ("icecast2", "Icecast (Audio-Streams)"),
                         ("docker", "Docker")]
     _STATUS_PI_DOCKER = [("searxng", "SearXNG (Websuche)"),
@@ -8569,6 +8570,359 @@ class TXServer:
             "search_query": search_query,
             "seconds": round(time.time() - t0, 1)})
 
+    # ── Spielwiese (10.11.2026) ────────────────────────────────────────────
+    # Robert und Susi unterhalten sich ab und zu im eigenen Hausraum (KI-Raum),
+    # echt per Sprache. Je Gespraech ein neues Thema (eigene Liste, Schlagzeilen
+    # oder frei gewaehlt), 4-8 Wechsel, dann Pause. Spricht ein Mensch im Raum,
+    # hoert die Spielwiese auf und die normale Antwortlogik uebernimmt.
+    _SPIEL_DEFAULTS = {"enabled": False, "raum": "KI-Raum", "pause_min": 45,
+                       "pause_max": 90, "wechsel_min": 4, "wechsel_max": 8,
+                       "von": "08:00", "bis": "21:00", "themen": [],
+                       "nachrichten": True, "ruhe_nach_mensch_s": 600,
+                       # Eigenes Sprachmodell nur fuer die Spielwiese (10.11.):
+                       # anbieter "" = wie Robert/Susi sonst, modell "" = dessen Standard
+                       "anbieter": "", "modell": ""}
+    _SPIEL_MODELL_FELD = {"ollama": "ollama_model", "mistral": "mistral_model",
+                          "ollama_cloud": "ollama_cloud_model", "gemini": "gemini_model"}
+    _SPIEL_START = "Du bist mit {andere} im {raum}, eurem eigenen Funkraum. Fang ein lockeres Gespräch mit {andere} an{thema}."
+    _SPIEL_WEITER = "{von} unterhält sich mit dir. Antworte {von} wie in einem normalen Gespräch zu zweit."
+    _SPIEL_ENDE = " Lass das Gespräch jetzt freundlich ausklingen."
+
+    def _spiel_cfg(self) -> dict:
+        return {**self._SPIEL_DEFAULTS, **(self.cfg.get("voice", {}).get("spielwiese") or {})}
+
+    def _spiel_ki(self, bot: dict, c: dict) -> dict:
+        """Bot-Einstellungen mit dem Spielwiesen-Modell (falls eins gewaehlt)."""
+        an = str(c.get("anbieter") or "").strip().lower()
+        feld = self._SPIEL_MODELL_FELD.get(an)
+        if not feld:
+            return bot
+        bot = dict(bot, provider=an)
+        modell = str(c.get("modell") or "").strip()
+        if modell:
+            bot[feld] = modell
+        return bot
+
+    def _spiel_ki_text(self, c: dict) -> str:
+        b = self._spiel_ki({**self._BOT_DEFAULTS, **self.cfg.get("voice", {}).get("bot", {})}, c)
+        an = (b.get("provider") or "ollama").strip().lower()
+        std = {"mistral": "mistral-large-4", "ollama_cloud": "beam",
+               "gemini": "gemini-flash-lite-latest"}.get(an, "")
+        name = {"ollama": "GPU-Box", "mistral": "Mistral", "ollama_cloud": "Ollama Cloud",
+                "gemini": "Gemini"}.get(an, an)
+        return f"{name} · {b.get(self._SPIEL_MODELL_FELD.get(an, '')) or std}"
+
+    async def _spiel_modelle(self) -> dict:
+        """Auswahllisten fuer den Reiter (5 min gecacht)."""
+        c = getattr(self, "_spiel_modelle_cache", None)
+        if c and time.time() - c[0] < 300:
+            return c[1]
+        b = {**self._BOT_DEFAULTS, **self.cfg.get("voice", {}).get("bot", {})}
+        box = []
+        url = (b.get("ollama_url") or "").rstrip("/")
+        if url:
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as sess:
+                    async with sess.get(f"{url}/api/tags",
+                                        headers=self._ollama_headers(b.get("ollama_token"))) as r:
+                        d = await r.json(content_type=None)
+                box = sorted(m.get("name", "") for m in d.get("models", []) if m.get("name"))
+            except Exception:
+                pass
+        if b.get("ollama_model") and b["ollama_model"] not in box:
+            box.insert(0, b["ollama_model"])
+        out = {"ollama": box,
+               "mistral": list(self._MISTRAL_REPLAY_MODELLE)
+                          if (b.get("mistral_api_key") or "").strip() else [],
+               "ollama_cloud": [b.get("ollama_cloud_model") or "beam"]
+                               if (b.get("ollama_cloud_api_key") or "").strip() else [],
+               "gemini": [b.get("gemini_model") or "gemini-flash-lite-latest"]
+                         if (b.get("gemini_api_key") or "").strip() else []}
+        self._spiel_modelle_cache = (time.time(), out)
+        return out
+
+    @property
+    def _spiel_zust(self) -> dict:
+        z = getattr(self, "_spiel_z", None)
+        if z is None:
+            z = self._spiel_z = {"laeuft": False, "stopp": False, "thema": "", "wechsel": 0,
+                                 "naechster": 0.0, "verlauf": [], "themen_zuletzt": []}
+        return z
+
+    @staticmethod
+    def _spiel_im_fenster(c: dict, jetzt: datetime | None = None) -> bool:
+        jetzt = jetzt or datetime.now()
+        def minuten(s, vor):
+            try:
+                h, m = (int(x) for x in str(s).split(":")[:2])
+                return h * 60 + m
+            except ValueError:
+                return vor
+        a, b = minuten(c.get("von"), 0), minuten(c.get("bis"), 24 * 60)
+        n = jetzt.hour * 60 + jetzt.minute
+        return a <= n < b if a <= b else (n >= a or n < b)
+
+    def _spiel_mensch_aktiv(self, c: dict) -> bool:
+        grenze = time.time() - float(c.get("ruhe_nach_mensch_s") or 0)
+        return any(t > grenze and not w.endswith(" (du)")
+                   for t, w, _x in self._room_hist.get(c["raum"], []))
+
+    def _spiel_namen(self) -> list[tuple[str, str]]:
+        """[(bot_id, name)] der ersten beiden KI-Funker."""
+        out = []
+        for bid in self._bot_ids()[:2]:
+            b = self.cfg.get("voice", {}).get("bot", {}) if not bid else self._bot_weitere_cfg(bid)
+            out.append((bid, (b or {}).get("name") or ("Robert" if not bid else bid)))
+        return out
+
+    async def _spiel_thema(self, c: dict) -> str:
+        zuletzt = self._spiel_zust["themen_zuletzt"]
+        eigene = [t.strip() for t in c.get("themen") or [] if str(t).strip()]
+        pool = [t for t in eigene if t not in zuletzt]
+        if c.get("nachrichten") and random.random() < 0.4:
+            titel = [z[2:].strip() for z in (await self._bot_nachrichten(nur_titel=True)).splitlines()
+                     if z.startswith("- ")]
+            titel = [t for t in titel if t not in zuletzt]
+            if titel:
+                pool = titel
+        if not pool and random.random() < 0.5:
+            return ""                      # frei: das Modell sucht sich selbst eins aus
+        thema = random.choice(pool) if pool else ""
+        if thema:
+            zuletzt.append(thema)
+            del zuletzt[:-15]
+        return thema
+
+    def _spiel_zusatz(self, i: int, n: int, andere: str, von: str, raum: str, thema: str) -> str:
+        if i == 0:
+            t = f" über: {thema}" if thema else " über ein Alltagsthema deiner Wahl"
+            return self._SPIEL_START.format(andere=andere, raum=raum, thema=t)
+        z = self._SPIEL_WEITER.format(von=von)
+        return z + (self._SPIEL_ENDE if i == n - 1 else "")
+
+    async def _spiel_gespraech(self, thema: str | None = None) -> str:
+        """Ein Gespraech live im Spielwiesen-Raum. Rueckgabe: wie es endete."""
+        c = self._spiel_cfg()
+        raum = c["raum"]
+        z = self._spiel_zust
+        room = next((r for r in self.rooms.values() if r.name == raum), None)
+        namen = self._spiel_namen()
+        if room is None:
+            return f"Raum {raum} fehlt"
+        if len(namen) < 2:
+            return "es gibt nur einen KI-Funker"
+        if z["laeuft"]:
+            return "läuft schon"
+        z.update(laeuft=True, stopp=False, wechsel=0, beginn=time.time())
+        ende = "fertig"
+        try:
+            if thema is None:
+                thema = await self._spiel_thema(c)
+            z["thema"] = thema
+            lo, hi = sorted((int(c.get("wechsel_min") or 4), int(c.get("wechsel_max") or 8)))
+            n = random.randint(max(2, lo), max(2, hi))
+            erster = random.randrange(2)
+            log.info("[%s] Spielwiese: Gespräch beginnt, %d Wechsel, Thema: %s, KI: %s",
+                     raum, n, thema or "(frei)", self._spiel_ki_text(c))
+            for i in range(n):
+                if z["stopp"]:
+                    ende = "gestoppt"; break
+                if i and self._spiel_mensch_aktiv({**c, "ruhe_nach_mensch_s": time.time() - z["beginn"]}):
+                    ende = "ein Funker hat sich gemeldet"; break
+                bid, name = namen[(erster + i) % 2]
+                _bid2, andere = namen[(erster + i + 1) % 2]
+                vorher = max((t1 for _t0, t1, _x in self._bot_own_tx.get(raum, [])), default=0.0)
+                tok_b, tok_r = self._bot_im(bid), self._raum_setzen(raum)
+                try:
+                    bot = self._spiel_ki(self._bot_cfg(), c)
+                    if not bot.get("enabled"):
+                        ende = f"{name} ist aus"; break
+                    await self._bot_reply(room, raum, bot, nachlegen=True,
+                                          zusatz=self._spiel_zusatz(i, n, andere, andere, raum, thema))
+                finally:
+                    _BOT_RAUM.reset(tok_r)
+                    _BOT_KONTEXT.reset(tok_b)
+                nachher = max((t1 for _t0, t1, _x in self._bot_own_tx.get(raum, [])), default=0.0)
+                if nachher <= vorher:
+                    ende = f"{name} hat nichts gesagt"; break
+                z["wechsel"] = i + 1
+                await asyncio.sleep(random.uniform(2.0, 5.0))
+        except asyncio.CancelledError:
+            ende = "abgebrochen"
+            raise
+        except Exception as e:
+            log.warning("[%s] Spielwiese: Fehler %s", raum, e)
+            ende = f"Fehler: {e}"
+        finally:
+            z["laeuft"] = False
+            z["verlauf"].append({"beginn": z.get("beginn"), "ende_ts": time.time(),
+                                 "thema": z.get("thema") or "(frei)",
+                                 "wechsel": z["wechsel"], "ende": ende})
+            del z["verlauf"][:-20]
+            log.info("[%s] Spielwiese: Gespräch zu Ende nach %d Wechseln (%s)",
+                     raum, z["wechsel"], ende)
+        return ende
+
+    def _spiel_naechster_planen(self, c: dict) -> None:
+        lo, hi = sorted((float(c.get("pause_min") or 45), float(c.get("pause_max") or 90)))
+        self._spiel_zust["naechster"] = time.time() + random.uniform(lo, hi) * 60
+
+    async def _spiel_loop(self):
+        await asyncio.sleep(60)
+        while True:
+            try:
+                c = self._spiel_cfg()
+                z = self._spiel_zust
+                if not c.get("enabled"):
+                    z["naechster"] = 0.0
+                elif not z["naechster"]:
+                    self._spiel_naechster_planen(c)
+                elif (time.time() >= z["naechster"] and not z["laeuft"]
+                      and self._spiel_im_fenster(c)):
+                    if self._spiel_mensch_aktiv(c) or c["raum"] in self._bot_busy:
+                        z["naechster"] = time.time() + 300   # spaeter nochmal
+                    else:
+                        await self._spiel_gespraech()
+                        self._spiel_naechster_planen(c)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Spielwiese-Schleife")
+            await asyncio.sleep(30)
+
+    async def handle_admin_spielwiese(self, request):
+        """GET: Einstellungen + Zustand. POST: Einstellungen speichern."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if request.method == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+            alt = self._spiel_cfg()
+            neu = {}
+            try:
+                neu["enabled"] = bool(body.get("enabled"))
+                neu["raum"] = str(body.get("raum") or alt["raum"]).strip()
+                for k, lo, hi in (("pause_min", 5, 1440), ("pause_max", 5, 1440),
+                                  ("wechsel_min", 2, 20), ("wechsel_max", 2, 20),
+                                  ("ruhe_nach_mensch_s", 0, 7200)):
+                    neu[k] = max(lo, min(hi, int(float(body.get(k, alt[k])))))
+                for k in ("von", "bis"):
+                    v = str(body.get(k, alt[k])).strip()
+                    if not re.fullmatch(r"\d{1,2}:\d{2}", v):
+                        raise ValueError(f"{k}: Uhrzeit als HH:MM")
+                    neu[k] = v
+                neu["themen"] = [str(t).strip()[:200] for t in body.get("themen") or []
+                                 if str(t).strip()][:200]
+                neu["nachrichten"] = bool(body.get("nachrichten"))
+                an = str(body.get("anbieter", alt["anbieter"]) or "").strip().lower()
+                if an and an not in self._SPIEL_MODELL_FELD:
+                    raise ValueError(f"unbekannter Anbieter {an}")
+                neu["anbieter"] = an
+                neu["modell"] = str(body.get("modell", alt["modell"]) or "").strip()[:80] if an else ""
+            except (ValueError, TypeError) as e:
+                return web.json_response({"error": str(e)}, status=400)
+            if not any(r.name == neu["raum"] for r in self.rooms.values()):
+                return web.json_response({"error": f"Raum {neu['raum']} gibt es nicht"}, status=400)
+            def aendern(disk):
+                disk.setdefault("voice", {})["spielwiese"] = neu
+            self._cfg_auf_platte(aendern)
+            self.cfg.setdefault("voice", {})["spielwiese"] = neu
+            if neu["enabled"] and not alt.get("enabled"):
+                self._spiel_naechster_planen(neu)
+            log.info("Admin: Spielwiese gespeichert (%s, KI: %s)", "an" if neu["enabled"] else "aus",
+                     self._spiel_ki_text(neu))
+        c = self._spiel_cfg()
+        z = self._spiel_zust
+        zeilen = [{"t": t, "wer": w[:-5] if w.endswith(" (du)") else w, "text": x,
+                   "bot": w.endswith(" (du)")}
+                  for t, w, x in self._room_hist.get(c["raum"], [])[-40:]]
+        return web.json_response({
+            "cfg": c, "raeume": [r.name for r in self.rooms.values()],
+            "laeuft": z["laeuft"], "thema": z["thema"], "wechsel": z["wechsel"],
+            "naechster": z["naechster"] if c.get("enabled") else 0,
+            "im_fenster": self._spiel_im_fenster(c),
+            "verlauf": list(reversed(z["verlauf"])), "zeilen": zeilen,
+            "namen": [n for _b, n in self._spiel_namen()],
+            "ki": self._spiel_ki_text(c),
+            "ki_standard": self._spiel_ki_text({}),
+            **({"modelle": await self._spiel_modelle()}
+               if request.rel_url.query.get("modelle") else {})})
+
+    async def handle_admin_spielwiese_start(self, request):
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if self._spiel_zust["laeuft"]:
+            return web.json_response({"error": "Es läuft schon ein Gespräch"}, status=409)
+        thema = str(body.get("thema") or "").strip() or None
+        asyncio.create_task(self._spiel_gespraech(thema))
+        return web.json_response({"ok": True})
+
+    async def handle_admin_spielwiese_stopp(self, request):
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        self._spiel_zust["stopp"] = True
+        return web.json_response({"ok": True})
+
+    async def handle_admin_spielwiese_trocken(self, request):
+        """POST {verlauf: [{bot, wer, text}], thema, n} → naechster Satz, sendet NICHTS."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+            verlauf = [v for v in body.get("verlauf") or [] if isinstance(v, dict)][-30:]
+            n = max(2, min(20, int(body.get("n") or 6)))
+        except Exception:
+            return web.json_response({"error": "bad request"}, status=400)
+        c = self._spiel_cfg()
+        # Trockentest darf ein anderes Modell ausprobieren, ohne es zu speichern
+        for k in ("anbieter", "modell"):
+            if isinstance(body.get(k), str):
+                c[k] = body[k].strip()[:80]
+        namen = self._spiel_namen()
+        if len(namen) < 2:
+            return web.json_response({"error": "es gibt nur einen KI-Funker"}, status=400)
+        thema = body.get("thema")
+        if thema is None and not verlauf:
+            thema = await self._spiel_thema(c)
+        thema = str(thema or "")
+        i = len(verlauf)
+        if i == 0:
+            erster = random.randrange(2)
+        else:
+            erster = next((k for k, (b, _n) in enumerate(namen) if b == verlauf[0].get("bot")), 0)
+        bid, name = namen[(erster + i) % 2]
+        andere = namen[(erster + i + 1) % 2][1]
+        t = time.time() - 20 * len(verlauf)
+        hist = [(t + 20 * k, f"{v.get('wer')} (du)", str(v.get("text") or "")) if v.get("bot") == bid
+                else (t + 20 * k, str(v.get("wer") or ""), str(v.get("text") or ""))
+                for k, v in enumerate(verlauf)]
+        # Fremde Bot-Zeilen ohne "(du)": der Prompt zeigt sie als "Susi: ..."
+        tok_b, tok_r = self._bot_im(bid), self._raum_setzen(c["raum"])
+        try:
+            bot = self._spiel_ki(self._bot_cfg(), c)
+            zusatz = self._spiel_zusatz(i, n, andere, andere, c["raum"], thema)
+            t0 = time.time()
+            answer, raw = await self._bot_ollama(bot, hist, with_raw=True, zusatz=zusatz)
+            answer, stimmung = self._emotion_abtrennen(answer or "", bot)
+        finally:
+            _BOT_RAUM.reset(tok_r)
+            _BOT_KONTEXT.reset(tok_b)
+        return web.json_response({"bot": bid, "name": name, "thema": thema,
+                                  "answer": answer.strip() or "SKIP",
+                                  "would_reply": bool(answer.strip()), "stimmung": stimmung,
+                                  "zusatz": zusatz, "seconds": round(time.time() - t0, 1),
+                                  "letzter": i == n - 1, "ki": self._spiel_ki_text(c)})
+
     # Zwiegespraech-Trockentest (25.10.): Robert und Susi abwechselnd im Chat,
     # sendet NICHTS. Die Seite ruft je Wechsel einen Schritt ab und haelt den
     # Verlauf selbst -- so beendet der Not-Halt dort sofort alles.
@@ -12346,9 +12700,10 @@ class TXServer:
             namen = bot_namen[name]
         ohne = list(bot_namen) if namen else None
         loop = asyncio.get_running_loop()
+        gesondert = self._archiv_gesondert()
         entries, total = await loop.run_in_executor(
             None, _archive.query_entries, limit, offset, room, search, date_from, date_to,
-            namen, ohne
+            namen, ohne, gesondert
         )
         rooms = await loop.run_in_executor(None, _archive.get_rooms)
         # Sprecher-Details (Aehnlichkeiten) nur fuer Admins -- das Archiv ist
@@ -12361,14 +12716,22 @@ class TXServer:
         wav_dir = Path(self.cfg.get("transcription", {}).get("wav_dir", "/opt/FRN/recordings"))
         pending = len(list(wav_dir.glob("*.meta")))
         return web.json_response({"entries": entries, "total": total, "rooms": rooms,
-                                  "pending": pending, "bot_namen": list(bot_namen)})
+                                  "pending": pending, "bot_namen": list(bot_namen),
+                                  "gesondert": gesondert})
+
+    def _archiv_gesondert(self) -> list[str]:
+        """Raeume, die im Archiv getrennt stehen (nicht unter "Alle Raeume"):
+        die Spielwiese der KI-Funker (10.11.2026)."""
+        raum = (self.cfg.get("voice", {}).get("spielwiese") or {}).get("raum")
+        return [raum] if raum else []
 
     async def handle_archive_stats(self, request):
         if not _ARCHIVE_AVAILABLE:
             return web.json_response({"error": "archive not available"}, status=503)
         days = self._int_param(request.rel_url.query, "days", 30, 1, 3650)
         loop = asyncio.get_running_loop()
-        stats = await loop.run_in_executor(None, _archive.get_stats, days)
+        stats = await loop.run_in_executor(None, _archive.get_stats, days,
+                                           self._archiv_gesondert())
         return web.json_response(stats)
 
     async def handle_archive_comments_get(self, request):
@@ -12408,10 +12771,12 @@ class TXServer:
         search = q.get("search", "")
         loop = asyncio.get_running_loop()
         messages, total = await loop.run_in_executor(
-            None, _archive.query_chat_messages, limit, offset, room, search
+            None, _archive.query_chat_messages, limit, offset, room, search,
+            self._archiv_gesondert()
         )
         rooms = await loop.run_in_executor(None, _archive.get_chat_rooms)
-        return web.json_response({"messages": messages, "total": total, "rooms": rooms})
+        return web.json_response({"messages": messages, "total": total, "rooms": rooms,
+                                  "gesondert": self._archiv_gesondert()})
 
     # Safari auf iPhone/iPad spielt kein Opus im Ogg-Container: der Balken
     # rast beim Druck auf Play durch, ohne dass ein Ton kommt (2026-09-22 vom
@@ -12520,6 +12885,7 @@ class TXServer:
         await self._discover_rooms()
         self._tagesprogramm_task = asyncio.create_task(self._tagesprogramm_loop())
         self._rueckblick_task = asyncio.create_task(self._rueckblick_loop())
+        self._spiel_task = asyncio.create_task(self._spiel_loop())
 
     def build_app(self) -> web.Application:
         app = web.Application(middlewares=[self.cors_middleware])
@@ -12573,6 +12939,11 @@ class TXServer:
         app.router.add_post  ("/api/admin/rooms",         self.handle_admin_rooms_create)
         app.router.add_delete("/api/admin/rooms/{mount}", self.handle_admin_rooms_delete)
         app.router.add_get   ("/api/admin/konten",            self.handle_admin_konten)
+        app.router.add_get   ("/api/admin/spielwiese",        self.handle_admin_spielwiese)
+        app.router.add_post  ("/api/admin/spielwiese",        self.handle_admin_spielwiese)
+        app.router.add_post  ("/api/admin/spielwiese/start", self.handle_admin_spielwiese_start)
+        app.router.add_post  ("/api/admin/spielwiese/stopp", self.handle_admin_spielwiese_stopp)
+        app.router.add_post  ("/api/admin/spielwiese/trocken", self.handle_admin_spielwiese_trocken)
         app.router.add_post  ("/api/admin/konten/zuordnung",  self.handle_admin_konten_zuordnung)
         app.router.add_post  ("/api/admin/konten/konto",      self.handle_admin_konten_konto)
         app.router.add_delete("/api/admin/konten/konto",      self.handle_admin_konten_konto_delete)
