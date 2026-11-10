@@ -1434,6 +1434,7 @@ audio {
         <div class="form-field"><label>bis</label><input type="text" id="spiel-bis" placeholder="21:00"></div>
         <div class="form-field"><label>Ruhe, nachdem ein Mensch sprach (Min.)</label><input type="number" id="spiel-ruhe" min="0" max="120"></div>
         <div class="form-field"><label><input type="checkbox" id="spiel-nachrichten"> Auch Schlagzeilen (tagesschau) als Thema</label></div>
+        <div class="form-field"><label><input type="checkbox" id="spiel-endlos"> Endlos: nach jedem Gespräch (auch bei SKIP) gleich ein neues Thema – bis STOPP oder Schalter aus</label></div>
         <div class="form-field"><label>Sprachmodell – Anbieter</label>
           <select id="spiel-anbieter" onchange="spielModellListe()">
             <option value="">wie Robert &amp; Susi sonst</option>
@@ -6852,13 +6853,14 @@ async function spielLaden(nurStatus) {
   if (!r.ok) { document.getElementById("spiel-status").textContent = d.error || "Fehler"; return; }
   const c = d.cfg;
   let st;
-  if (d.laeuft) st = `<b style="color:var(--green,#4ade80)">● Gespräch läuft</b> – Thema: ${esc(d.thema || "frei gewählt")} · Wechsel ${d.wechsel}`;
+  if (d.laeuft) st = `<b style="color:var(--green,#4ade80)">● Gespräch läuft</b> – Thema: ${esc(d.thema || "frei gewählt")} · Wechsel ${d.wechsel}` + (c.endlos ? " · <b>endlos</b>" : "");
+  else if (d.endlos_pause) st = `<b style="color:var(--green,#4ade80)">● Endlos</b> – kurze Pause, gleich kommt ein neues Thema`;
   else if (!c.enabled) st = "Automatik ist aus – Gespräche nur per Knopf.";
   else if (!d.im_fenster) st = `Außerhalb der Zeit (${esc(c.von)}–${esc(c.bis)}).`;
   else st = d.naechster ? `Nächstes Gespräch gegen ${_spielZeit(d.naechster)}.` : "Wird geplant …";
   document.getElementById("spiel-status").innerHTML = st + ` <small>(${esc(d.namen.join(" & "))} in ${esc(c.raum)} · KI: ${esc(d.ki)})</small>`;
-  document.getElementById("spiel-start-btn").disabled = d.laeuft;
-  document.getElementById("spiel-stopp-btn").disabled = !d.laeuft;
+  document.getElementById("spiel-start-btn").disabled = d.laeuft || d.endlos_pause;
+  document.getElementById("spiel-stopp-btn").disabled = !(d.laeuft || d.endlos_pause);
   if (!nurStatus) {
     document.getElementById("spiel-enabled").checked = !!c.enabled;
     document.getElementById("spiel-raum").innerHTML = d.raeume.map(n =>
@@ -6871,6 +6873,7 @@ async function spielLaden(nurStatus) {
     document.getElementById("spiel-bis").value = c.bis;
     document.getElementById("spiel-ruhe").value = Math.round(c.ruhe_nach_mensch_s / 60);
     document.getElementById("spiel-nachrichten").checked = !!c.nachrichten;
+    document.getElementById("spiel-endlos").checked = !!c.endlos;
     document.getElementById("spiel-themen").value = (c.themen || []).join("\n");
     _spielModelle = d.modelle || {};
     document.getElementById("spiel-anbieter").options[0].textContent = "wie Robert & Susi sonst (" + d.ki_standard + ")";
@@ -6891,7 +6894,7 @@ async function spielLaden(nurStatus) {
   clearTimeout(_spielTimer);
   _spielTimer = setTimeout(() => {
     if (document.getElementById("admin-tab-spielwiese")?.classList.contains("active")) spielLaden(true);
-  }, d.laeuft ? 4000 : 15000);
+  }, (d.laeuft || d.endlos_pause) ? 4000 : 15000);
 }
 async function spielSpeichern() {
   const v = id => document.getElementById(id).value;
@@ -6902,6 +6905,7 @@ async function spielSpeichern() {
     von: v("spiel-von").trim(), bis: v("spiel-bis").trim(),
     ruhe_nach_mensch_s: Math.round(+v("spiel-ruhe") * 60),
     nachrichten: document.getElementById("spiel-nachrichten").checked,
+    endlos: document.getElementById("spiel-endlos").checked,
     themen: v("spiel-themen").split("\n").map(t => t.trim()).filter(Boolean),
     anbieter: v("spiel-anbieter"), modell: v("spiel-modell").trim(),
   };

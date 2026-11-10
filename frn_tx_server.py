@@ -8611,7 +8611,10 @@ class TXServer:
                        "nachrichten": True, "ruhe_nach_mensch_s": 600,
                        # Eigenes Sprachmodell nur fuer die Spielwiese (10.11.):
                        # anbieter "" = wie Robert/Susi sonst, modell "" = dessen Standard
-                       "anbieter": "", "modell": ""}
+                       "anbieter": "", "modell": "",
+                       # Endlos (10.11.): nach jedem Gespraech -- auch wenn einer
+                       # SKIP sagt -- sofort ein neues Thema, bis Stopp/Schalter aus
+                       "endlos": False}
     _SPIEL_MODELL_FELD = {"ollama": "ollama_model", "mistral": "mistral_model",
                           "ollama_cloud": "ollama_cloud_model", "gemini": "gemini_model"}
     _SPIEL_START = "Du wohnst mit {andere} zusammen und ihr funkt im {raum}, eurem eigenen Funkraum. Fang ein lockeres Gespräch mit {andere} an{thema}."
@@ -8704,11 +8707,24 @@ class TXServer:
         die Spielwiese antwortet. True = normale Antwortlogik ueberspringen.
         Sprach-Steuerbefehle ("Robert aus") gehen weiter den normalen Weg."""
         z = self._spiel_zust
-        if not z["laeuft"] or room_name != self._spiel_cfg()["raum"]:
+        if room_name != self._spiel_cfg()["raum"]:
             return False
         bot = self._bot_cfg()
         if self._bot_command(bot, bot.get("name") or "Robert", low):
             return False
+        if not z["laeuft"] and not z.get("endlos_aktiv"):
+            # Gespraech per Funk anstossen (10.11.): "Robert, Susi, unterhaltet
+            # euch mal ueber das Wetter" -- startet wie der Knopf im Reiter.
+            thema = self._spiel_auftrag(low, text)
+            if thema is None:
+                return False
+            wer = (callsign or "").strip() or "Funker"
+            log.info("[%s] Spielwiese: Gespräch per Funk angestoßen von %s, Thema: %s",
+                     room_name, wer, thema or "(automatisch)")
+            self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
+                                  detail="Spielwiese per Funk gestartet", final=True)
+            asyncio.create_task(self._spiel_starten(thema or None, auftrag_von=wer))
+            return True
         gerufen = None
         for bid, name in self._spiel_namen():
             if re.search(r"\b" + re.escape(name.lower()) + r"\b", low):
@@ -8719,6 +8735,30 @@ class TXServer:
         self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
                               detail="Einwurf in die Spielwiese -- wird dort beantwortet", final=True)
         return True
+
+    _SPIEL_AUFTRAG_RE = re.compile(
+        r"\b(unterhaltet|redet|quatscht|plaudert|sprecht|erzählt|diskutiert|schnackt|labert"
+        r"|unterhalten|quatschen|plaudern|schnacken)\b")
+    _SPIEL_THEMA_RE = re.compile(r"\b(?:über|von|zum thema)\s+(.{3,120})", re.IGNORECASE)
+
+    def _spiel_auftrag(self, low: str, text: str) -> str | None:
+        """None = kein Auftrag; "" = Auftrag ohne Thema; sonst das Thema.
+        Verlangt die Mehrzahl-Aufforderung UND einen Bezug auf beide
+        ("euch", "ihr beiden" oder beide Namen) -- "er redet viel" zaehlt nicht."""
+        if not self._SPIEL_AUFTRAG_RE.search(low):
+            return None
+        namen = [n.lower() for _b, n in self._spiel_namen()]
+        beide = len(namen) >= 2 and all(re.search(r"\b" + re.escape(n) + r"\b", low) for n in namen)
+        if not (beide or re.search(r"\b(euch|ihr beiden|ihr zwei|ihr beide)\b", low)):
+            return None
+        m = self._SPIEL_THEMA_RE.search(text)
+        if not m:
+            return ""
+        thema = re.sub(r"^(mal|doch|bitte|einfach)\s+", "", m.group(1).strip(), flags=re.IGNORECASE)
+        thema = re.sub(r"\s+(unterhalten|reden|quatschen|plaudern|sprechen|erzählen)\b.*$", "",
+                       thema, flags=re.IGNORECASE)
+        thema = re.sub(r",?\s+(ja|oder|bitte|mal)\s*[?!.]*$", "", thema.strip(), flags=re.IGNORECASE)
+        return thema.strip(" .,!?;:\"'„“")
 
     def _spiel_namen(self) -> list[tuple[str, str]]:
         """[(bot_id, name)] der ersten beiden KI-Funker."""
@@ -8753,7 +8793,7 @@ class TXServer:
         z = self._SPIEL_WEITER.format(von=von)
         return z + (self._SPIEL_ENDE if i == n - 1 else "")
 
-    async def _spiel_gespraech(self, thema: str | None = None) -> str:
+    async def _spiel_gespraech(self, thema: str | None = None, auftrag_von: str = "") -> str:
         """Ein Gespraech live im Spielwiesen-Raum. Rueckgabe: wie es endete."""
         c = self._spiel_cfg()
         raum = c["raum"]
@@ -8766,8 +8806,11 @@ class TXServer:
             return "es gibt nur einen KI-Funker"
         if z["laeuft"]:
             return "läuft schon"
+        # Einwurf aus der Endlos-Pause (letzte 30 s, noch nicht beantwortet)
+        # bleibt stehen und wird gleich im ersten Wechsel aufgegriffen.
         z.update(laeuft=True, stopp=False, wechsel=0, beginn=time.time(),
-                 einwurf=None, einwurf_erledigt=0.0, einwurf_dran=False, einwuerfe=0)
+                 einwurf_erledigt=max(z.get("einwurf_erledigt", 0.0), time.time() - 30),
+                 einwurf_dran=False, einwuerfe=0)
         ende = "fertig"
         try:
             if thema is None:
@@ -8801,6 +8844,9 @@ class TXServer:
                     if not bot.get("enabled"):
                         ende = f"{name} ist aus"; break
                     zusatz = self._spiel_zusatz(i, n, andere, andere, raum, thema)
+                    if i == 0 and auftrag_von:
+                        zusatz = (f"{auftrag_von} hat euch eben über Funk gebeten, euch zu unterhalten. "
+                                  + zusatz)
                     if einwurf and z["einwurf_erledigt"] == einwurf[0] and not z.get("einwurf_dran"):
                         z["einwurf_dran"] = True
                         zusatz = self._SPIEL_EINWURF.format(wer=einwurf[1])
@@ -8846,6 +8892,39 @@ class TXServer:
                      raum, z["wechsel"], ende)
         return ende
 
+    async def _spiel_starten(self, thema: str | None = None, auftrag_von: str = "") -> str:
+        """Ein Gespraech -- im Endlos-Modus danach immer wieder ein neues Thema.
+        Endet bei Stopp, Schalter aus, ausgeschaltetem Bot oder drei Runden
+        hintereinander ohne einen einzigen Satz (Modell-/Box-Fehler)."""
+        z = self._spiel_zust
+        if z["laeuft"] or z.get("endlos_aktiv"):
+            return "läuft schon"
+        z["endlos_stopp"] = False
+        leer = 0
+        try:
+            while True:
+                ende = await self._spiel_gespraech(thema, auftrag_von)
+                thema, auftrag_von = None, ""
+                c = self._spiel_cfg()
+                if not c.get("endlos") or z.get("endlos_stopp") or z["stopp"]:
+                    return ende
+                if not (ende == "fertig" or ende.endswith("hat nichts gesagt")):
+                    return ende           # aus, Fehler, Raum fehlt ...
+                leer = leer + 1 if z["wechsel"] == 0 else 0
+                if leer >= 3:
+                    log.info("[%s] Spielwiese endlos: dreimal kein Satz -- Schluss", c["raum"])
+                    return "endlos beendet: dreimal kein Satz"
+                z["endlos_aktiv"] = True
+                bis = time.time() + random.uniform(10.0, 25.0) * (1 + leer)
+                while time.time() < bis and not z.get("endlos_stopp"):
+                    await asyncio.sleep(0.5)
+                z["endlos_aktiv"] = False
+                if z.get("endlos_stopp"):
+                    return "gestoppt"
+                log.info("[%s] Spielwiese endlos: neues Thema", c["raum"])
+        finally:
+            z["endlos_aktiv"] = False
+
     def _spiel_naechster_planen(self, c: dict) -> None:
         lo, hi = sorted((float(c.get("pause_min") or 45), float(c.get("pause_max") or 90)))
         self._spiel_zust["naechster"] = time.time() + random.uniform(lo, hi) * 60
@@ -8865,7 +8944,7 @@ class TXServer:
                     if self._spiel_mensch_aktiv(c) or c["raum"] in self._bot_busy:
                         z["naechster"] = time.time() + 300   # spaeter nochmal
                     else:
-                        await self._spiel_gespraech()
+                        await self._spiel_starten()
                         self._spiel_naechster_planen(c)
             except asyncio.CancelledError:
                 raise
@@ -8900,6 +8979,7 @@ class TXServer:
                 neu["themen"] = [str(t).strip()[:200] for t in body.get("themen") or []
                                  if str(t).strip()][:200]
                 neu["nachrichten"] = bool(body.get("nachrichten"))
+                neu["endlos"] = bool(body.get("endlos"))
                 an = str(body.get("anbieter", alt["anbieter"]) or "").strip().lower()
                 if an and an not in self._SPIEL_MODELL_FELD:
                     raise ValueError(f"unbekannter Anbieter {an}")
@@ -8925,6 +9005,7 @@ class TXServer:
         return web.json_response({
             "cfg": c, "raeume": [r.name for r in self.rooms.values()],
             "laeuft": z["laeuft"], "thema": z["thema"], "wechsel": z["wechsel"],
+            "endlos_pause": bool(z.get("endlos_aktiv")),
             "naechster": z["naechster"] if c.get("enabled") else 0,
             "im_fenster": self._spiel_im_fenster(c),
             "verlauf": list(reversed(z["verlauf"])), "zeilen": zeilen,
@@ -8942,10 +9023,10 @@ class TXServer:
             body = await request.json()
         except Exception:
             body = {}
-        if self._spiel_zust["laeuft"]:
+        if self._spiel_zust["laeuft"] or self._spiel_zust.get("endlos_aktiv"):
             return web.json_response({"error": "Es läuft schon ein Gespräch"}, status=409)
         thema = str(body.get("thema") or "").strip() or None
-        asyncio.create_task(self._spiel_gespraech(thema))
+        asyncio.create_task(self._spiel_starten(thema))
         return web.json_response({"ok": True})
 
     async def handle_admin_spielwiese_stopp(self, request):
@@ -8953,6 +9034,7 @@ class TXServer:
         if err:
             return err
         self._spiel_zust["stopp"] = True
+        self._spiel_zust["endlos_stopp"] = True
         return web.json_response({"ok": True})
 
     async def handle_admin_spielwiese_trocken(self, request):
