@@ -8614,12 +8614,16 @@ class TXServer:
                        "anbieter": "", "modell": "",
                        # Endlos (10.11.): nach jedem Gespraech -- auch wenn einer
                        # SKIP sagt -- sofort ein neues Thema, bis Stopp/Schalter aus
-                       "endlos": False}
+                       "endlos": False,
+                       # Echte Funkraeume (10.11.), in denen "unterhaltet euch
+                       # ueber ..." ein kurzes Gespraech startet -- ohne Endlos
+                       "funk_raeume": [], "funk_wechsel": 4}
     _SPIEL_MODELL_FELD = {"ollama": "ollama_model", "mistral": "mistral_model",
                           "ollama_cloud": "ollama_cloud_model", "gemini": "gemini_model"}
     _SPIEL_START = "Du wohnst mit {andere} zusammen und ihr funkt im {raum}, eurem eigenen Funkraum. Fang ein lockeres Gespräch mit {andere} an{thema}."
     _SPIEL_WEITER = "{von} unterhält sich mit dir. Antworte {von} wie in einem normalen Gespräch zu zweit."
     _SPIEL_ENDE = " Lass das Gespräch jetzt freundlich ausklingen."
+    _SPIEL_START_FUNK = "Du wohnst mit {andere} zusammen. Fang hier im {raum} ein lockeres Gespräch mit {andere} an{thema}."
     _SPIEL_EINWURF = ("{wer} hat sich eben über Funk in euer Gespräch eingeschaltet. "
                       "Geh auf {wer} ein und bezieh es in euer Gespräch ein.")
 
@@ -8707,7 +8711,14 @@ class TXServer:
         die Spielwiese antwortet. True = normale Antwortlogik ueberspringen.
         Sprach-Steuerbefehle ("Robert aus") gehen weiter den normalen Weg."""
         z = self._spiel_zust
-        if room_name != self._spiel_cfg()["raum"]:
+        c = self._spiel_cfg()
+        if z["laeuft"]:
+            if room_name != z.get("raum_aktiv"):
+                return False
+        elif z.get("endlos_aktiv"):
+            if room_name != c["raum"]:
+                return False
+        elif room_name != c["raum"] and room_name not in (c.get("funk_raeume") or []):
             return False
         bot = self._bot_cfg()
         if self._bot_command(bot, bot.get("name") or "Robert", low):
@@ -8723,7 +8734,7 @@ class TXServer:
                      room_name, wer, thema or "(automatisch)")
             self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
                                   detail="Spielwiese per Funk gestartet", final=True)
-            asyncio.create_task(self._spiel_starten(thema or None, auftrag_von=wer))
+            asyncio.create_task(self._spiel_starten(thema or None, auftrag_von=wer, raum=room_name))
             return True
         gerufen = None
         for bid, name in self._spiel_namen():
@@ -8786,17 +8797,22 @@ class TXServer:
             del zuletzt[:-15]
         return thema
 
-    def _spiel_zusatz(self, i: int, n: int, andere: str, von: str, raum: str, thema: str) -> str:
+    def _spiel_zusatz(self, i: int, n: int, andere: str, von: str, raum: str, thema: str,
+                      eigen: bool = True) -> str:
         if i == 0:
             t = f" über: {thema}" if thema else " über ein Alltagsthema deiner Wahl"
-            return self._SPIEL_START.format(andere=andere, raum=raum, thema=t)
+            vorlage = self._SPIEL_START if eigen else self._SPIEL_START_FUNK
+            return vorlage.format(andere=andere, raum=raum, thema=t)
         z = self._SPIEL_WEITER.format(von=von)
         return z + (self._SPIEL_ENDE if i == n - 1 else "")
 
-    async def _spiel_gespraech(self, thema: str | None = None, auftrag_von: str = "") -> str:
-        """Ein Gespraech live im Spielwiesen-Raum. Rueckgabe: wie es endete."""
+    async def _spiel_gespraech(self, thema: str | None = None, auftrag_von: str = "",
+                               raum: str | None = None) -> str:
+        """Ein Gespraech live im Spielwiesen-Raum (oder, per Funk angestossen,
+        in einem freigegebenen echten Raum). Rueckgabe: wie es endete."""
         c = self._spiel_cfg()
-        raum = c["raum"]
+        raum = raum or c["raum"]
+        eigen = raum == c["raum"]
         z = self._spiel_zust
         room = next((r for r in self.rooms.values() if r.name == raum), None)
         namen = self._spiel_namen()
@@ -8808,7 +8824,7 @@ class TXServer:
             return "läuft schon"
         # Einwurf aus der Endlos-Pause (letzte 30 s, noch nicht beantwortet)
         # bleibt stehen und wird gleich im ersten Wechsel aufgegriffen.
-        z.update(laeuft=True, stopp=False, wechsel=0, beginn=time.time(),
+        z.update(laeuft=True, stopp=False, wechsel=0, beginn=time.time(), raum_aktiv=raum,
                  einwurf_erledigt=max(z.get("einwurf_erledigt", 0.0), time.time() - 30),
                  einwurf_dran=False, einwuerfe=0)
         ende = "fertig"
@@ -8818,6 +8834,8 @@ class TXServer:
             z["thema"] = thema
             lo, hi = sorted((int(c.get("wechsel_min") or 4), int(c.get("wechsel_max") or 8)))
             n = random.randint(max(2, lo), max(2, hi))
+            if not eigen:
+                n = max(2, min(10, int(c.get("funk_wechsel") or 4)))
             erster = random.randrange(2)
             log.info("[%s] Spielwiese: Gespräch beginnt, %d Wechsel, Thema: %s, KI: %s",
                      raum, n, thema or "(frei)", self._spiel_ki_text(c))
@@ -8834,7 +8852,7 @@ class TXServer:
                     if einwurf[3] is not None:      # beim Namen gerufen
                         erster = (next((k for k, (b, _n) in enumerate(namen) if b == einwurf[3]),
                                        (erster + i) % 2) - i) % 2
-                    n = min(max(n, i + 4), i + 6, 40)
+                    n = min(max(n, i + (4 if eigen else 2)), i + 6, 40)
                 bid, name = namen[(erster + i) % 2]
                 _bid2, andere = namen[(erster + i + 1) % 2]
                 vorher = max((t1 for _t0, t1, _x in self._bot_own_tx.get(raum, [])), default=0.0)
@@ -8843,7 +8861,7 @@ class TXServer:
                     bot = self._spiel_ki(self._bot_cfg(), c)
                     if not bot.get("enabled"):
                         ende = f"{name} ist aus"; break
-                    zusatz = self._spiel_zusatz(i, n, andere, andere, raum, thema)
+                    zusatz = self._spiel_zusatz(i, n, andere, andere, raum, thema, eigen)
                     if i == 0 and auftrag_von:
                         zusatz = (f"{auftrag_von} hat euch eben über Funk gebeten, euch zu unterhalten. "
                                   + zusatz)
@@ -8884,7 +8902,7 @@ class TXServer:
         finally:
             z["laeuft"] = False
             z["verlauf"].append({"beginn": z.get("beginn"), "ende_ts": time.time(),
-                                 "thema": z.get("thema") or "(frei)",
+                                 "thema": z.get("thema") or "(frei)", "raum": raum,
                                  "wechsel": z["wechsel"], "ende": ende
                                  + (f", {z['einwuerfe']} Einwurf/-würfe" if z.get("einwuerfe") else "")})
             del z["verlauf"][:-20]
@@ -8892,7 +8910,8 @@ class TXServer:
                      raum, z["wechsel"], ende)
         return ende
 
-    async def _spiel_starten(self, thema: str | None = None, auftrag_von: str = "") -> str:
+    async def _spiel_starten(self, thema: str | None = None, auftrag_von: str = "",
+                             raum: str | None = None) -> str:
         """Ein Gespraech -- im Endlos-Modus danach immer wieder ein neues Thema.
         Endet bei Stopp, Schalter aus, ausgeschaltetem Bot oder drei Runden
         hintereinander ohne einen einzigen Satz (Modell-/Box-Fehler)."""
@@ -8903,9 +8922,11 @@ class TXServer:
         leer = 0
         try:
             while True:
-                ende = await self._spiel_gespraech(thema, auftrag_von)
+                ende = await self._spiel_gespraech(thema, auftrag_von, raum)
                 thema, auftrag_von = None, ""
                 c = self._spiel_cfg()
+                if raum and raum != c["raum"]:
+                    return ende            # echte Funkraeume nie endlos
                 if not c.get("endlos") or z.get("endlos_stopp") or z["stopp"]:
                     return ende
                 if not (ende == "fertig" or ende.endswith("hat nichts gesagt")):
@@ -8980,6 +9001,9 @@ class TXServer:
                                  if str(t).strip()][:200]
                 neu["nachrichten"] = bool(body.get("nachrichten"))
                 neu["endlos"] = bool(body.get("endlos"))
+                neu["funk_raeume"] = [str(r).strip() for r in body.get("funk_raeume", alt["funk_raeume"]) or []
+                                      if str(r).strip()]
+                neu["funk_wechsel"] = max(2, min(10, int(float(body.get("funk_wechsel", alt["funk_wechsel"])))))
                 an = str(body.get("anbieter", alt["anbieter"]) or "").strip().lower()
                 if an and an not in self._SPIEL_MODELL_FELD:
                     raise ValueError(f"unbekannter Anbieter {an}")
@@ -8987,8 +9011,11 @@ class TXServer:
                 neu["modell"] = str(body.get("modell", alt["modell"]) or "").strip()[:80] if an else ""
             except (ValueError, TypeError) as e:
                 return web.json_response({"error": str(e)}, status=400)
-            if not any(r.name == neu["raum"] for r in self.rooms.values()):
-                return web.json_response({"error": f"Raum {neu['raum']} gibt es nicht"}, status=400)
+            namen_r = {r.name for r in self.rooms.values()}
+            for rn in [neu["raum"]] + neu["funk_raeume"]:
+                if rn not in namen_r:
+                    return web.json_response({"error": f"Raum {rn} gibt es nicht"}, status=400)
+            neu["funk_raeume"] = [r for r in neu["funk_raeume"] if r != neu["raum"]]
             def aendern(disk):
                 disk.setdefault("voice", {})["spielwiese"] = neu
             self._cfg_auf_platte(aendern)
@@ -9006,6 +9033,7 @@ class TXServer:
             "cfg": c, "raeume": [r.name for r in self.rooms.values()],
             "laeuft": z["laeuft"], "thema": z["thema"], "wechsel": z["wechsel"],
             "endlos_pause": bool(z.get("endlos_aktiv")),
+            "raum_aktiv": z.get("raum_aktiv") if z["laeuft"] else "",
             "naechster": z["naechster"] if c.get("enabled") else 0,
             "im_fenster": self._spiel_im_fenster(c),
             "verlauf": list(reversed(z["verlauf"])), "zeilen": zeilen,

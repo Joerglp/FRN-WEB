@@ -1434,6 +1434,9 @@ audio {
         <div class="form-field"><label>bis</label><input type="text" id="spiel-bis" placeholder="21:00"></div>
         <div class="form-field"><label>Ruhe, nachdem ein Mensch sprach (Min.)</label><input type="number" id="spiel-ruhe" min="0" max="120"></div>
         <div class="form-field"><label><input type="checkbox" id="spiel-nachrichten"> Auch Schlagzeilen (tagesschau) als Thema</label></div>
+        <div class="form-field full"><label>Per Funk startbar auch in diesen echten Räumen („Robert, Susi, unterhaltet euch mal über …“, kurz, ohne Endlos)</label>
+          <div id="spiel-funk-raeume" style="display:flex;flex-wrap:wrap;gap:12px"></div></div>
+        <div class="form-field"><label>Wechsel in echten Räumen</label><input type="number" id="spiel-funk-wechsel" min="2" max="10"></div>
         <div class="form-field"><label><input type="checkbox" id="spiel-endlos"> Endlos: nach jedem Gespräch (auch bei SKIP) gleich ein neues Thema – bis STOPP oder Schalter aus</label></div>
         <div class="form-field"><label>Sprachmodell – Anbieter</label>
           <select id="spiel-anbieter" onchange="spielModellListe()">
@@ -6853,7 +6856,7 @@ async function spielLaden(nurStatus) {
   if (!r.ok) { document.getElementById("spiel-status").textContent = d.error || "Fehler"; return; }
   const c = d.cfg;
   let st;
-  if (d.laeuft) st = `<b style="color:var(--green,#4ade80)">● Gespräch läuft</b> – Thema: ${esc(d.thema || "frei gewählt")} · Wechsel ${d.wechsel}` + (c.endlos ? " · <b>endlos</b>" : "");
+  if (d.laeuft) st = `<b style="color:var(--green,#4ade80)">● Gespräch läuft</b> – Thema: ${esc(d.thema || "frei gewählt")} · Wechsel ${d.wechsel}` + (d.raum_aktiv && d.raum_aktiv !== c.raum ? ` · <b>echt in ${esc(d.raum_aktiv)}</b>` : (c.endlos ? " · <b>endlos</b>" : ""));
   else if (d.endlos_pause) st = `<b style="color:var(--green,#4ade80)">● Endlos</b> – kurze Pause, gleich kommt ein neues Thema`;
   else if (!c.enabled) st = "Automatik ist aus – Gespräche nur per Knopf.";
   else if (!d.im_fenster) st = `Außerhalb der Zeit (${esc(c.von)}–${esc(c.bis)}).`;
@@ -6874,6 +6877,9 @@ async function spielLaden(nurStatus) {
     document.getElementById("spiel-ruhe").value = Math.round(c.ruhe_nach_mensch_s / 60);
     document.getElementById("spiel-nachrichten").checked = !!c.nachrichten;
     document.getElementById("spiel-endlos").checked = !!c.endlos;
+    document.getElementById("spiel-funk-raeume").innerHTML = d.raeume.filter(n => n !== c.raum).map(n =>
+      `<label style="font-weight:normal"><input type="checkbox" value="${esc(n)}"${(c.funk_raeume || []).includes(n) ? " checked" : ""}> ${esc(n)}</label>`).join("");
+    document.getElementById("spiel-funk-wechsel").value = c.funk_wechsel || 4;
     document.getElementById("spiel-themen").value = (c.themen || []).join("\n");
     _spielModelle = d.modelle || {};
     document.getElementById("spiel-anbieter").options[0].textContent = "wie Robert & Susi sonst (" + d.ki_standard + ")";
@@ -6889,7 +6895,7 @@ async function spielLaden(nurStatus) {
     : "<small>Noch nichts gesprochen.</small>";
   if (unten) box.scrollTop = box.scrollHeight;
   document.getElementById("spiel-verlauf").innerHTML = d.verlauf.length ? d.verlauf.map(v =>
-    `<div>${_spielZeit(v.beginn)} · ${esc(v.thema)} · ${v.wechsel} Wechsel · <small>${esc(v.ende)}</small></div>`).join("")
+    `<div>${_spielZeit(v.beginn)} · ${v.raum && v.raum !== c.raum ? "<b>" + esc(v.raum) + "</b> · " : ""}${esc(v.thema)} · ${v.wechsel} Wechsel · <small>${esc(v.ende)}</small></div>`).join("")
     : "<small>Noch keins.</small>";
   clearTimeout(_spielTimer);
   _spielTimer = setTimeout(() => {
@@ -6906,6 +6912,8 @@ async function spielSpeichern() {
     ruhe_nach_mensch_s: Math.round(+v("spiel-ruhe") * 60),
     nachrichten: document.getElementById("spiel-nachrichten").checked,
     endlos: document.getElementById("spiel-endlos").checked,
+    funk_raeume: [...document.querySelectorAll("#spiel-funk-raeume input:checked")].map(e => e.value),
+    funk_wechsel: +v("spiel-funk-wechsel"),
     themen: v("spiel-themen").split("\n").map(t => t.trim()).filter(Boolean),
     anbieter: v("spiel-anbieter"), modell: v("spiel-modell").trim(),
   };
