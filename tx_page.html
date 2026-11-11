@@ -2830,11 +2830,19 @@ function _initBgAudio() {
 
   // Auto-Recovery: reißt die Icecast-Mount ab (z. B. Capture-Stream-Neustart),
   // feuert 'error'/'ended'/'stalled' → neu verbinden, Lautstärke je nach Modus.
-  const _bgRecover = () => {
+  // 'stalled' feuert bei Live-Streams auch, wenn nur der Puffer voll ist und
+  // gerade nichts nachgeladen wird -- dann laeuft die Wiedergabe weiter. Ein
+  // unnoetiger src-Wechsel im gesperrten Zustand liess iOS die Wiedergabe
+  // beenden und den Tab einfrieren (Stream verschwand vom Sperrbildschirm,
+  // 2026-11-11). Daher nur neu verbinden, wenn sich currentTime nicht mehr bewegt.
+  const _bgRecover = (ev) => {
     if (!_bgAudioMount || !_bgAudioEnabled || _userPaused) return;
+    const t0 = _bgAudioEl.currentTime;
+    const nurStalled = ev && ev.type === "stalled";
     clearTimeout(_bgRecoverTimer);
     _bgRecoverTimer = setTimeout(() => {
       if (!_bgAudioMount) return;
+      if (nurStalled && !_bgAudioEl.paused && _bgAudioEl.currentTime > t0) return;
       _bgAudioEl.src    = `/stream/${encodeURIComponent(_bgAudioMount)}.mp3`;
       _bgHoerbar(document.visibilityState === "hidden");
       _bgAudioEl.play().catch(() => {});
