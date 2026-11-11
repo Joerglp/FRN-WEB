@@ -1437,6 +1437,9 @@ audio {
         <div class="form-field full"><label>Per Funk startbar auch in diesen echten Räumen („Robert, Susi, unterhaltet euch mal über …“, kurz, ohne Endlos)</label>
           <div id="spiel-funk-raeume" style="display:flex;flex-wrap:wrap;gap:12px"></div></div>
         <div class="form-field"><label>Wechsel in echten Räumen</label><input type="number" id="spiel-funk-wechsel" min="2" max="10"></div>
+        <div class="form-field"><label>Neues Thema nach … Wechseln (früher, wenn es sich festfährt; 0 = nie)</label><input type="number" id="spiel-themenwechsel" min="0" max="20"></div>
+        <div class="form-field"><label><input type="checkbox" id="spiel-websuche"> Zu jedem Thema vorher im Netz nachschlagen (Websuche)</label></div>
+        <div class="form-field"><label><input type="checkbox" id="spiel-wikipedia"> Ohne festes Thema manchmal einen Wikipedia-Zufallsartikel nehmen</label></div>
         <div class="form-field"><label><input type="checkbox" id="spiel-endlos"> Endlos: nach jedem Gespräch (auch bei SKIP) gleich ein neues Thema – bis STOPP oder Schalter aus</label></div>
         <div class="form-field"><label>Sprachmodell – Anbieter</label>
           <select id="spiel-anbieter" onchange="spielModellListe()">
@@ -6880,6 +6883,9 @@ async function spielLaden(nurStatus) {
     document.getElementById("spiel-funk-raeume").innerHTML = d.raeume.filter(n => n !== c.raum).map(n =>
       `<label style="font-weight:normal"><input type="checkbox" value="${esc(n)}"${(c.funk_raeume || []).includes(n) ? " checked" : ""}> ${esc(n)}</label>`).join("");
     document.getElementById("spiel-funk-wechsel").value = c.funk_wechsel || 4;
+    document.getElementById("spiel-themenwechsel").value = c.themenwechsel_nach ?? 5;
+    document.getElementById("spiel-websuche").checked = c.websuche !== false;
+    document.getElementById("spiel-wikipedia").checked = c.wikipedia !== false;
     document.getElementById("spiel-themen").value = (c.themen || []).join("\n");
     _spielModelle = d.modelle || {};
     document.getElementById("spiel-anbieter").options[0].textContent = "wie Robert & Susi sonst (" + d.ki_standard + ")";
@@ -6914,6 +6920,9 @@ async function spielSpeichern() {
     endlos: document.getElementById("spiel-endlos").checked,
     funk_raeume: [...document.querySelectorAll("#spiel-funk-raeume input:checked")].map(e => e.value),
     funk_wechsel: +v("spiel-funk-wechsel"),
+    themenwechsel_nach: +v("spiel-themenwechsel"),
+    websuche: document.getElementById("spiel-websuche").checked,
+    wikipedia: document.getElementById("spiel-wikipedia").checked,
     themen: v("spiel-themen").split("\n").map(t => t.trim()).filter(Boolean),
     anbieter: v("spiel-anbieter"), modell: v("spiel-modell").trim(),
   };
@@ -6944,6 +6953,7 @@ async function spielTrocken() {
   box.innerHTML = ""; box.style.display = "";
   const n = Math.max(2, Math.min(20, +document.getElementById("spiel-t-n").value || 6));
   let thema = document.getElementById("spiel-t-thema").value.trim() || null;
+  let seit = 0;
   const verlauf = [];
   const zeile = (wer, text, info, farbe) => {
     const div = document.createElement("div"); div.style.margin = "4px 0";
@@ -6962,7 +6972,7 @@ async function spielTrocken() {
       try {
         const r = await adminFetch("/api/admin/spielwiese/trocken", {method: "POST",
           headers: {"Content-Type": "application/json"}, signal: _spielT.ctrl.signal,
-          body: JSON.stringify({verlauf, thema, n,
+          body: JSON.stringify({verlauf, thema, n, seit_thema: seit,
             anbieter: document.getElementById("spiel-anbieter").value,
             modell: document.getElementById("spiel-modell").value.trim()})});
         d = await r.json();
@@ -6970,6 +6980,8 @@ async function spielTrocken() {
       warte.remove();
       if (d.error) { zeile("■", "Fehler: " + d.error, "", "#b42318"); return; }
       if (i === 0) { thema = d.thema; zeile("Thema", (d.thema || "frei gewählt") + "  ·  KI: " + d.ki, "", "var(--muted)"); }
+      else if (d.themenwechsel) { thema = d.thema; seit = 0; zeile("Neues Thema", d.thema || "frei gewählt", "", "var(--muted)"); }
+      seit++;
       if (!d.would_reply) { zeile(d.name, "SKIP – steigt aus", d.seconds + "s", "var(--muted)"); return; }
       verlauf.push({bot: d.bot, wer: d.name, text: d.answer});
       zeile(d.name, d.answer, d.seconds + "s" + (d.stimmung ? ", " + d.stimmung : ""), d.bot ? "#e879f9" : "#f0b429");

@@ -935,6 +935,7 @@ class TXServer:
         self._bot_state_pending = False
         self._bot_state_load()
         self._bot_busy: set[str] = set()
+        self._spiel_hist_ab: dict[str, float] = {}   # Spielwiese: Verlauf erst ab hier
         # Begruessung, wenn nach laengerer Ruhe wieder Betrieb ist (2026-09-25)
         self._begruessung: dict[str, dict] = {}
         # Debug-Ablaufverfolgung: jede gehoerte Durchsage bekommt eine "Spur"
@@ -4477,6 +4478,11 @@ class TXServer:
         heard_ts = time.time()
         try:
             hist   = list(self._room_hist.get(room_name, []))
+            # Spielwiese (11.11.): jedes Gespraech startet frisch -- sonst erbte
+            # es den Schluss des vorigen ("du schmeichelst mir ja" als Einstieg)
+            ab = self._spiel_hist_ab.get(room_name)
+            if ab is not None:
+                hist = [e for e in hist if e[0] >= ab]
             # Vorgemerkter Ruf (02.11.): der Ruf fiel in einen laufenden Lauf,
             # die eigene Antwort darauf steht mit ihrem Sende-Ende (t1) also
             # HINTER dem Ruf, obwohl sie ihn gar nicht kannte. Der Prompt
@@ -4908,6 +4914,17 @@ class TXServer:
 
     async def _bot_nachrichten(self, nur_titel: bool = False) -> str:
         """Top-Schlagzeilen der tagesschau (RSS). "" bei Fehler."""
+        meldungen = await self._tagesschau_meldungen()
+        zeilen = []
+        for titel, text in meldungen[:6]:
+            if nur_titel:
+                zeilen.append(f"- {titel}")
+            else:
+                zeilen.append(f"- {titel}: {text[:160]}" if text and text != titel else f"- {titel}")
+        return ("Aktuelle Schlagzeilen (tagesschau.de):\n" + "\n".join(zeilen)) if zeilen else ""
+
+    async def _tagesschau_meldungen(self) -> list[tuple[str, str]]:
+        """[(Titel, Kurztext)] aus dem tagesschau-RSS, [] bei Fehler."""
         import xml.etree.ElementTree as ET
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as sess:
@@ -4915,25 +4932,22 @@ class TXServer:
                                     headers={"User-Agent": "Mozilla/5.0"}) as resp:
                     if resp.status != 200:
                         log.warning("KI-Funker tagesschau HTTP %d", resp.status)
-                        return ""
+                        return []
                     xml = await resp.text()
             wurzel = ET.fromstring(xml)
         except Exception as e:
             log.warning("KI-Funker: tagesschau nicht erreichbar: %s", e)
-            return ""
-        zeilen = []
+            return []
+        out = []
         for it in wurzel.iter("item"):
             titel = (it.findtext("title") or "").strip()
             text = re.sub(r"<[^>]+>", "", it.findtext("description") or "").strip()
             if not titel or "livestream" in titel.lower() or self._SENDUNG_RE.match(titel):
                 continue
-            if nur_titel:
-                zeilen.append(f"- {titel}")
-            else:
-                zeilen.append(f"- {titel}: {text[:160]}" if text and text != titel else f"- {titel}")
-            if len(zeilen) >= 6:
+            out.append((titel, text if text != titel else ""))
+            if len(out) >= 12:
                 break
-        return ("Aktuelle Schlagzeilen (tagesschau.de):\n" + "\n".join(zeilen)) if zeilen else ""
+        return out
 
     # --- Tagesprogramm ------------------------------------------------------
     _TP_ORTE_RE = re.compile(r"lippstadt|eickelborn|bad waldliesborn|lipperode|"
@@ -6795,8 +6809,19 @@ class TXServer:
                            room_name, match.a, prev_text)
                 text = before
             else:
-                # Wiederholung steht ganz am Anfang -- Rest nach dem Match behalten
-                rest = text[match.a + match.size:].strip()
+                # Wiederholung steht ganz am Anfang -- Rest nach dem Match behalten.
+                # Endet die Uebereinstimmung mitten im Satz, bis zum Satzende
+                # mitnehmen (11.11.: sonst gingen Fetzen wie "Susi! Dann ..."
+                # oder "eben so richtig gemuetlich" raus).
+                ende_m = match.a + match.size
+                if not text[:ende_m].rstrip().endswith((".", "!", "?")):
+                    satz = re.search(r"[.!?](\s|$)", text[ende_m:])
+                    if not satz:
+                        log.info("[%s] KI-Funker: Wiederholung am Anfang ohne Satzende "
+                                 "-- nicht gekappt: %.60s", room_name, text)
+                        continue
+                    ende_m += satz.end()
+                rest = text[ende_m:].strip()
                 if not rest.strip(" .,!?;:-"):
                     # Die GANZE Antwort ist eine fruehere eigene Antwort (typisch
                     # die Standard-Begruessung "Hallo, hier ist Robert.") -- keine
@@ -7060,7 +7085,7 @@ class TXServer:
         key = (bot.get("mistral_api_key") or "").strip()
         model = (bot.get("mistral_model") or "mistral-large-4").strip()
         messages = list(messages)
-        if messages and messages[-1].get("role") == "assistant":
+        if not messages or messages[-1].get("role") == "assistant":
             # Mistral verlangt user/tool als letzte Rolle (HTTP 400, 10.11.:
             # Spielwiese beginnt nach der eigenen letzten Zeile)
             messages.append({"role": "user", "content": "(weiter)"})
@@ -8617,13 +8642,29 @@ class TXServer:
                        "endlos": False,
                        # Echte Funkraeume (10.11.), in denen "unterhaltet euch
                        # ueber ..." ein kurzes Gespraech startet -- ohne Endlos
-                       "funk_raeume": [], "funk_wechsel": 4}
+                       "funk_raeume": [], "funk_wechsel": 4,
+                       # Neues Thema nach so vielen Wechseln auf einem Thema
+                       # (oder frueher, wenn es sich festfaehrt); 0 = nie
+                       "themenwechsel_nach": 5,
+                       # Zu jedem neuen Thema vorab im Netz nachschlagen (SearXNG)
+                       "websuche": True,
+                       # Freie Themen teils aus einem Wikipedia-Zufallsartikel (11.11.)
+                       "wikipedia": True}
     _SPIEL_MODELL_FELD = {"ollama": "ollama_model", "mistral": "mistral_model",
                           "ollama_cloud": "ollama_cloud_model", "gemini": "gemini_model"}
-    _SPIEL_START = "Du wohnst mit {andere} zusammen und ihr funkt im {raum}, eurem eigenen Funkraum. Fang ein lockeres Gespräch mit {andere} an{thema}."
-    _SPIEL_WEITER = "{von} unterhält sich mit dir. Antworte {von} wie in einem normalen Gespräch zu zweit."
+    _SPIEL_START = "Du wohnst mit {andere} im selben Haus, jeder in seiner eigenen Wohnung, und ihr funkt im {raum}, eurem eigenen Funkraum. Fang ein lockeres Gespräch mit {andere} an{thema}."
+    _SPIEL_WEITER = ("{von} unterhält sich mit dir{thema}. Antworte {von} wie in einem normalen Gespräch "
+                     "zu zweit und bring etwas Neues ein: eine eigene Meinung, eine Erfahrung oder eine Frage.")
+    _SPIEL_WECHSEL = ("{von} unterhält sich mit dir. Geh kurz auf das Letzte ein und bring dann "
+                      "ein neues Thema auf{thema}.")
+    _SPIEL_HINTERGRUND = " Hintergrund dazu: {info}"
+    # Floskeln, an denen man ein festgefahrenes Gespraech erkennt (11.11.)
+    _SPIEL_FLOSKEL_RE = re.compile(
+        r"zeit (einfach |so richtig )?(gemeinsam )?genie|seele baumeln|richtige einstellung|"
+        r"ruhe genie|freu(e)? mich (schon|auch)|so richtig gemütlich|welt .{0,20}draußen|"
+        r"mein schatz|meine liebe|schatzi|genau so (ist|machen)", re.IGNORECASE)
     _SPIEL_ENDE = " Lass das Gespräch jetzt freundlich ausklingen."
-    _SPIEL_START_FUNK = "Du wohnst mit {andere} zusammen. Fang hier im {raum} ein lockeres Gespräch mit {andere} an{thema}."
+    _SPIEL_START_FUNK = "Du wohnst mit {andere} im selben Haus, jeder in seiner eigenen Wohnung. Fang hier im {raum} ein lockeres Gespräch mit {andere} an{thema}."
     _SPIEL_EINWURF = ("{wer} hat sich eben über Funk in euer Gespräch eingeschaltet. "
                       "Geh auf {wer} ein und bezieh es in euer Gespräch ein.")
 
@@ -8741,7 +8782,8 @@ class TXServer:
             if re.search(r"\b" + re.escape(name.lower()) + r"\b", low):
                 gerufen = bid
                 break
-        z["einwurf"] = (ts, (callsign or "").strip() or "Funker", text, gerufen)
+        z["einwurf"] = (ts, (callsign or "").strip() or "Funker", text, gerufen,
+                        self._spiel_suchauftrag(text))
         log.info("[%s] Spielwiese: Einwurf von %s aufgenommen", room_name, callsign or "?")
         self.debug_trace_step(room_name, ts, "Bot-Trigger", "ok",
                               detail="Einwurf in die Spielwiese -- wird dort beantwortet", final=True)
@@ -8779,16 +8821,122 @@ class TXServer:
             out.append((bid, (b or {}).get("name") or ("Robert" if not bid else bid)))
         return out
 
+    _SPIEL_FUELL = {"der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem",
+                    "und", "oder", "in", "im", "bei", "zu", "zum", "zur", "von", "vom", "mit",
+                    "für", "auf", "an", "am", "aus", "über", "nach", "ist", "sind", "wird",
+                    "es", "sie", "er", "wir", "ihr", "uns", "neue", "neuen", "viele", "mehr"}
+
+    @classmethod
+    def _spiel_woerter(cls, t: str) -> set[str]:
+        """Inhaltswoerter, grob auf den Stamm gekuerzt (Studie/Studien)."""
+        return {w[:6] for w in re.findall(r"[a-zäöüß0-9]+", t.lower())
+                if len(w) > 2 and w not in cls._SPIEL_FUELL}
+
+    def _spiel_aehnlich(self, thema: str, zuletzt: list[str]) -> bool:
+        a = self._spiel_woerter(thema)
+        if not a:
+            return thema in zuletzt
+        for alt in zuletzt:
+            b = self._spiel_woerter(alt)
+            gemeinsam = len(a & b)
+            if b and (gemeinsam >= 2 or (gemeinsam and min(len(a), len(b)) <= 2)) and gemeinsam / min(len(a), len(b)) >= 0.4:
+                return True
+        return False
+
+    def _spiel_info(self, thema: str) -> str:
+        """Kurztext zu einer Schlagzeile (aus _spiel_thema gemerkt)."""
+        return (getattr(self, "_spiel_infos", None) or {}).get(thema, "")
+
+    async def _spiel_recherche(self, thema: str, c: dict) -> None:
+        """Hintergrund zum Thema per Websuche holen (11.11.), wenn noch keiner
+        da ist -- Schlagzeilen haben schon den tagesschau-Kurztext."""
+        if not thema or not c.get("websuche") or self._spiel_info(thema):
+            return
+        bot = self._bot_cfg(raum=c["raum"])
+        if not (bot.get("websearch") or {}).get("enabled"):
+            return
+        try:
+            t0 = time.time()
+            treffer = await self._bot_websearch(bot, thema[:200])
+        except Exception as e:
+            log.info("Spielwiese: Websuche zu %r fehlgeschlagen: %s", thema, e)
+            return
+        if treffer:
+            infos = self.__dict__.setdefault("_spiel_infos", {})
+            infos[thema] = self._kuerzen(re.sub(r"\s+", " ", treffer), 600)
+            while len(infos) > 60:
+                infos.pop(next(iter(infos)))
+            log.info("Spielwiese: Websuche zu %r in %.1fs", thema, time.time() - t0)
+
+    def _spiel_suchauftrag(self, text: str) -> str:
+        """'such mal nach X' in einem Einwurf -> Suchbegriff, sonst ""."""
+        m = self._BOT_SEARCH_RE.search(text)
+        if m:
+            q = (m.group(1) or m.group(2) or m.group(3) or "").strip(" .,!?;:\"'")
+            if len(q) >= 3:
+                return q[:200]
+        return ""
+
+    def _spiel_festgefahren(self, zeilen: list[str]) -> bool:
+        """Die letzten beiden Saetze bestaetigen sich nur noch gegenseitig."""
+        if len(zeilen) < 2:
+            return False
+        return all(self._SPIEL_FLOSKEL_RE.search(z or "") for z in zeilen[-2:])
+
+    _WIKI_PERSON_RE = re.compile(r"\*\s*(?:\d|um\b|vor\b|nach\b)|\(geb\.|†|Familienname|Vorname")
+
+    async def _spiel_wikipedia(self, zuletzt: list[str]) -> str:
+        """Thema aus einem Wikipedia-Zufallsartikel (11.11.): 10 Zufallsartikel
+        holen, Begriffsklaerungen, Listen, Personen und Stubs aussortieren,
+        den mit der laengsten Einleitung nehmen. Einleitung = Hintergrund."""
+        url = ("https://de.wikipedia.org/w/api.php?action=query&format=json&formatversion=2"
+               "&generator=random&grnnamespace=0&grnlimit=10&prop=extracts|pageprops"
+               "&ppprop=disambiguation&exintro=1&explaintext=1&exsentences=5")
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as sess:
+                async with sess.get(url, headers={"User-Agent": "FRN-Spielwiese/1.0 (https://github.com/Joerglp/FRN-WEB)"}) as resp:
+                    daten = await resp.json(content_type=None)
+        except Exception as e:
+            log.info("Spielwiese: Wikipedia-Zufallsartikel fehlgeschlagen: %s", e)
+            return ""
+        beste = None
+        for seite in (daten.get("query") or {}).get("pages") or []:
+            titel = (seite.get("title") or "").strip()
+            text = re.sub(r"\s+", " ", seite.get("extract") or "").strip()
+            if (not titel or "pageprops" in seite or len(text) < 250
+                    or titel.startswith("Liste ") or self._WIKI_PERSON_RE.search(text[:200])
+                    or self._spiel_aehnlich(titel, zuletzt)):
+                continue
+            if beste is None or len(text) > len(beste[1]):
+                beste = (titel, text)
+        if not beste:
+            return ""
+        infos = self.__dict__.setdefault("_spiel_infos", {})
+        infos[beste[0]] = self._kuerzen(beste[1], 600)
+        while len(infos) > 60:
+            infos.pop(next(iter(infos)))
+        log.info("Spielwiese: Wikipedia-Zufallsthema %r", beste[0])
+        return beste[0]
+
     async def _spiel_thema(self, c: dict) -> str:
         zuletzt = self._spiel_zust["themen_zuletzt"]
         eigene = [t.strip() for t in c.get("themen") or [] if str(t).strip()]
-        pool = [t for t in eigene if t not in zuletzt]
+        pool = [t for t in eigene if not self._spiel_aehnlich(t, zuletzt)]
         if c.get("nachrichten") and random.random() < 0.4:
-            titel = [z[2:].strip() for z in (await self._bot_nachrichten(nur_titel=True)).splitlines()
-                     if z.startswith("- ")]
-            titel = [t for t in titel if t not in zuletzt]
-            if titel:
-                pool = titel
+            meldungen = [(t, x) for t, x in await self._tagesschau_meldungen()
+                         if not self._spiel_aehnlich(t, zuletzt)]
+            if meldungen:
+                infos = self.__dict__.setdefault("_spiel_infos", {})
+                for t, x in meldungen:
+                    if x:
+                        infos[t] = self._kuerzen(x, 400)
+                while len(infos) > 60:
+                    infos.pop(next(iter(infos)))
+                pool = [t for t, _x in meldungen]
+        if not pool and c.get("wikipedia") and random.random() < 0.5:
+            wiki = await self._spiel_wikipedia(zuletzt)
+            if wiki:
+                pool = [wiki]
         if not pool and random.random() < 0.5:
             return ""                      # frei: das Modell sucht sich selbst eins aus
         thema = random.choice(pool) if pool else ""
@@ -8798,12 +8946,18 @@ class TXServer:
         return thema
 
     def _spiel_zusatz(self, i: int, n: int, andere: str, von: str, raum: str, thema: str,
-                      eigen: bool = True) -> str:
+                      eigen: bool = True, wechsel: bool = False) -> str:
+        info = self._spiel_info(thema) if thema else ""
+        hg = self._SPIEL_HINTERGRUND.format(info=info) if info else ""
         if i == 0:
             t = f" über: {thema}" if thema else " über ein Alltagsthema deiner Wahl"
             vorlage = self._SPIEL_START if eigen else self._SPIEL_START_FUNK
-            return vorlage.format(andere=andere, raum=raum, thema=t)
-        z = self._SPIEL_WEITER.format(von=von)
+            return vorlage.format(andere=andere, raum=raum, thema=t) + hg
+        if wechsel:
+            t = f": {thema}" if thema else ", etwa etwas aus deinem Alltag oder deiner Woche"
+            z = self._SPIEL_WECHSEL.format(von=von, thema=t) + hg
+        else:
+            z = self._SPIEL_WEITER.format(von=von, thema=f" über: {thema}" if thema else "") + hg
         return z + (self._SPIEL_ENDE if i == n - 1 else "")
 
     async def _spiel_gespraech(self, thema: str | None = None, auftrag_von: str = "",
@@ -8827,16 +8981,23 @@ class TXServer:
         z.update(laeuft=True, stopp=False, wechsel=0, beginn=time.time(), raum_aktiv=raum,
                  einwurf_erledigt=max(z.get("einwurf_erledigt", 0.0), time.time() - 30),
                  einwurf_dran=False, einwuerfe=0)
+        # Per Funk angestossen: den Auftrag selbst (kurz davor) mitnehmen
+        self._spiel_hist_ab[raum] = z["beginn"] - (60.0 if auftrag_von else 0.0)
         ende = "fertig"
         try:
             if thema is None:
                 thema = await self._spiel_thema(c)
             z["thema"] = thema
+            await self._spiel_recherche(thema, c)
             lo, hi = sorted((int(c.get("wechsel_min") or 4), int(c.get("wechsel_max") or 8)))
             n = random.randint(max(2, lo), max(2, hi))
             if not eigen:
                 n = max(2, min(10, int(c.get("funk_wechsel") or 4)))
             erster = random.randrange(2)
+            nach = int(c.get("themenwechsel_nach") or 0)
+            seit_thema = 0                     # Wechsel auf dem aktuellen Thema
+            gesagt: list[str] = []
+            themen_folge = [thema or "(frei)"]
             log.info("[%s] Spielwiese: Gespräch beginnt, %d Wechsel, Thema: %s, KI: %s",
                      raum, n, thema or "(frei)", self._spiel_ki_text(c))
             for i in range(n):
@@ -8861,20 +9022,37 @@ class TXServer:
                     bot = self._spiel_ki(self._bot_cfg(), c)
                     if not bot.get("enabled"):
                         ende = f"{name} ist aus"; break
-                    zusatz = self._spiel_zusatz(i, n, andere, andere, raum, thema, eigen)
+                    themenwechsel = (i > 0 and nach > 0 and i < n - 2 and seit_thema >= 2
+                                     and (seit_thema >= nach or self._spiel_festgefahren(gesagt)))
+                    if themenwechsel:
+                        thema = await self._spiel_thema(c)
+                        await self._spiel_recherche(thema, c)
+                        z["thema"] = thema or "frei gewählt"
+                        themen_folge.append(thema or "(frei)")
+                        seit_thema = 0
+                        log.info("[%s] Spielwiese: Themenwechsel → %s", raum, thema or "(frei)")
+                    zusatz = self._spiel_zusatz(i, n, andere, andere, raum, thema, eigen,
+                                                wechsel=themenwechsel)
                     if i == 0 and auftrag_von:
                         zusatz = (f"{auftrag_von} hat euch eben über Funk gebeten, euch zu unterhalten. "
                                   + zusatz)
                     if einwurf and z["einwurf_erledigt"] == einwurf[0] and not z.get("einwurf_dran"):
                         z["einwurf_dran"] = True
                         zusatz = self._SPIEL_EINWURF.format(wer=einwurf[1])
-                    await self._bot_reply(room, raum, bot, nachlegen=True, zusatz=zusatz)
+                    such = ""
+                    if einwurf and z.get("einwurf_dran") and len(einwurf) > 4:
+                        such = einwurf[4]
+                    await self._bot_reply(room, raum, bot, search_query=such,
+                                          nachlegen=True, zusatz=zusatz)
                 finally:
                     _BOT_RAUM.reset(tok_r)
                     _BOT_KONTEXT.reset(tok_b)
                 nachher = max((t1 for _t0, t1, _x in self._bot_own_tx.get(raum, [])), default=0.0)
                 if nachher <= vorher:
                     ende = f"{name} hat nichts gesagt"; break
+                gesagt.append(next((x for _t0, t1, x in self._bot_own_tx.get(raum, [])
+                                    if t1 == nachher), ""))
+                seit_thema += 1
                 z["wechsel"] = i + 1
                 z["einwurf_dran"] = False
                 # Warten, solange jemand sendet; ein Einwurf braucht danach
@@ -8901,8 +9079,10 @@ class TXServer:
             ende = f"Fehler: {e}"
         finally:
             z["laeuft"] = False
+            self._spiel_hist_ab.pop(raum, None)
+            folge = locals().get("themen_folge") or [z.get("thema") or "(frei)"]
             z["verlauf"].append({"beginn": z.get("beginn"), "ende_ts": time.time(),
-                                 "thema": z.get("thema") or "(frei)", "raum": raum,
+                                 "thema": " → ".join(folge), "raum": raum,
                                  "wechsel": z["wechsel"], "ende": ende
                                  + (f", {z['einwuerfe']} Einwurf/-würfe" if z.get("einwuerfe") else "")})
             del z["verlauf"][:-20]
@@ -9004,6 +9184,10 @@ class TXServer:
                 neu["funk_raeume"] = [str(r).strip() for r in body.get("funk_raeume", alt["funk_raeume"]) or []
                                       if str(r).strip()]
                 neu["funk_wechsel"] = max(2, min(10, int(float(body.get("funk_wechsel", alt["funk_wechsel"])))))
+                neu["websuche"] = bool(body.get("websuche", alt["websuche"]))
+                neu["wikipedia"] = bool(body.get("wikipedia", alt["wikipedia"]))
+                neu["themenwechsel_nach"] = max(0, min(20, int(float(body.get("themenwechsel_nach",
+                                                                              alt["themenwechsel_nach"])))))
                 an = str(body.get("anbieter", alt["anbieter"]) or "").strip().lower()
                 if an and an not in self._SPIEL_MODELL_FELD:
                     raise ValueError(f"unbekannter Anbieter {an}")
@@ -9103,7 +9287,20 @@ class TXServer:
         tok_b, tok_r = self._bot_im(bid), self._raum_setzen(c["raum"])
         try:
             bot = self._spiel_ki(self._bot_cfg(), c)
-            zusatz = self._spiel_zusatz(i, n, andere, andere, c["raum"], thema)
+            # Themenwechsel wie live (11.11.): die Seite zaehlt seit_thema mit
+            try:
+                seit = int(body.get("seit_thema") or 0)
+            except (TypeError, ValueError):
+                seit = 0
+            nach = int(c.get("themenwechsel_nach") or 0)
+            gesagt = [str(v.get("text") or "") for v in verlauf]
+            themenwechsel = (i > 0 and nach > 0 and i < n - 2 and seit >= 2
+                             and (seit >= nach or self._spiel_festgefahren(gesagt)))
+            if themenwechsel:
+                thema = await self._spiel_thema(c)
+            await self._spiel_recherche(thema, c)
+            zusatz = self._spiel_zusatz(i, n, andere, andere, c["raum"], thema,
+                                        wechsel=themenwechsel)
             t0 = time.time()
             answer, raw = await self._bot_ollama(bot, hist, with_raw=True, zusatz=zusatz)
             answer, stimmung = self._emotion_abtrennen(answer or "", bot)
@@ -9114,7 +9311,8 @@ class TXServer:
                                   "answer": answer.strip() or "SKIP",
                                   "would_reply": bool(answer.strip()), "stimmung": stimmung,
                                   "zusatz": zusatz, "seconds": round(time.time() - t0, 1),
-                                  "letzter": i == n - 1, "ki": self._spiel_ki_text(c)})
+                                  "letzter": i == n - 1, "ki": self._spiel_ki_text(c),
+                                  "themenwechsel": themenwechsel})
 
     # Zwiegespraech-Trockentest (25.10.): Robert und Susi abwechselnd im Chat,
     # sendet NICHTS. Die Seite ruft je Wechsel einen Schritt ab und haelt den
