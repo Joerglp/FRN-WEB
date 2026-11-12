@@ -626,7 +626,7 @@ def _transcribe_mistral(wav_path: str, language: str, key: str, modell: str) -> 
     text = (r.json().get("text") or "").strip()
     # Voxtral springt bei Rauschen trotz language=de in andere Sprachen
     # ("Спасибо.", "Oh, are you there?") -- das ist nichts Gehoertes.
-    if text and (_re.search(r"[^\x00-\u024f\s\d.,!?;:'\"()\-–…]", text)
+    if text and (_re.search(r"[^\x00-\u024f\u2010-\u203a\u20ac\s]", text)
                  or _is_english_hallucination(text) or _is_generic_hallucination(text)):
         log.info("Ausweich-Transkription verworfen (fremde Sprache/Floskel): %.60s", text)
         return ""

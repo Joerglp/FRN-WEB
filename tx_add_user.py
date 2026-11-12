@@ -49,11 +49,12 @@ def main():
     alt = next((u for u in daten["users"] if u.get("username", "").lower() == name), {})
     daten["users"] = [u for u in daten["users"] if u.get("username", "").lower() != name]
     daten["users"].append({
+        **alt,      # uebrige Felder (z. B. voice) bleiben beim Passwortwechsel
         "username": name,
         "callsign": a.callsign,
         "is_admin": a.admin or alt.get("is_admin", False),
         "default_room": alt.get("default_room", ""),
-        "frn_only": False,
+        "frn_only": alt.get("frn_only", False),
         "password_hash": hash_pw(pw),
     })
     pfad.parent.mkdir(parents=True, exist_ok=True)

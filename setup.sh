@@ -54,10 +54,11 @@ ja_nein() {
 
 # geheim VAR "Text"  (verdeckt, zweimal)
 geheim() {
-    local __var=$1 __text=$2 a b
+    local __var=$1 __text=$2 __min=${3:-1} a b
     while :; do
         read -r -s -p "$__text: " a || true; echo
         [ -z "$a" ] && { warn "Darf nicht leer sein."; continue; }
+        [ "${#a}" -lt "$__min" ] && { warn "Bitte mindestens $__min Zeichen."; continue; }
         read -r -s -p "Wiederholen: " b || true; echo
         [ "$a" = "$b" ] && break
         warn "Stimmt nicht überein, nochmal."
@@ -238,7 +239,7 @@ fi
 if [ "$ADMIN_ANLEGEN" = 1 ]; then
     frage ADM_USER "Benutzername" "admin"
     frage ADM_CALL "Rufzeichen/Anzeigename" "WebTX-Admin"
-    geheim ADM_PW "Passwort (mind. 8 Zeichen)"
+    geheim ADM_PW "Passwort (mind. 8 Zeichen)" 8
     FRN_USER_PW="$ADM_PW" python3 "$HIER/tx_add_user.py" "$ADM_USER" "$ADM_CALL" --admin \
         --datei "$CFG/tx_users.json"
 fi
@@ -417,7 +418,9 @@ EOF
             ok "$U_ST"
         fi
         MOUNTS=$(python3 -c 'import json,sys; [print(r["mount"]+"\t"+r["name"]) for r in json.load(open(sys.argv[1]))["rooms"]]' "$CFG/tx_rooms.json" 2>/dev/null || true)
-        while IFS=$'\t' read -r M NAME; do
+        # Raumliste ueber Deskriptor 3: darf_schreiben fragt in der Schleife
+        # nach und laese sonst die naechste Raumzeile als Antwort.
+        while IFS=$'\t' read -r M NAME <&3; do
             [ -z "$M" ] && continue
             E="$CFG/stream-$M.env"
             if darf_schreiben "$E"; then
@@ -425,7 +428,7 @@ EOF
                     "$NAME" "$M" "$FRN_HOST" "$FRN_PORT" "$ICE_HOST" "$ICE_PORT" "$ICE_SRC" > "$E"
                 chmod 600 "$E"
             fi
-        done <<< "$MOUNTS"
+        done 3<<< "$MOUNTS"
         systemctl daemon-reload
         if ja_nein "Dienste jetzt aktivieren und starten?"; then
             systemctl enable --now frn-tx-server

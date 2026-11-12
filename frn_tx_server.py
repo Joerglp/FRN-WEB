@@ -742,8 +742,10 @@ class FRNTXRoom:
     _TX_FREI_S = 1.5
     _TX_WIEDERHOL_S = 2.0   # > laengste beobachtete Freigabe-Verzoegerung (1.1 s)
 
-    async def request_tx(self, timeout: float = 30.0, abbruch=None) -> bool:
-        """abbruch: optional, wird beim Warten geprueft; True = nicht mehr senden."""
+    async def request_tx(self, timeout: float = 30.0, abbruch=None, sofort: bool = False) -> bool:
+        """abbruch: optional, wird beim Warten geprueft; True = nicht mehr senden.
+        sofort: erstes TX0 ohne die Kanalruhe abzuwarten (Sendetaste im Browser --
+        der Mensch entscheidet selbst, wann er drueckt); Wiederholungen wie sonst."""
         if not self._connected:
             await self.ensure_connected()
         self._tx_approved.clear()
@@ -760,7 +762,11 @@ class FRNTXRoom:
                         except Exception:
                             pass
                     return False
-                if jetzt - self._rx_letzt >= self._TX_FREI_S and jetzt - gesendet >= self._TX_WIEDERHOL_S:
+                if self._writer is None:      # Raum inzwischen getrennt
+                    log.warning("[%s] TX-Anfrage abgebrochen: Verbindung getrennt", self.name)
+                    return False
+                if ((jetzt - self._rx_letzt >= self._TX_FREI_S or (sofort and not gesendet))
+                        and jetzt - gesendet >= self._TX_WIEDERHOL_S):
                     if gesendet:
                         log.info("[%s] TX0 wiederholt (Kanal seit %.1fs frei)",
                                  self.name, jetzt - self._rx_letzt)
@@ -864,6 +870,36 @@ def needs_rehash(stored: str) -> bool:
 
 
 # ── Server ───────────────────────────────────────────────────────────────────
+
+def _cfg_atomar(pfad, disk) -> None:
+    """config.json atomar schreiben (tmp-Datei + os.replace): ein Absturz
+    oder Stromausfall mitten im Schreiben laesst sonst eine abgeschnittene
+    Datei zurueck -- samt aller Einstellungen und Schluessel (Review 12.11.)."""
+    pfad = Path(os.path.realpath(pfad))
+    text = json.dumps(disk, indent=2, ensure_ascii=False) + "\n"
+    tmp = pfad.with_name(pfad.name + ".tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            st = pfad.stat()
+            os.chmod(tmp, st.st_mode & 0o7777)
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except OSError:
+            pass
+        os.replace(tmp, pfad)
+    except OSError as e:
+        # z. B. einzeln eingebundene Datei (kein Umbenennen moeglich): wie frueher
+        log.warning("config.json nicht atomar geschrieben (%s) -- schreibe direkt", e)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        pfad.write_text(text, encoding="utf-8")
+
 
 class TXServer:
     def __init__(self, args):
@@ -2781,8 +2817,11 @@ class TXServer:
         # Lippen, Susi, Oelsteine." am 20.10.) -- dann zaehlt die Form: mind. 5
         # Bruchstuecke zu je hoechstens 2 Woertern, keine Frage.
         stuecke = [f for f in re.split(r"[,.!;]+", low) if re.search(r"\w", f)]
+        # Hoechstens EIN Zwei-Wort-Stueck: "Moin Robert, guten Morgen, alles
+        # klar, schoenes Wetter, bis gleich" ist ein Gruss, keine Aufzaehlung.
+        laengen = [len(re.findall(r"\w+", f)) for f in stuecke]
         if ("?" not in low and len(stuecke) >= 5
-                and all(len(re.findall(r"\w+", f)) <= 2 for f in stuecke)):
+                and all(n <= 2 for n in laengen) and sum(1 for n in laengen if n == 2) <= 1):
             return True
         hot = str((self.cfg.get("whisper") or {}).get("hotwords") or "").lower()
         hw = set(re.findall(r"\w+", hot))
@@ -3362,7 +3401,7 @@ class TXServer:
     # gelegentlich welche an (aehnlich dem "Robert: "-Praefix-Problem).
     _EMOJI_RE = re.compile(
         "["
-        "\U0001F300-\U0001FAFF"  # Piktogramme, Emoticons, Transport, Symbole
+        "\U0001F000-\U0001FAFF"  # Piktogramme, Emoticons, Transport, Symbole
         "\U00002600-\U000027BF"  # sonstige Symbole, Dingbats
         "\U0001F1E6-\U0001F1FF"  # Flaggen (Regional Indicators)
         "\U00002B00-\U00002BFF"  # weitere Symbole/Pfeile
@@ -3447,8 +3486,7 @@ class TXServer:
                 p = Path(self.args.config)
                 disk = json.loads(p.read_text(encoding="utf-8"))
                 _setzen(disk.setdefault("voice", {}))
-                p.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                             encoding="utf-8")
+                _cfg_atomar(p, disk)
         except Exception as e:
             log.warning("KI-Funker enabled-Persistenz fehlgeschlagen: %s", e)
 
@@ -3718,7 +3756,8 @@ class TXServer:
         bid = erster(("erwaehnt",))
         if bid is not None:
             return bid
-        return max(zuletzt)[1] if zuletzt else ""
+        # Bei Gleichstand (noch keiner hat hier gesendet) der Hauptfunker (bid "")
+        return max(zuletzt, key=lambda z: (z[0], z[1] == ""))[1] if zuletzt else ""
 
     def _bot_entscheiden(self, room: "FRNTXRoom", room_name: str, text: str,
                          ts: float, low: str):
@@ -4649,7 +4688,12 @@ class TXServer:
             self._nachgang_planen(room_name, t0)
             self._bot_protokoll(room_name, t0, t1, answer,
                                 gehoert or (hist[-1][2] if hist else ""), heard_ts)
-            self._bot_tx_merken(room_name, t0, t1, answer, bot.get('name') or 'Robert')
+            # Echo-Fenster ab dem echten Tasten, nicht ab t0 (vor TTS und bis
+            # zu 15 s Kanal-Warten) -- sonst erbten fremde Durchsagen aus der
+            # Wartezeit Text und Namen des Bots (Review 12.11.).
+            getastet = min((f[0] for f in self._tx_fenster.get(room.name, []) if f[0] >= t0),
+                           default=t0)
+            self._bot_tx_merken(room_name, getastet, t1, answer, bot.get('name') or 'Robert')
             name = bot.get("name") or "Robert"
             self._hist_insert(self._room_hist.setdefault(room_name, []),
                               (t1, f"{name} (du)", answer),
@@ -5707,9 +5751,7 @@ class TXServer:
             disk_notebook = self._notizbuch_ziel(disk.setdefault("voice", {}), gruppe)
             disk_notebook.append(entry)
             del disk_notebook[:-self._NOTEBOOK_MAX]
-            cfg_path.write_text(
-                json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8")
+            _cfg_atomar(cfg_path, disk)
         except Exception as e:
             log.warning("KI-Funker Notizbuch nicht auf Platte gespeichert: %s", e)
 
@@ -5767,8 +5809,7 @@ class TXServer:
             disk = json.loads(cfg_path.read_text(encoding="utf-8"))
             dblk = disk.setdefault("voice", {}).setdefault("bot", {})
             dblk["memory"] = umbauen(dblk.get("memory"))
-            cfg_path.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                                encoding="utf-8")
+            _cfg_atomar(cfg_path, disk)
         except Exception as e:
             log.warning("Einmal-Notiz nicht auf Platte gespeichert: %s", e)
 
@@ -7025,8 +7066,6 @@ class TXServer:
             st.append(("Ollama Cloud", bot.get("ollama_cloud_model") or "beam", self._llm_ollama_cloud))
         return st
 
-    _EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F]")
-
     async def _llm_ollama_cloud(self, bot: dict, system: str, messages: list,
                                 room_name: str = "", trace_ts: float | None = None) -> str:
         """Chat ueber ollama.com (gleiche /api/chat wie ein eigener Ollama).
@@ -7440,9 +7479,7 @@ class TXServer:
                 disk = json.loads(cfg_path.read_text(encoding="utf-8"))
                 disk.setdefault("voice", {}).setdefault(
                     "auto_reply", {})["enabled"] = ar["enabled"]
-                cfg_path.write_text(
-                    json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8")
+                _cfg_atomar(cfg_path, disk)
             except Exception as e:
                 log.warning("auto_reply-Toggle nicht gespeichert: %s", e)
             log.info("Auto-Antwort %s",
@@ -7686,9 +7723,7 @@ class TXServer:
                 disk = json.loads(cfg_path.read_text(encoding="utf-8"))
                 blk = disk.setdefault("voice", {}).setdefault("auto_reply", {})
                 blk.update({k: v for k, v in ar.items() if not k.startswith("_")})
-                cfg_path.write_text(
-                    json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8")
+                _cfg_atomar(cfg_path, disk)
             except Exception as e:
                 log.warning("Automatik-Einstellungen nicht gespeichert: %s", e)
                 return web.json_response({"error": f"Speichern fehlgeschlagen: {e}"},
@@ -7944,9 +7979,7 @@ class TXServer:
                 blk = disk.setdefault("voice", {}).setdefault("bot", {})
                 blk.update({k: v for k, v in bot.items()
                             if not k.startswith("_")})
-                cfg_path.write_text(
-                    json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8")
+                _cfg_atomar(cfg_path, disk)
             except Exception as e:
                 log.warning("KI-Funker-Einstellungen nicht gespeichert: %s", e)
                 return web.json_response(
@@ -7985,8 +8018,7 @@ class TXServer:
         cfg_path = Path(self.args.config)
         disk = json.loads(cfg_path.read_text(encoding="utf-8"))
         aendern(disk)
-        cfg_path.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                            encoding="utf-8")
+        _cfg_atomar(cfg_path, disk)
 
     async def handle_admin_settings(self, request):
         """GET/POST /api/admin/settings -- Transkription (Whisper), Archiv-Kleben
@@ -8130,8 +8162,7 @@ class TXServer:
                 cfg_path = Path(self.args.config)
                 disk = json.loads(cfg_path.read_text(encoding="utf-8"))
                 disk.setdefault("voice", {})["bots_weitere"] = liste
-                cfg_path.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                                    encoding="utf-8")
+                _cfg_atomar(cfg_path, disk)
             except Exception as e:
                 log.warning("Weitere KI-Funker nicht gespeichert: %s", e)
                 return web.json_response({"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
@@ -8461,7 +8492,7 @@ class TXServer:
             p = Path(self.args.config)
             disk = json.loads(p.read_text(encoding="utf-8"))
             aendern(disk)
-            p.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            _cfg_atomar(p, disk)
             return ""
         except Exception as e:
             log.warning("config.json nicht gespeichert: %s", e)
@@ -8476,8 +8507,7 @@ class TXServer:
             p = Path(self.args.config)
             disk = json.loads(p.read_text(encoding="utf-8"))
             aendern(disk.setdefault("voice", {}))
-            p.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                         encoding="utf-8")
+            _cfg_atomar(p, disk)
             return ""
         except Exception as e:
             log.warning("config.json nicht gespeichert: %s", e)
@@ -8767,7 +8797,7 @@ class TXServer:
         if not z["laeuft"] and not z.get("endlos_aktiv"):
             # Gespraech per Funk anstossen (10.11.): "Robert, Susi, unterhaltet
             # euch mal ueber das Wetter" -- startet wie der Knopf im Reiter.
-            thema = self._spiel_auftrag(low, text)
+            thema = self._spiel_auftrag(low, text, nur_namen=room_name != c["raum"])
             if thema is None:
                 return False
             wer = (callsign or "").strip() or "Funker"
@@ -8794,7 +8824,7 @@ class TXServer:
         r"|unterhalten|quatschen|plaudern|schnacken)\b")
     _SPIEL_THEMA_RE = re.compile(r"\b(?:über|von|zum thema)\s+(.{3,120})", re.IGNORECASE)
 
-    def _spiel_auftrag(self, low: str, text: str) -> str | None:
+    def _spiel_auftrag(self, low: str, text: str, nur_namen: bool = False) -> str | None:
         """None = kein Auftrag; "" = Auftrag ohne Thema; sonst das Thema.
         Verlangt die Mehrzahl-Aufforderung UND einen Bezug auf beide
         ("euch", "ihr beiden" oder beide Namen) -- "er redet viel" zaehlt nicht."""
@@ -8802,7 +8832,10 @@ class TXServer:
             return None
         namen = [n.lower() for _b, n in self._spiel_namen()]
         beide = len(namen) >= 2 and all(re.search(r"\b" + re.escape(n) + r"\b", low) for n in namen)
-        if not (beide or re.search(r"\b(euch|ihr beiden|ihr zwei|ihr beide)\b", low)):
+        # In echten Funkraeumen (nur_namen) muessen beide beim Namen genannt
+        # sein -- "erzaehlt mal, wie war's bei euch?" gilt dort Menschen.
+        if not (beide or (not nur_namen
+                          and re.search(r"\b(euch|ihr beiden|ihr zwei|ihr beide)\b", low))):
             return None
         m = self._SPIEL_THEMA_RE.search(text)
         if not m:
@@ -9038,7 +9071,11 @@ class TXServer:
                     if i == 0 and auftrag_von:
                         zusatz = (f"{auftrag_von} hat euch eben über Funk gebeten, euch zu unterhalten. "
                                   + zusatz)
-                    if einwurf and z["einwurf_erledigt"] == einwurf[0] and not z.get("einwurf_dran"):
+                    # Nur EIN Wechsel geht auf den Einwurf ein -- danach wieder
+                    # normal weiter (sonst klebte er am ganzen Rest, 12.11.)
+                    if (einwurf and z["einwurf_erledigt"] == einwurf[0]
+                            and z.get("einwurf_beantwortet") != einwurf[0]):
+                        z["einwurf_beantwortet"] = einwurf[0]
                         z["einwurf_dran"] = True
                         zusatz = self._SPIEL_EINWURF.format(wer=einwurf[1])
                     such = ""
@@ -9449,9 +9486,7 @@ class TXServer:
                     cfg_path = Path(self.args.config)
                     disk = json.loads(cfg_path.read_text(encoding="utf-8"))
                     disk.setdefault("voice", {}).setdefault("speaker_id", {}).update(cfg)
-                    cfg_path.write_text(
-                        json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                        encoding="utf-8")
+                    _cfg_atomar(cfg_path, disk)
             except Exception as e:
                 log.warning("Speaker-ID-Einstellungen nicht gespeichert: %s", e)
                 return web.json_response({"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
@@ -10159,9 +10194,7 @@ class TXServer:
                 disk = json.loads(cfg_path.read_text(encoding="utf-8"))
                 disk.setdefault("crosslink", {}).update(
                     {k: v for k, v in cl.items() if not k.startswith("_")})
-                cfg_path.write_text(
-                    json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8")
+                _cfg_atomar(cfg_path, disk)
             except Exception as e:
                 return web.json_response(
                     {"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
@@ -10264,9 +10297,7 @@ class TXServer:
                 cfg_path = Path(self.args.config)
                 disk = json.loads(cfg_path.read_text(encoding="utf-8"))
                 disk.setdefault("voice", {}).update(update)
-                cfg_path.write_text(
-                    json.dumps(disk, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8")
+                _cfg_atomar(cfg_path, disk)
             except Exception as e:
                 return web.json_response(
                     {"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
@@ -10603,9 +10634,9 @@ class TXServer:
         raum = q.get("room", "")
         if raum not in self._room_hist:
             raum = raeume[0] if raeume else ""
-        tok = self._bot_im(bid)
+        tok, tok_r = self._bot_im(bid), self._raum_setzen(raum)
         try:
-            bot = self._bot_cfg()
+            bot = self._bot_cfg()   # mit Raum: Abweichungen je Raum und Gruppe
             # Anker sichern: der Aufruf darf den Prompt-Cache-Anker des
             # echten Funkbetriebs nicht verschieben.
             anker = getattr(self, "_prompt_anker", {})
@@ -10618,6 +10649,7 @@ class TXServer:
                 else:
                     anker[raum] = alt
         finally:
+            _BOT_RAUM.reset(tok_r)
             _BOT_KONTEXT.reset(tok)
         return web.json_response({
             "bots": bots, "raeume": raeume, "bot": bid, "room": raum,
@@ -11766,6 +11798,10 @@ class TXServer:
         if any(r._tx_lock.locked() for r in self.rooms.values()):
             return 0.0
         letzte = max((r._rx_letzt for r in self.rooms.values()), default=0.0)
+        # Live-Meldungen von frn_stream zaehlen mit: die TX-Verbindung eines
+        # Raums kann getrennt sein und das Archiv bei Whisper-Stau hinterherhinken.
+        for quelle in (self._rx_zuletzt, self._rx_puls, self._rx_offen):
+            letzte = max([letzte] + [float(v or 0) for v in quelle.values()])
         if _ARCHIVE_AVAILABLE:
             try:
                 con = sqlite3.connect(str(_archive.DB_PATH), timeout=5)
@@ -11788,13 +11824,20 @@ class TXServer:
             self._konten_task = asyncio.create_task(self._konten_anwenden_loop())
 
     async def _konten_anwenden_loop(self, sofort: bool = False):
+        if sofort:
+            self._konten_sofort = True
         while getattr(self, "_konten_offen", None):
-            if sofort or self._funkstille_s() >= self._KONTEN_RUHE_S:
+            if getattr(self, "_konten_sofort", False) or self._funkstille_s() >= self._KONTEN_RUHE_S:
                 # Kein return: was waehrend des Anwendens neu dazukam, laeuft
                 # in der naechsten Runde mit (sonst blieb es liegen).
-                await self._konten_anwenden()
+                self._konten_laeuft = True
+                try:
+                    await self._konten_anwenden()
+                finally:
+                    self._konten_laeuft = False
                 continue
             await asyncio.sleep(15)
+        self._konten_sofort = False
 
     async def _systemctl(self, *args) -> str:
         if not shutil.which("systemctl"):
@@ -11907,14 +11950,22 @@ class TXServer:
             return email
         try:
             neu = {
+                **alt,      # unbekannte Schluessel bleiben erhalten
                 "passwd_xml": alt.get("passwd_xml", str(_konten.passwd_pfad(alt))),
                 "server_properties": alt.get("server_properties", "/opt/FRN/server.properties"),
                 "server": pruefe(body.get("server")),
                 "raeume": {},
                 "repeater": [pruefe(e) for e in body.get("repeater", []) if (e or "").strip()],
             }
-            for mount, raum in (body.get("raeume") or {}).items():
-                if mount not in self.rooms:
+            # Zuordnungen von Mounts, die die Anfrage nicht nennt (z. B. ein
+            # Stream ohne TX-Raum), bleiben stehen -- sonst meldete sich deren
+            # Stream beim naechsten Neustart mit Vorgabe-Zugangsdaten an.
+            genannt = body.get("raeume") or {}
+            for mount, raum in (alt.get("raeume") or {}).items():
+                if mount not in genannt:
+                    neu["raeume"][mount] = dict(raum)
+            for mount, raum in genannt.items():
+                if mount not in self.rooms and mount not in (alt.get("raeume") or {}):
                     continue
                 neu["raeume"][mount] = {r: pruefe(raum.get(r)) for r in _konten.ROLLEN
                                         if (raum.get(r) or "").strip()}
@@ -12004,6 +12055,11 @@ class TXServer:
             return web.json_response({"ok": True, "text": "nichts offen"})
         task = getattr(self, "_konten_task", None)
         if task and not task.done():
+            if getattr(self, "_konten_laeuft", False):
+                # Mitten im Anwenden nicht abbrechen (der Rest des Durchgangs
+                # ginge verloren) -- die laufende Schleife nimmt Neues gleich mit.
+                self._konten_sofort = True
+                return web.json_response({"ok": True})
             task.cancel()
         self._konten_task = asyncio.create_task(self._konten_anwenden_loop(sofort=True))
         return web.json_response({"ok": True})
@@ -12780,7 +12836,7 @@ class TXServer:
                                     if conn:
                                         user_tx_conn = conn
                                         tx_conn = conn
-                                    ok = await tx_conn.request_tx()
+                                    ok = await tx_conn.request_tx(sofort=True)
                                 finally:
                                     room._tx_lock.release()
                                     waiting_tx = False
