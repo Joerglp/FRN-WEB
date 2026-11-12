@@ -176,6 +176,12 @@ titel "4/7 Icecast und Weboberfläche"
 if [ "$MODUS" = docker ]; then
     ICE_HOST=icecast; ICE_PORT=8000
     ICE_SRC=$(zufall); ICE_ADM=$(zufall)
+    # Ein frueheres "docker compose up" ohne setup.sh hat hier evtl. einen
+    # leeren Ordner angelegt -- der muss weg, sonst scheitert das Schreiben.
+    if [ -d "$CFG/icecast.xml" ]; then
+        rmdir "$CFG/icecast.xml" 2>/dev/null || sudo rmdir "$CFG/icecast.xml" \
+            || { echo "Bitte den Ordner $CFG/icecast.xml von Hand löschen." >&2; exit 1; }
+    fi
     if darf_schreiben "$CFG/icecast.xml"; then
         sed -e "s#<source-password>[^<]*#<source-password>$ICE_SRC#" \
             -e "s#<relay-password>[^<]*#<relay-password>$(zufall)#" \
@@ -200,8 +206,11 @@ else
 fi
 frage UI_TITEL "Titel der Weboberfläche" "FRN Webstreams"
 frage TX_PORT "Port der Weboberfläche" "8765"
+# Im Container lauscht der Server immer auf 8765 (Compose-Portabbildung,
+# Healthcheck, frn_stream) -- der gewaehlte Port gilt dort nur nach aussen (.env).
+if [ "$MODUS" = docker ]; then CFG_TX_PORT=8765; else CFG_TX_PORT="$TX_PORT"; fi
 
-python3 - "$CFG/config.json" "$FRN_HOST" "$FRN_PORT" "$ICE_HOST" "$ICE_PORT" "$ICE_SRC" "$ICE_ADM" "$UI_TITEL" "$TX_PORT" <<'PY'
+python3 - "$CFG/config.json" "$FRN_HOST" "$FRN_PORT" "$ICE_HOST" "$ICE_PORT" "$ICE_SRC" "$ICE_ADM" "$UI_TITEL" "$CFG_TX_PORT" <<'PY'
 import json, sys
 p, host, port, ih, ip, isrc, iadm, titel, txp = sys.argv[1:]
 c = json.load(open(p, encoding="utf-8"))
@@ -395,6 +404,7 @@ After=network.target icecast2.service
 Type=simple
 WorkingDirectory=$HIER
 Environment=FRN_KONTEN=$CFG/konten.json
+Environment=FRN_TX_PORT=$TX_PORT
 EnvironmentFile=$CFG/stream-%i.env
 # Zugangsdaten holt run_stream.sh aus konten.json (zentrale Konten)
 ExecStart=$HIER/run_stream.sh \${FRN_ROOM} \${FRN_MOUNT}

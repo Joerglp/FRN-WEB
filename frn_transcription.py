@@ -943,6 +943,7 @@ class TranscriptionPipeline:
         text = (rkt(room, ts, dur_s) if rkt else None) or ""
         confidence = None      # Verlaesslichkeit des Transkripts (0..1)
         messwerte = {}         # avg_logprob/Verworfenes vom Whisper-Dienst
+        ausweich_leer = False  # Ausweich (Voxtral) lieferte nichts -- siehe unten
         kontroll_info = ""     # JSON: abweichender Kontroll-Text + beide logprobs
         if text:
             log.info("[%s] Bekannter Bot-Text übernommen (kein Whisper nötig)", room)
@@ -988,6 +989,7 @@ class TranscriptionPipeline:
                         await asyncio.sleep(30)
                 if ausgewichen is not None:
                     text = ausgewichen
+                    ausweich_leer = not text
                     break
                 try:
                     _t0 = time.time()
@@ -1123,9 +1125,11 @@ class TranscriptionPipeline:
                         return
                     ausgewichen = await _ausweich_versuch(
                         wav_path, language, room, ts, "Whisper-Timeout", dbg)
-                    if ausgewichen is not None:
+                    if ausgewichen:
                         text = ausgewichen
                         break
+                    # Leerer Ausweich-Text zaehlt hier wie "kein Ausweich":
+                    # Whisper ist erreichbar und wird nochmal versucht.
                     log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
                     await asyncio.sleep(30)
                 except Exception as e:
@@ -1152,9 +1156,11 @@ class TranscriptionPipeline:
                         return
                     ausgewichen = await _ausweich_versuch(
                         wav_path, language, room, ts, f"Whisper-Fehler ({str(e)[:60]})", dbg)
-                    if ausgewichen is not None:
+                    if ausgewichen:
                         text = ausgewichen
                         break
+                    # Leerer Ausweich-Text zaehlt hier wie "kein Ausweich":
+                    # Whisper ist erreichbar und wird nochmal versucht.
                     log.warning("Warte 30s und versuche erneut (Versuch %d/%d) …", fails, MAX_FAILS)
                     await asyncio.sleep(30)
 
@@ -1167,6 +1173,12 @@ class TranscriptionPipeline:
             # Nur echte Stille entfaellt weiterhin.
             aussortiert = (messwerte.get("verworfen_text") or "").strip()
             grund = messwerte.get("verworfen_grund", "unbrauchbar")
+            # Whisper war nicht erreichbar und der schwaechere Ausweich
+            # (Voxtral) lieferte nichts: einen Clip ab 3 s nicht verwerfen,
+            # sondern textlos mit confidence 0 archivieren -- frueher haette
+            # er auf Whisper gewartet (Review 12.11.). Kuerzere bleiben Ausschuss.
+            if ausweich_leer and not aussortiert and dur_s >= 3.0:
+                aussortiert, grund = "(leer)", "ausweich_leer"
             if aussortiert:
                 # Zwei Sorten von Ausschuss, unterschiedlich behandelt:
                 # Prompt-Echo und die bekannten Standard-Halluzinationen
@@ -1178,7 +1190,7 @@ class TranscriptionPipeline:
                 # laesst sich anhoeren. Wiederholungsmurks ("Beheufe, Beheufe,
                 # Beheufe") und Englisch-Ausrutscher bleiben dagegen stehen:
                 # das ist Whispers echter Versuch am vorhandenen Ton.
-                text = "" if grund in ("prompt_echo", "halluzination") else aussortiert
+                text = "" if grund in ("prompt_echo", "halluzination", "ausweich_leer") else aussortiert
                 confidence = 0.0
                 log.info("[%s] Unbrauchbares Transkript archiviert (%s): %.80s",
                          room, grund, text)

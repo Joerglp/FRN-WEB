@@ -960,7 +960,7 @@ def _intern_melden(pfad: str, daten: dict):
         import urllib.request
         try:
             req = urllib.request.Request(
-                f"http://127.0.0.1:8765/api/intern/{pfad}",
+                f"http://127.0.0.1:{os.environ.get('FRN_TX_PORT') or 8765}/api/intern/{pfad}",
                 data=json.dumps(daten).encode(),
                 headers={"Content-Type": "application/json"}, method="POST")
             urllib.request.urlopen(req, timeout=1).close()

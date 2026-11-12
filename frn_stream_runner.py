@@ -47,7 +47,11 @@ def start_stream(room_cfg, cfg):
     # Eigenes Stream-Konto aus konten.json: FRN laesst jedes Konto nur einmal
     # gleichzeitig zu -- mit dem TX-Konto aus tx_rooms.json gaebe es AL=BLOCK,
     # sobald der TX-Server sendet.
-    k = _konten.fuer(mount, "stream") if _konten else None
+    try:
+        k = _konten.fuer(mount, "stream") if _konten else None
+    except Exception as e:      # kaputte konten.json/Passwortliste: nicht abstuerzen
+        print(f"[runner] {mount}: konten.json nicht lesbar ({e}) -- nehme tx_rooms.json", flush=True)
+        k = None
     if k and k.get("password"):
         callsign, email, password = k["name"], k["email"], k["password"]
         print(f"[runner] {mount}: Stream-Konto '{callsign}' aus konten.json", flush=True)
@@ -92,6 +96,25 @@ def stop_stream(procs):
             pass
 
 
+def _erreichbar(host: str, port: int) -> bool:
+    import socket
+    try:
+        socket.create_connection((host, port), timeout=3).close()
+        return True
+    except OSError:
+        return False
+
+
+def _netz_tot(cfg) -> bool:
+    """Weder Icecast noch der TX-Server erreichbar. Im Docker-Stack teilt
+    dieser Container das Netz von frn-web; startet frn-web allein neu, bleibt
+    hier ein totes Netz zurueck, ohne dass ein Prozess endet."""
+    ice_host = os.environ.get("ICECAST_HOST", cfg["icecast"].get("host", "localhost"))
+    ice_port = int(os.environ.get("ICECAST_PORT", cfg["icecast"].get("port", 8000)))
+    tx_port = int(os.environ.get("FRN_TX_PORT") or 8765)
+    return not _erreichbar(ice_host, ice_port) and not _erreichbar("127.0.0.1", tx_port)
+
+
 def main():
     cfg, rooms = load_config()
     if not rooms:
@@ -102,8 +125,18 @@ def main():
     for room_cfg in rooms:
         processes[room_cfg["mount"]] = (room_cfg, start_stream(room_cfg, cfg))
 
+    netz_weg = 0
     while True:
         time.sleep(15)
+        # ~90 s ohne Icecast UND ohne TX-Server: Netz ist weg -> beenden,
+        # die Restart-Policy startet den Container mit frischem Netz neu.
+        netz_weg = netz_weg + 1 if _netz_tot(cfg) else 0
+        if netz_weg >= 6:
+            print("[runner] Netz weg (Icecast und TX-Server nicht erreichbar) -- beende, "
+                  "Neustart durch Docker", flush=True)
+            for procs in [p for _r, p in processes.values()]:
+                stop_stream(procs)
+            sys.exit(1)
         # Config neu laden (live-Änderungen an tx_rooms.json übernehmen)
         try:
             cfg, rooms = load_config()

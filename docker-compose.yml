@@ -7,7 +7,15 @@ services:
     ports:
       - "${ICECAST_PORT:-8000}:8000"
     volumes:
-      - ./config/icecast.xml:/etc/icecast2/icecast.xml:ro
+      # config/icecast.xml legt ./setup.sh an (zufaellige Passwoerter). Fehlt
+      # sie, bricht Compose hier mit einer klaren Meldung ab, statt an ihrer
+      # Stelle stillschweigend einen Ordner anzulegen.
+      - type: bind
+        source: ./config/icecast.xml
+        target: /etc/icecast2/icecast.xml
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/"]
       interval: 10s
@@ -84,6 +92,9 @@ services:
     restart: unless-stopped
     entrypoint: ["python3", "frn_stream_runner.py"]
     network_mode: "service:frn-web"
+    # Startet frn-web allein neu, haengt dieser Container an einem toten Netz.
+    # frn_stream_runner.py merkt das (weder Icecast noch TX-Server erreichbar)
+    # und beendet sich -- restart: unless-stopped haengt ihn dann neu an.
     volumes:
       - ./config:/app/config
       - frn-recordings:/opt/FRN/recordings

@@ -57,13 +57,29 @@ def _sicherung(pfad: Path):
 
 def _schreibe_atomar(pfad: Path, text: str, encoding="utf-8"):
     tmp = pfad.with_name(pfad.name + ".tmp")
-    tmp.write_text(text, encoding=encoding)
+    # Von Anfang an nur fuer den Besitzer lesbar (Passwortliste!) -- die
+    # Rechte der Zieldatei kommen erst danach, getrennt vom chown, das ohne
+    # root scheitern darf.
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding=encoding) as f:
+        f.write(text)
     try:
         st = pfad.stat()
-        os.chown(tmp, st.st_uid, st.st_gid)
-        os.chmod(tmp, st.st_mode & 0o7777)
-    except (OSError, FileNotFoundError):
-        pass
+    except OSError:
+        st = None                      # neue Datei: bleibt 0600
+    if st is not None:
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except OSError:
+            pass
+        try:
+            os.chmod(tmp, st.st_mode & 0o7777)
+        except OSError:
+            pass
     os.replace(tmp, pfad)
 
 

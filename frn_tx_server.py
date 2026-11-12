@@ -5734,8 +5734,8 @@ class TXServer:
                  "Ist der Auftrag mit dem Gesagten vollständig erledigt? "
                  "Antworte nur mit JA oder NEIN.")
         try:
-            raw = await self._llm_ollama(b, "Du prüfst, ob ein Auftrag erledigt ist.",
-                                         [{"role": "user", "content": frage}])
+            raw = await self._llm_neben(b, "Du prüfst, ob ein Auftrag erledigt ist.",
+                                        [{"role": "user", "content": frage}])
         except Exception as e:
             log.debug("Einmal-Notiz-Pruefung fehlgeschlagen: %r", e)
             return
@@ -8173,7 +8173,7 @@ class TXServer:
                     ziel = self._notizbuch_ziel(v, g)
                     ziel[:] = nb
                 _nb(voice)
-                fehler = self._cfg_auf_platte(_nb)
+                fehler = self._voice_auf_platte(_nb)
             else:
                 raum = str(body.get("raum") or "").strip()
                 bid = str(body.get("bot") or "").strip()
@@ -8217,7 +8217,7 @@ class TXServer:
                     if not raeume:
                         z.pop("raeume", None)
                 _raum(voice)
-                fehler = self._cfg_auf_platte(_raum)
+                fehler = self._voice_auf_platte(_raum)
                 log.info("KI-Funker Raum %s%s: gesetzt %s, Grundwert %s", raum,
                          f" ({bid})" if bid else "", sorted(neu), sorted(weg))
             if fehler:
@@ -8447,7 +8447,7 @@ class TXServer:
                 log.info("KI-Dienste: %s -> %s %s", a, an, modell)
             if aenderung:
                 aenderung(self.cfg.setdefault("voice", {}))
-                fehler = self._cfg_auf_platte(aenderung)
+                fehler = self._voice_auf_platte(aenderung)
                 if fehler:
                     return web.json_response({"error": fehler}, status=500)
                 antwort["gespeichert"] = True
@@ -8467,7 +8467,7 @@ class TXServer:
             log.warning("config.json nicht gespeichert: %s", e)
             return str(e)
 
-    def _cfg_auf_platte(self, aendern) -> str:
+    def _voice_auf_platte(self, aendern) -> str:
         """config.json lesen, aendern(voice) anwenden, zurueckschreiben
         (indent=2, wie ueberall). Fehlertext oder ""."""
         try:
@@ -9000,7 +9000,9 @@ class TXServer:
             themen_folge = [thema or "(frei)"]
             log.info("[%s] Spielwiese: Gespräch beginnt, %d Wechsel, Thema: %s, KI: %s",
                      raum, n, thema or "(frei)", self._spiel_ki_text(c))
-            for i in range(n):
+            i = -1
+            while i + 1 < n:                   # n waechst bei Einwuerfen mit
+                i += 1
                 if z["stopp"]:
                     ende = "gestoppt"; break
                 # Einwurf eines Menschen (10.11.): kein Abbruch mehr -- der
@@ -9202,7 +9204,11 @@ class TXServer:
             neu["funk_raeume"] = [r for r in neu["funk_raeume"] if r != neu["raum"]]
             def aendern(disk):
                 disk.setdefault("voice", {})["spielwiese"] = neu
-            self._cfg_auf_platte(aendern)
+            try:
+                self._cfg_auf_platte(aendern)
+            except Exception as e:
+                log.warning("Spielwiese nicht gespeichert: %s", e)
+                return web.json_response({"error": f"Speichern fehlgeschlagen: {e}"}, status=500)
             self.cfg.setdefault("voice", {})["spielwiese"] = neu
             if neu["enabled"] and not alt.get("enabled"):
                 self._spiel_naechster_planen(neu)
@@ -13427,6 +13433,16 @@ def main():
         default=str(Path(__file__).parent.parent / "config" / "tx_rooms.json"))
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
+    # Die Transkription liest dieselbe config.json wie der Server -- auch
+    # wenn FRN_CONFIG nicht gesetzt ist (Start von Hand mit --config). Sonst
+    # blieben Ausweich-Transkription und MQTT-Ausschluss still wirkungslos.
+    if args.config and not os.environ.get("FRN_CONFIG"):
+        os.environ["FRN_CONFIG"] = str(Path(args.config).resolve())
+        try:
+            import frn_transcription as _ft_cfg
+            _ft_cfg._CFG_PFAD = Path(args.config).resolve()
+        except ImportError:
+            pass
 
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
