@@ -1555,6 +1555,7 @@ class TXServer:
         vcfg = self.cfg.get("voice", {})
         if not vcfg.get("enabled", False):
             raise RuntimeError("Voice-Funktion ist deaktiviert")
+        text = self._aussprache(text)
         if force_xtts:
             url = (vcfg.get("xtts_url") or "").strip()
         else:
@@ -1793,6 +1794,24 @@ class TXServer:
             cls._STREAM_TIEFPASS = (h / h.sum()).astype(np.float32)
         return cls._STREAM_TIEFPASS
 
+    def _aussprache(self, text: str) -> str:
+        """Ersetzt Woerter, die die Stimme falsch spricht (voice.aussprache,
+        {"Hypes": "Haips"}), nur fuer die Sprachausgabe, ganze Woerter, ohne
+        auf Gross-/Kleinschreibung zu achten (13.11.)."""
+        tab = self.cfg.get("voice", {}).get("aussprache") or {}
+        if not tab or not text:
+            return text
+        key = tuple(sorted((str(k), str(v)) for k, v in tab.items() if str(k).strip()))
+        if getattr(self, "_aussp_key", None) != key:
+            teile = sorted((k for k, _v in key), key=len, reverse=True)
+            self._aussp_re = (re.compile(r"(?<!\w)(" + "|".join(re.escape(k) for k in teile) + r")(?!\w)",
+                                         re.IGNORECASE) if teile else None)
+            self._aussp_map = {k.lower(): v for k, v in key}
+            self._aussp_key = key
+        if not self._aussp_re:
+            return text
+        return self._aussp_re.sub(lambda m: self._aussp_map.get(m.group(1).lower(), m.group(0)), text)
+
     @staticmethod
     def _xtts_text(text: str) -> str:
         """Satzpunkte fuer XTTS durch Semikolon ersetzen. Mit Punkt spricht das
@@ -1852,7 +1871,7 @@ class TXServer:
         timeout = aiohttp.ClientTimeout(total=120, sock_read=20)
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             async with sess.post(basis + "/tts_stream",
-                                 json={"text": self._xtts_text(text), "language": lang,
+                                 json={"text": self._xtts_text(self._aussprache(text)), "language": lang,
                                        "speaker": speaker}) as resp:
                 if resp.status != 200:
                     raise RuntimeError(f"tts_stream HTTP {resp.status}: {(await resp.text())[:120]}")
@@ -6571,6 +6590,13 @@ class TXServer:
         # Regel zum Tagesprogramm steht im statischen Teil (zwischengespeichert),
         # im Hinweis stehen nur die Daten.
         tp_text = self._tagesprogramm_text(bot)
+        # Spielwiese (12.11.): Wetter, Lippstadt-Meldungen und Tabelle kamen
+        # in fast jedem Gespraech als Fuellstoff -- dort weglassen.
+        _sz = getattr(self, "_spiel_zust", None)
+        _rz = raum or _BOT_RAUM.get()      # _bot_reply reicht raum nicht durch
+        if tp_text and _sz and _sz.get("laeuft") and _rz and _rz == _sz.get("raum_aktiv") \
+                and _rz == self._spiel_cfg().get("raum"):
+            tp_text = ""
         if tp_text:
             system += ("\n\nTagesprogramm (unten, echte Meldungen): Bring höchstens EIN "
                        "Thema ein, wenn es passt oder Pause ist, locker in einem Satz, nichts "
@@ -8692,8 +8718,27 @@ class TXServer:
     _SPIEL_FLOSKEL_RE = re.compile(
         r"zeit (einfach |so richtig )?(gemeinsam )?genie|seele baumeln|richtige einstellung|"
         r"ruhe genie|freu(e)? mich (schon|auch)|so richtig gemütlich|welt .{0,20}draußen|"
-        r"mein schatz|meine liebe|schatzi|genau so (ist|machen)", re.IGNORECASE)
+        r"mein schatz|meine liebe|schatzi|genau so (ist|machen)|"
+        r"gro(ß|ss)e frage|beiseite schieben", re.IGNORECASE)
     _SPIEL_ENDE = " Lass das Gespräch jetzt freundlich ausklingen."
+    # Anruf vorweg und richtiger Abschied (13.11.): vorher ging es ohne Anruf
+    # los und hoerte einfach auf.
+    _SPIEL_RUF = ("Du wohnst mit {andere} im selben Haus, jeder in seiner eigenen Wohnung, und ihr funkt "
+                  "im {raum}, eurem eigenen Funkraum. Ruf {andere} zuerst kurz, ob {andere} überhaupt da "
+                  "ist, zum Beispiel mit dem Namen und \"bist du da?\". Noch kein Thema, nur ein, zwei kurze Sätze.")
+    _SPIEL_RUF_ANTWORT = ("{von} ruft dich im {raum}. Melde dich kurz zurück, dass du da bist und zuhörst. "
+                          "Noch kein Thema, nur ein, zwei kurze Sätze.")
+    _SPIEL_START_NACH_RUF = "{von} hat sich eben gemeldet. Fang jetzt das Gespräch an{thema}."
+    _SPIEL_ABSCHIED = ("Das Gespräch geht zu Ende. Beantworte erst kurz, was {von} zuletzt gesagt oder "
+                       "gefragt hat, und sag dann freundlich, dass du jetzt los musst oder dich wieder um "
+                       "etwas kümmerst, und verabschiede dich. Bring kein neues Thema auf.")
+    _SPIEL_ENDEN = (" Führ das Gespräch weiter, solange es euch beiden Spaß macht. Wenn es für dich "
+                    "natürlich zu Ende geht, verabschiede dich jetzt von {von}.")
+    _SPIEL_ABSCHIED_RE = re.compile(
+        r"tsch(ü|u)ss|tschau|\bciao\b|mach'?s gut|machs gut|bis (später|bald|dann|gleich|morgen|zum nächsten)|"
+        r"schönen (tag|abend) noch|auf wiederh|muss (jetzt |nun )?(mal |leider |auch )*(los|schluss|weg)\b|"
+        r"pass auf dich auf", re.IGNORECASE)
+    _SPIEL_ABSCHIED_ANTWORT = "{von} hat sich verabschiedet. Verabschiede dich auch kurz, ein, zwei Sätze."
     _SPIEL_START_FUNK = "Du wohnst mit {andere} im selben Haus, jeder in seiner eigenen Wohnung. Fang hier im {raum} ein lockeres Gespräch mit {andere} an{thema}."
     _SPIEL_EINWURF = ("{wer} hat sich eben über Funk in euer Gespräch eingeschaltet. "
                       "Geh auf {wer} ein und bezieh es in euer Gespräch ein.")
@@ -8975,23 +9020,38 @@ class TXServer:
         thema = random.choice(pool) if pool else ""
         if thema:
             zuletzt.append(thema)
-            del zuletzt[:-15]
+            del zuletzt[:-40]
         return thema
 
     def _spiel_zusatz(self, i: int, n: int, andere: str, von: str, raum: str, thema: str,
-                      eigen: bool = True, wechsel: bool = False) -> str:
+                      eigen: bool = True, wechsel: bool = False, ruf: bool = False,
+                      enden: bool = False) -> str:
+        if ruf and i == 0:
+            return self._SPIEL_RUF.format(andere=andere, raum=raum)
+        if ruf and i == 1:
+            return self._SPIEL_RUF_ANTWORT.format(von=von, raum=raum)
+        if i == n - 2:
+            return self._SPIEL_ABSCHIED.format(von=von)
+        if i == n - 1:
+            return self._SPIEL_ABSCHIED_ANTWORT.format(von=von)
+        k = 2 if ruf else 0
         info = self._spiel_info(thema) if thema else ""
-        hg = self._SPIEL_HINTERGRUND.format(info=info) if info else ""
-        if i == 0:
+        # Hintergrund nur beim Aufbringen des Themas (12.11.): sonst hielt das
+        # Modell ihn in jedem Wechsel fuer neu und fragte nochmal danach.
+        hg = self._SPIEL_HINTERGRUND.format(info=info) if info and (i == k or wechsel) else ""
+        if i == k:
             t = f" über: {thema}" if thema else " über ein Alltagsthema deiner Wahl"
-            vorlage = self._SPIEL_START if eigen else self._SPIEL_START_FUNK
-            return vorlage.format(andere=andere, raum=raum, thema=t) + hg
+            vorlage = (self._SPIEL_START_NACH_RUF if ruf
+                       else self._SPIEL_START if eigen else self._SPIEL_START_FUNK)
+            return vorlage.format(andere=andere, von=von, raum=raum, thema=t) + hg
         if wechsel:
             t = f": {thema}" if thema else ", etwa etwas aus deinem Alltag oder deiner Woche"
             z = self._SPIEL_WECHSEL.format(von=von, thema=t) + hg
         else:
             z = self._SPIEL_WEITER.format(von=von, thema=f" über: {thema}" if thema else "") + hg
-        return z + (self._SPIEL_ENDE if i == n - 1 else "")
+            if enden:
+                z += self._SPIEL_ENDEN.format(von=von)
+        return z
 
     async def _spiel_gespraech(self, thema: str | None = None, auftrag_von: str = "",
                                raum: str | None = None) -> str:
@@ -9023,12 +9083,16 @@ class TXServer:
             z["thema"] = thema
             await self._spiel_recherche(thema, c)
             lo, hi = sorted((int(c.get("wechsel_min") or 4), int(c.get("wechsel_max") or 8)))
-            n = random.randint(max(2, lo), max(2, hi))
+            n = max(2, hi)            # Obergrenze; das Modell darf ab lo selbst enden (13.11.)
             if not eigen:
                 n = max(2, min(10, int(c.get("funk_wechsel") or 4)))
+            ruf = eigen and not auftrag_von          # Anruf vorweg nur im eigenen Raum
+            k0 = 2 if ruf else 0
+            n += k0 + 2                              # Anruf+Antwort und Abschied+Gegengruss kommen dazu
+            ab_ab = k0 + max(2, lo)                  # ab hier darf das Modell das Ende waehlen
             erster = random.randrange(2)
             nach = int(c.get("themenwechsel_nach") or 0)
-            seit_thema = 0                     # Wechsel auf dem aktuellen Thema
+            seit_thema = -2 if ruf else 0     # Wechsel auf dem aktuellen Thema
             gesagt: list[str] = []
             themen_folge = [thema or "(frei)"]
             log.info("[%s] Spielwiese: Gespräch beginnt, %d Wechsel, Thema: %s, KI: %s",
@@ -9057,7 +9121,7 @@ class TXServer:
                     bot = self._spiel_ki(self._bot_cfg(), c)
                     if not bot.get("enabled"):
                         ende = f"{name} ist aus"; break
-                    themenwechsel = (i > 0 and nach > 0 and i < n - 2 and seit_thema >= 2
+                    themenwechsel = (i > 0 and nach > 0 and i < n - 4 and seit_thema >= 2
                                      and (seit_thema >= nach or self._spiel_festgefahren(gesagt)))
                     if themenwechsel:
                         thema = await self._spiel_thema(c)
@@ -9067,7 +9131,8 @@ class TXServer:
                         seit_thema = 0
                         log.info("[%s] Spielwiese: Themenwechsel → %s", raum, thema or "(frei)")
                     zusatz = self._spiel_zusatz(i, n, andere, andere, raum, thema, eigen,
-                                                wechsel=themenwechsel)
+                                                wechsel=themenwechsel, ruf=ruf,
+                                                enden=eigen and i >= ab_ab)
                     if i == 0 and auftrag_von:
                         zusatz = (f"{auftrag_von} hat euch eben über Funk gebeten, euch zu unterhalten. "
                                   + zusatz)
@@ -9092,6 +9157,10 @@ class TXServer:
                 gesagt.append(next((x for _t0, t1, x in self._bot_own_tx.get(raum, [])
                                     if t1 == nachher), ""))
                 seit_thema += 1
+                # Hat sich einer erkennbar verabschiedet, ist der Gegengruss dran
+                if (eigen and k0 <= i < n - 2 and i >= k0 + 2 and gesagt[-1]
+                        and self._SPIEL_ABSCHIED_RE.search(gesagt[-1])):
+                    n = i + 2
                 z["wechsel"] = i + 1
                 z["einwurf_dran"] = False
                 # Warten, solange jemand sendet; ein Einwurf braucht danach
