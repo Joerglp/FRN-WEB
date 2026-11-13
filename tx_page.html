@@ -588,6 +588,9 @@ audio {
   background: var(--inset); border: 1px solid var(--border); border-radius: 6px; color: var(--text);
   font-family: 'Share Tech Mono', monospace; font-size: .88em; padding: 5px 8px;
 }
+.adm-inline.kurz input { width: 84px; }
+.adm-inline.kurz { margin-top: 10px; }
+.adm-inline.kurz b { color: var(--text); font-weight: normal; min-width: 190px; }
 .adm-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .adm-chip {
   display: flex; align-items: center; gap: 6px; padding: 5px 12px; cursor: pointer;
@@ -1309,8 +1312,9 @@ audio {
         <tbody id="users-tbody"></tbody>
       </table>
 
-      <div class="admin-section-title">Neuer Benutzer</div>
-      <div class="form-grid">
+      <div class="adm-card">
+        <div class="adm-card-title">👤 Neuer Benutzer</div>
+        <div class="adm-fields">
         <div class="form-field">
           <label>Benutzername / FRN-E-Mail *</label>
           <input type="text" id="nu-username" placeholder="name oder frn@example.de">
@@ -1329,17 +1333,16 @@ audio {
             <option value="">— kein Standard —</option>
           </select>
         </div>
-        <div class="form-field" style="gap:6px">
-          <label class="checkbox-row">
-            <input type="checkbox" id="nu-frn-only" onchange="toggleFrnOnly()"> Nur FRN-Login (kein lokales Passwort)
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" id="nu-admin"> Admin-Rechte
-          </label>
         </div>
-      </div>
+        <label class="adm-sw" style="margin-top:6px"><input type="checkbox" id="nu-frn-only" onchange="toggleFrnOnly()">
+          <span class="adm-sw-text">Nur FRN-Login<small>kein lokales Passwort</small></span></label>
+        <label class="adm-sw"><input type="checkbox" id="nu-admin">
+          <span class="adm-sw-text">Admin-Rechte</span></label>
+        <div style="margin-top:12px">
       <button class="btn-save" onclick="addUser()">BENUTZER ANLEGEN</button>
       <div class="admin-msg" id="msg-users"></div>
+        </div>
+      </div>
     </div>
 
     <!-- ── Rooms tab ── -->
@@ -1355,8 +1358,9 @@ audio {
         <tbody id="rooms-tbody"></tbody>
       </table>
 
-      <div class="admin-section-title">Neuer Raum</div>
-      <div class="form-grid">
+      <div class="adm-card">
+        <div class="adm-card-title">➕ Neuer Raum</div>
+        <div class="adm-fields">
         <div class="form-field">
           <label>Mount (URL-Teil) *</label>
           <input type="text" id="nr-mount" placeholder="meinraum">
@@ -1385,9 +1389,10 @@ audio {
           <label>FRN Port</label>
           <input type="number" id="nr-port" placeholder="10024">
         </div>
+        </div>
+        <div style="margin-top:12px"><button class="btn-save" onclick="addRoom()">RAUM ANLEGEN</button></div>
+        <div class="admin-msg" id="msg-rooms"></div>
       </div>
-      <button class="btn-save" onclick="addRoom()">RAUM ANLEGEN</button>
-      <div class="admin-msg" id="msg-rooms"></div>
     </div>
 
     <!-- ── Status tab ── -->
@@ -1423,38 +1428,70 @@ audio {
       </div>
 
       <div class="admin-section-title">Einstellungen</div>
-      <div class="form-grid">
-        <div class="form-field"><label><input type="checkbox" id="spiel-enabled"> Automatisch unterhalten</label></div>
-        <div class="form-field"><label>Raum</label><select id="spiel-raum"></select></div>
-        <div class="form-field"><label>Pause zwischen Gesprächen (Min.) von</label><input type="number" id="spiel-pause-min" min="5" max="1440"></div>
-        <div class="form-field"><label>bis</label><input type="number" id="spiel-pause-max" min="5" max="1440"></div>
-        <div class="form-field"><label>Wechsel pro Gespräch von</label><input type="number" id="spiel-wechsel-min" min="2" max="20"></div>
-        <div class="form-field"><label>bis</label><input type="number" id="spiel-wechsel-max" min="2" max="20"></div>
-        <div class="form-field"><label>Uhrzeit von</label><input type="text" id="spiel-von" placeholder="08:00"></div>
-        <div class="form-field"><label>bis</label><input type="text" id="spiel-bis" placeholder="21:00"></div>
-        <div class="form-field"><label>Ruhe, nachdem ein Mensch sprach (Min.)</label><input type="number" id="spiel-ruhe" min="0" max="120"></div>
-        <div class="form-field"><label><input type="checkbox" id="spiel-nachrichten"> Auch Schlagzeilen (tagesschau) als Thema</label></div>
-        <div class="form-field full"><label>Per Funk startbar auch in diesen echten Räumen („Robert, Susi, unterhaltet euch mal über …“, kurz, ohne Endlos)</label>
-          <div id="spiel-funk-raeume" style="display:flex;flex-wrap:wrap;gap:12px"></div></div>
-        <div class="form-field"><label>Wechsel in echten Räumen</label><input type="number" id="spiel-funk-wechsel" min="2" max="10"></div>
-        <div class="form-field"><label>Neues Thema nach … Wechseln (früher, wenn es sich festfährt; 0 = nie)</label><input type="number" id="spiel-themenwechsel" min="0" max="20"></div>
-        <div class="form-field"><label><input type="checkbox" id="spiel-websuche"> Zu jedem Thema vorher im Netz nachschlagen (Websuche)</label></div>
-        <div class="form-field"><label><input type="checkbox" id="spiel-wikipedia"> Ohne festes Thema manchmal einen Wikipedia-Zufallsartikel nehmen</label></div>
-        <div class="form-field"><label><input type="checkbox" id="spiel-endlos"> Endlos: nach jedem Gespräch (auch bei SKIP) gleich ein neues Thema – bis STOPP oder Schalter aus</label></div>
-        <div class="form-field"><label>Sprachmodell – Anbieter</label>
-          <select id="spiel-anbieter" onchange="spielModellListe()">
-            <option value="">wie Robert &amp; Susi sonst</option>
-            <option value="ollama">GPU-Box (Ollama / llama.cpp)</option>
-            <option value="mistral">Mistral (Cloud)</option>
-            <option value="ollama_cloud">Ollama Cloud</option>
-            <option value="gemini">Google Gemini</option>
-          </select></div>
-        <div class="form-field"><label>Modell (leer = Standard des Anbieters)</label>
-          <input type="text" id="spiel-modell" list="spiel-modelle" placeholder="z. B. mistral-large-4">
-          <datalist id="spiel-modelle"></datalist></div>
-        <div class="form-field full" style="font-size:.75rem;color:var(--muted)" id="spiel-ki-info"></div>
-        <div class="form-field full"><label>Eigene Themen (eins pro Zeile; leer = Schlagzeilen oder frei gewählt)</label>
-          <textarea id="spiel-themen" rows="6" style="background:var(--bg,#0b1220);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px;font:inherit"></textarea></div>
+
+      <div class="adm-card">
+        <div class="adm-card-title">⏱ Ablauf</div>
+        <label class="adm-sw"><input type="checkbox" id="spiel-enabled">
+          <span class="adm-sw-text">Automatisch unterhalten<small>Robert und Susi fangen von selbst Gespräche an.</small></span></label>
+        <div class="adm-fields">
+          <div class="form-field"><label>Raum</label><select id="spiel-raum"></select></div>
+          <div class="form-field"><label>Ruhe, nachdem ein Mensch sprach (Min.)</label><input type="number" id="spiel-ruhe" min="0" max="120"></div>
+        </div>
+        <div class="adm-inline kurz"><b>Pause zwischen Gesprächen</b>
+          <input type="number" id="spiel-pause-min" min="5" max="1440"> bis <input type="number" id="spiel-pause-max" min="5" max="1440"> Min.</div>
+        <div class="adm-inline kurz"><b>Nur zwischen</b>
+          <input type="text" id="spiel-von" placeholder="08:00"> und <input type="text" id="spiel-bis" placeholder="21:00"> Uhr</div>
+      </div>
+
+      <div class="adm-card">
+        <div class="adm-card-title">💬 Gespräch</div>
+        <div class="adm-inline kurz"><b>Wechsel pro Gespräch</b>
+          <input type="number" id="spiel-wechsel-min" min="2" max="20"> bis <input type="number" id="spiel-wechsel-max" min="2" max="20"></div>
+        <div class="adm-hint">Ab dem Minimum darf das Modell selbst Schluss machen, das Maximum ist die Obergrenze.</div>
+        <div class="adm-inline kurz"><b>Neues Thema nach</b>
+          <input type="number" id="spiel-themenwechsel" min="0" max="20"> Wechseln</div>
+        <div class="adm-hint">Früher, wenn es sich festfährt. 0 = nie.</div>
+        <label class="adm-sw" style="margin-top:6px"><input type="checkbox" id="spiel-endlos">
+          <span class="adm-sw-text">Endlos<small>Nach jedem Gespräch gleich ein neues Thema, bis STOPP oder der Schalter ausgeht.</small></span></label>
+      </div>
+
+      <div class="adm-card">
+        <div class="adm-card-title">📰 Themen</div>
+        <label class="adm-sw"><input type="checkbox" id="spiel-nachrichten">
+          <span class="adm-sw-text">Schlagzeilen (Tagesschau) als Thema</span></label>
+        <label class="adm-sw"><input type="checkbox" id="spiel-wikipedia">
+          <span class="adm-sw-text">Ohne festes Thema manchmal ein Wikipedia-Zufallsartikel</span></label>
+        <label class="adm-sw"><input type="checkbox" id="spiel-websuche">
+          <span class="adm-sw-text">Zu jedem Thema vorher im Netz nachschlagen<small>Websuche</small></span></label>
+        <div class="form-field" style="margin-top:10px">
+          <label>Eigene Themen (eins pro Zeile; leer = Schlagzeilen oder frei gewählt)</label>
+          <textarea id="spiel-themen" rows="5"></textarea></div>
+      </div>
+
+      <div class="adm-card">
+        <div class="adm-card-title">📻 Per Funk in echten Räumen</div>
+        <div class="adm-card-sub">Dort startbar mit „Robert, Susi, unterhaltet euch mal über …“, kurz und ohne Endlos. Erlaubte Räume:</div>
+        <div class="adm-chips" id="spiel-funk-raeume"></div>
+        <div class="adm-inline kurz"><b>Wechsel in echten Räumen</b>
+          <input type="number" id="spiel-funk-wechsel" min="2" max="10"></div>
+      </div>
+
+      <div class="adm-card">
+        <div class="adm-card-title">🧠 Sprachmodell</div>
+        <div class="adm-fields wide">
+          <div class="form-field"><label>Anbieter</label>
+            <select id="spiel-anbieter" onchange="spielModellListe()">
+              <option value="">wie Robert &amp; Susi sonst</option>
+              <option value="ollama">GPU-Box (Ollama / llama.cpp)</option>
+              <option value="mistral">Mistral (Cloud)</option>
+              <option value="ollama_cloud">Ollama Cloud</option>
+              <option value="gemini">Google Gemini</option>
+            </select></div>
+          <div class="form-field"><label>Modell <small>leer = Standard des Anbieters</small></label>
+            <input type="text" id="spiel-modell" list="spiel-modelle" placeholder="z. B. mistral-large-4">
+            <datalist id="spiel-modelle"></datalist></div>
+        </div>
+        <div class="adm-hint" id="spiel-ki-info"></div>
       </div>
       <button class="btn-save" onclick="spielSpeichern()">SPEICHERN</button>
       <div class="admin-msg" id="msg-spiel"></div>
@@ -1522,166 +1559,113 @@ audio {
     </div>
 
     <div id="admin-tab-server" class="admin-tab-content">
-      <div class="admin-section-title">FRN-Server</div>
-      <div class="form-grid">
-        <div class="form-field" style="flex:2">
-          <label>Hostname / IP</label>
-          <input type="text" id="srv-host" placeholder="localhost">
-        </div>
-        <div class="form-field" style="flex:0 0 100px">
-          <label>Port</label>
-          <input type="number" id="srv-port" placeholder="10024" min="1" max="65535">
+      <div class="adm-card">
+        <div class="adm-card-title">🖧 FRN-Server</div>
+        <div class="adm-fields">
+          <div class="form-field"><label>Hostname / IP</label>
+            <input type="text" id="srv-host" placeholder="localhost"></div>
+          <div class="form-field"><label>Port</label>
+            <input type="number" id="srv-port" placeholder="10024" min="1" max="65535"></div>
         </div>
       </div>
 
-      <div class="admin-section-title" style="margin-top:16px">FRN-Zugangsdaten</div>
-      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">
-        Fremde Server erfordern beim System-Manager registrierte FRN-Konten.<br>
-        Leer lassen, um die bisherigen Raumdaten beizubehalten.
-      </div>
-      <div class="form-grid">
-        <div class="form-field" style="flex:2">
-          <label>FRN E-Mail</label>
-          <input type="email" id="srv-email" placeholder="dein@frn-konto.de">
+      <div class="adm-card">
+        <div class="adm-card-title">🔑 FRN-Zugangsdaten</div>
+        <div class="adm-card-sub">Fremde Server erfordern beim System-Manager registrierte FRN-Konten.
+          Leer lassen, um die bisherigen Raumdaten beizubehalten.</div>
+        <div class="adm-fields">
+          <div class="form-field"><label>FRN E-Mail</label>
+            <input type="email" id="srv-email" placeholder="dein@frn-konto.de"></div>
+          <div class="form-field"><label>Passwort</label>
+            <input type="password" id="srv-password" placeholder="FRN-Passwort"></div>
         </div>
-        <div class="form-field" style="flex:2">
-          <label>Passwort</label>
-          <input type="password" id="srv-password" placeholder="FRN-Passwort">
+        <div style="margin-top:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <button class="btn-save" onclick="switchServer()">WECHSELN &amp; NEU VERBINDEN</button>
+          <a href="https://tools.freeradionetwork.de:43448/FRN_Browser/" target="_blank"
+             style="color:var(--accent);font-size:.8rem;text-decoration:none">↗ FRN Browser (Serverliste)</a>
         </div>
+        <div id="srv-msg" style="margin-top:10px;font-size:.8rem;color:var(--accent)"></div>
       </div>
 
-      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <button class="btn-save" onclick="switchServer()">WECHSELN &amp; NEU VERBINDEN</button>
-        <a href="https://tools.freeradionetwork.de:43448/FRN_Browser/" target="_blank"
-           style="color:var(--accent);font-size:.8rem;text-decoration:none">
-          ↗ FRN Browser (Serverliste)
-        </a>
-      </div>
-      <div id="srv-msg" style="margin-top:10px;font-size:.8rem;color:var(--accent)"></div>
-
-      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
-      <div class="admin-section-title">FRN-Konto registrieren</div>
-      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">
-        Noch kein FRN-Konto? Hier neues Konto beim System-Manager beantragen.<br>
-        Das Passwort wird per E-Mail gesendet.
-      </div>
-      <div style="font-size:.75rem;background:rgba(255,180,0,.08);border:1px solid rgba(255,180,0,.3);
-                  border-radius:6px;padding:7px 10px;margin-bottom:10px;color:#f0b429;line-height:1.5">
-        ⚠ Bitte eine bekannte E-Mail-Adresse verwenden (z.&thinsp;B. Gmail).<br>
-        Selbst gehostete oder kleine Domains erhalten die Bestätigungs-E-Mail
-        vom FRN-Sysman oft nicht, da dieser nur IPv4 unterstützt.
-      </div>
-      <div class="form-grid">
-        <div class="form-field" style="flex:2">
-          <label>Rufzeichen / Callsign</label>
-          <input type="text" id="reg-callsign" placeholder="DEIN1RUF" maxlength="20">
+      <div class="adm-card">
+        <div class="adm-card-title">📝 FRN-Konto registrieren</div>
+        <div class="adm-card-sub">Noch kein FRN-Konto? Hier ein neues beim System-Manager beantragen.
+          Das Passwort kommt per E-Mail.</div>
+        <div style="font-size:.75rem;background:rgba(255,180,0,.08);border:1px solid rgba(255,180,0,.3);
+                    border-radius:6px;padding:7px 10px;color:#f0b429;line-height:1.5">
+          ⚠ Bitte eine bekannte E-Mail-Adresse verwenden (z.&thinsp;B. Gmail). Selbst gehostete oder kleine
+          Domains erhalten die Bestätigungs-E-Mail vom FRN-Sysman oft nicht, da dieser nur IPv4 unterstützt.
         </div>
-        <div class="form-field" style="flex:2">
-          <label>Name</label>
-          <input type="text" id="reg-name" placeholder="Max Mustermann">
+        <div class="adm-fields">
+          <div class="form-field"><label>Rufzeichen / Callsign</label>
+            <input type="text" id="reg-callsign" placeholder="DEIN1RUF" maxlength="20"></div>
+          <div class="form-field"><label>Name</label>
+            <input type="text" id="reg-name" placeholder="Max Mustermann"></div>
+          <div class="form-field"><label>E-Mail</label>
+            <input type="email" id="reg-email" placeholder="deine@email.de"></div>
+          <div class="form-field"><label>Stadt</label>
+            <input type="text" id="reg-city" placeholder="Berlin"></div>
         </div>
+        <div style="margin-top:12px"><button class="btn-save" onclick="registerFRN()">KONTO BEANTRAGEN</button></div>
+        <div id="reg-msg" style="margin-top:10px;font-size:.8rem;color:var(--accent)"></div>
       </div>
-      <div class="form-grid">
-        <div class="form-field" style="flex:2">
-          <label>E-Mail</label>
-          <input type="email" id="reg-email" placeholder="deine@email.de">
-        </div>
-        <div class="form-field" style="flex:2">
-          <label>Stadt</label>
-          <input type="text" id="reg-city" placeholder="Berlin">
-        </div>
-      </div>
-      <div style="margin-top:8px">
-        <button class="btn-save" onclick="registerFRN()">KONTO BEANTRAGEN</button>
-      </div>
-      <div id="reg-msg" style="margin-top:10px;font-size:.8rem;color:var(--accent)"></div>
     </div>
 
     <!-- ── Automatik tab ── -->
     <div id="admin-tab-autoreply" class="admin-tab-content">
-      <div class="admin-section-title">Automatische Antwort-Vorschläge</div>
-      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:12px;line-height:1.5">
-        Globale Einstellungen der Automatik. <b>Jeder Benutzer</b> konfiguriert eigene
-        Trigger-Wörter, Persona und Stimme unter „⚙ Meine Stimme &amp; Automatik" im
-        Sende-Bereich — die Felder hier sind Infrastruktur + Fallback, falls ein
-        Benutzer nichts eingestellt hat.
+      <div class="adm-card">
+        <div class="adm-card-title">🤖 Automatische Antwort-Vorschläge</div>
+        <div class="adm-card-sub">Globale Einstellungen der Automatik. <b>Jeder Benutzer</b> konfiguriert eigene
+          Trigger-Wörter, Persona und Stimme unter „⚙ Meine Stimme &amp; Automatik“ im Sende-Bereich – die Felder
+          hier sind Infrastruktur und Fallback, falls ein Benutzer nichts eingestellt hat.</div>
+        <label class="adm-sw"><input type="checkbox" id="ar-enabled">
+          <span class="adm-sw-text">Automatik aktiv</span></label>
+        <label class="adm-sw warn"><input type="checkbox" id="ar-autosend">
+          <span class="adm-sw-text">⚠ Automatisch senden<small>Aus = der Vorschlag erscheint in der App und du gibst ihn per Senden-Knopf frei (Standard).
+            An = Abwesenheits-Modus: die Antwort geht <b>ohne Freigabe</b> in deiner Stimme raus, auch wenn niemand angemeldet ist. Der Cooldown gilt weiterhin.</small></span></label>
       </div>
 
-      <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer">
-        <input type="checkbox" id="ar-enabled" style="accent-color:var(--accent)">
-        Automatik aktiv
-      </label>
-      <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer">
-        <input type="checkbox" id="ar-autosend" style="accent-color:#f0b429">
-        ⚠ Automatisch senden — Antwort geht <b>ohne Freigabe</b> in deiner Stimme raus
-      </label>
-      <div style="font-size:.72rem;color:var(--text-muted);margin:0 0 14px 24px;line-height:1.4">
-        Aus = Vorschlag erscheint in der App, du gibst per Senden-Knopf frei (Standard).<br>
-        An = Abwesenheits-Modus: der Server antwortet selbstständig, auch wenn niemand
-        angemeldet ist. Cooldown gilt weiterhin.
-      </div>
-
-      <div class="form-grid">
-        <div class="form-field" style="flex:2">
-          <label>Standard-Trigger-Wörter (Fallback, Komma-getrennt)</label>
-          <input type="text" id="ar-names" placeholder="jörg, joerg, jörch">
+      <div class="adm-card">
+        <div class="adm-card-title">🎯 Auslöser und Persona</div>
+        <div class="adm-fields wide">
+          <div class="form-field"><label>Standard-Trigger-Wörter <small>Fallback, Komma-getrennt</small></label>
+            <input type="text" id="ar-names" placeholder="jörg, joerg, jörch"></div>
+          <div class="form-field"><label>Cooldown (Sek.)</label>
+            <input type="number" id="ar-cooldown" placeholder="90"></div>
+          <div class="form-field"><label>Ignorierte Rufzeichen-Präfixe <small>Komma-getrennt, verhindert Selbst-Trigger</small></label>
+            <input type="text" id="ar-ignore" placeholder="tx-, stream-, web-, audio test"></div>
         </div>
-        <div class="form-field" style="flex:0 0 130px">
-          <label>Cooldown (Sek.)</label>
-          <input type="number" id="ar-cooldown" placeholder="90">
+        <div class="form-field" style="margin-top:12px">
+          <label>Standard-Persona <small>Fallback: wer antwortet, wenn der Benutzer keine eigene hat</small></label>
+          <textarea id="ar-persona" rows="2" placeholder="Du bist Jörg, ein CB-Funker aus Eickelborn (Kanal 74)."></textarea>
         </div>
       </div>
 
-      <div class="form-field" style="margin-top:8px">
-        <label>Standard-Persona (Fallback — wer antwortet, wenn der Benutzer keine eigene hat)</label>
-        <textarea id="ar-persona" rows="2" style="width:100%;resize:vertical;
-          background:var(--panel);color:var(--text);border:1px solid var(--border);
-          border-radius:6px;padding:8px 10px;font-family:inherit;font-size:.85em"
-          placeholder="Du bist Jörg, ein CB-Funker aus Eickelborn (Kanal 74)."></textarea>
+      <div class="adm-card">
+        <div class="adm-card-title">🧠 Sprachmodell</div>
+        <div class="adm-fields wide">
+          <div class="form-field"><label>Ollama-Server</label>
+            <input type="text" id="ar-ollama-url" placeholder="http://192.0.0.17:11434"></div>
+          <div class="form-field"><label>KI-Modell</label>
+            <input type="text" id="ar-ollama-model" list="ar-model-list" placeholder="llama3.2:3B">
+            <datalist id="ar-model-list"></datalist></div>
+        </div>
+        <div style="margin-top:12px"><button class="btn-save" onclick="saveAutoReplyAdmin()">SPEICHERN</button></div>
+        <div class="admin-msg" id="msg-autoreply"></div>
       </div>
 
-      <div class="form-grid" style="margin-top:8px">
-        <div class="form-field" style="flex:2">
-          <label>Ignorierte Rufzeichen-Präfixe (Komma-getrennt — verhindert Selbst-Trigger)</label>
-          <input type="text" id="ar-ignore" placeholder="tx-, stream-, web-, audio test">
+      <div class="adm-card">
+        <div class="adm-card-title">🧪 Test</div>
+        <div class="adm-card-sub">Testet die <b>gespeicherten</b> Einstellungen (erst speichern!) – ohne Funk, ohne Senden.
+          Trigger-Wörter werden hier nicht geprüft.</div>
+        <div class="adm-fields wide" style="align-items:end">
+          <div class="form-field"><label>Gehörter Satz</label>
+            <input type="text" id="ar-test-text" placeholder="Jörg, bist du auf dem Kanal?"></div>
+          <div><button class="btn-save" onclick="testAutoReply()" id="ar-test-btn">TESTEN</button></div>
         </div>
+        <div id="ar-test-result" style="margin-top:10px;font-size:.85rem;display:none;
+             padding:8px 10px;border:1px solid var(--border);border-radius:6px"></div>
       </div>
-
-      <div class="form-grid" style="margin-top:8px">
-        <div class="form-field" style="flex:2">
-          <label>Ollama-Server</label>
-          <input type="text" id="ar-ollama-url" placeholder="http://192.0.0.17:11434">
-        </div>
-        <div class="form-field" style="flex:2">
-          <label>KI-Modell</label>
-          <input type="text" id="ar-ollama-model" list="ar-model-list" placeholder="llama3.2:3B">
-          <datalist id="ar-model-list"></datalist>
-        </div>
-      </div>
-
-      <div style="margin-top:12px">
-        <button class="btn-save" onclick="saveAutoReplyAdmin()">SPEICHERN</button>
-      </div>
-      <div class="admin-msg" id="msg-autoreply"></div>
-
-      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
-      <div class="admin-section-title">Test</div>
-      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">
-        Testet die <b>gespeicherten</b> Einstellungen (erst speichern!) —
-        ohne Funk, ohne Senden. Trigger-Wörter werden hier nicht geprüft.
-      </div>
-      <div class="form-grid">
-        <div class="form-field" style="flex:3">
-          <label>Gehörter Satz</label>
-          <input type="text" id="ar-test-text" placeholder="Jörg, bist du auf dem Kanal?">
-        </div>
-        <div class="form-field" style="flex:0 0 110px;justify-content:flex-end;display:flex;flex-direction:column">
-          <label>&nbsp;</label>
-          <button class="btn-save" onclick="testAutoReply()" id="ar-test-btn">TESTEN</button>
-        </div>
-      </div>
-      <div id="ar-test-result" style="margin-top:10px;font-size:.85rem;display:none;
-           padding:8px 10px;border:1px solid var(--border);border-radius:6px"></div>
     </div>
 
     <!-- ── KI-Funker tab ── -->
@@ -2388,19 +2372,17 @@ audio {
         Gespräch kannst du das Sprachmodell den Stand von damals erneut beantworten
         lassen, und jedes Transkript über andere Whisper-Quellen gegenprüfen.
       </div>
-      <div class="form-grid" style="margin-bottom:12px">
-        <div class="form-field" style="flex:0 0 170px">
+      <div class="adm-card"><div class="adm-fields" style="align-items:end;margin-top:0">
+        <div class="form-field">
           <label>Datum <span style="color:var(--muted)">— leer = neueste</span></label>
           <input type="date" id="rb-date" autocomplete="off">
         </div>
-        <div class="form-field" style="flex:0 0 120px">
+        <div class="form-field">
           <label>Anzahl</label>
           <input type="number" id="rb-limit" value="25" autocomplete="off">
         </div>
-        <div class="form-field" style="flex:0 0 auto;justify-content:flex-end">
-          <button class="btn-save" onclick="loadRobertChats()">LADEN</button>
-        </div>
-      </div>
+        <div><button class="btn-save" onclick="loadRobertChats()">LADEN</button></div>
+      </div></div>
       <div class="admin-msg" id="msg-robert"></div>
       <div id="rb-list" style="font-size:.85rem"></div>
     </div>
@@ -2413,68 +2395,48 @@ audio {
         alle automatisch angehängten Regeln und der aktuelle Verlauf des Raums. Websuche-Treffer
         fehlen (die entstehen erst beim konkreten Spruch). Sendet nichts.
       </div>
-      <div class="form-grid" style="margin-bottom:10px">
-        <div class="form-field" style="flex:0 0 140px">
+      <div class="adm-card"><div class="adm-fields" style="align-items:end;margin-top:0">
+        <div class="form-field">
           <label>KI-Funker</label>
           <select id="pp-bot" onchange="promptAnsehen()"><option value="">Robert</option></select>
         </div>
-        <div class="form-field" style="flex:0 0 200px">
+        <div class="form-field">
           <label>Raum</label>
           <select id="pp-room" onchange="promptAnsehen()"></select>
         </div>
-        <div class="form-field" style="flex:0 0 auto;justify-content:flex-end">
-          <button class="btn-save" onclick="promptAnsehen()">ANZEIGEN</button>
-        </div>
-      </div>
+        <div><button class="btn-save" onclick="promptAnsehen()">ANZEIGEN</button></div>
+      </div></div>
       <div id="pp-out" style="font-size:.78rem"></div>
     </div>
 
     <!-- ── Crosslink tab ── -->
     <div id="admin-tab-crosslink" class="admin-tab-content">
-      <div class="admin-section-title">Raum-Crosslink</div>
-      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:14px;line-height:1.5">
-        Verbindet zwei FRN-Räume dauerhaft — wer in Raum A spricht, wird auch in Raum B gehört
-        und umgekehrt. Läuft als eigener Dienst, braucht eine <b>eigene</b> FRN-Kennung
-        (nicht die der Stream-/WebTX-Verbindungen, sonst Kontokollision).
-      </div>
-
-      <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer">
-        <input type="checkbox" id="cl-enabled">
-        Crosslink aktiv
-        <span id="cl-active-badge" style="font-size:.72rem;padding:2px 8px;border-radius:4px;margin-left:6px"></span>
-      </label>
-
-      <div class="form-grid">
-        <div class="form-field" style="flex:1">
-          <label>Raum A</label>
-          <input type="text" id="cl-room-a" placeholder="Eickelborn-CH74">
-        </div>
-        <div class="form-field" style="flex:1">
-          <label>Raum B</label>
-          <input type="text" id="cl-room-b" placeholder="Eickelborn-Freenet">
+      <div class="adm-card">
+        <div class="adm-card-title">🔗 Raum-Crosslink</div>
+        <div class="adm-card-sub">Verbindet zwei FRN-Räume dauerhaft – wer in Raum A spricht, wird auch in Raum B gehört
+          und umgekehrt. Läuft als eigener Dienst und braucht eine <b>eigene</b> FRN-Kennung (nicht die der
+          Stream-/WebTX-Verbindungen, sonst Kontokollision).</div>
+        <label class="adm-sw"><input type="checkbox" id="cl-enabled">
+          <span class="adm-sw-text">Crosslink aktiv
+            <span id="cl-active-badge" style="font-size:.72rem;padding:2px 8px;border-radius:4px;margin-left:6px"></span></span></label>
+        <div class="adm-fields wide">
+          <div class="form-field"><label>Raum A</label><input type="text" id="cl-room-a" placeholder="Eickelborn-CH74"></div>
+          <div class="form-field"><label>Raum B</label><input type="text" id="cl-room-b" placeholder="Eickelborn-Freenet"></div>
+          <div class="form-field"><label>Rufzeichen <small>Anzeige in beiden Räumen</small></label>
+            <input type="text" id="cl-callsign" placeholder="Crosslink"></div>
         </div>
       </div>
-      <div class="form-grid" style="margin-top:8px">
-        <div class="form-field" style="flex:1">
-          <label>Rufzeichen (Anzeige in beiden Räumen)</label>
-          <input type="text" id="cl-callsign" placeholder="Crosslink">
+      <div class="adm-card">
+        <div class="adm-card-title">🔑 FRN-Kennung des Crosslinks</div>
+        <div class="adm-fields wide">
+          <div class="form-field"><label>FRN-E-Mail</label>
+            <input type="text" id="cl-email" placeholder="crosslink@deine-domain.de"></div>
+          <div class="form-field"><label>FRN-Passwort</label>
+            <input type="password" id="cl-password" autocomplete="new-password" placeholder="leer = unverändert"></div>
         </div>
+        <div style="margin-top:12px"><button class="btn-save" onclick="saveCrosslink()">SPEICHERN</button></div>
+        <div class="admin-msg" id="msg-crosslink"></div>
       </div>
-      <div class="form-grid" style="margin-top:8px">
-        <div class="form-field" style="flex:2">
-          <label>FRN-E-Mail (eigene Kennung für den Crosslink)</label>
-          <input type="text" id="cl-email" placeholder="crosslink@deine-domain.de">
-        </div>
-        <div class="form-field" style="flex:2">
-          <label>FRN-Passwort</label>
-          <input type="password" id="cl-password" autocomplete="new-password" placeholder="leer = unverändert">
-        </div>
-      </div>
-
-      <div style="margin-top:12px">
-        <button class="btn-save" onclick="saveCrosslink()">SPEICHERN</button>
-      </div>
-      <div class="admin-msg" id="msg-crosslink"></div>
     </div>
 
     <!-- ── Transkription & Archiv tab ── -->
@@ -4622,7 +4584,17 @@ async function loadOverview() {
     const r = await adminFetch("/api/admin/overview");
     const d = await r.json();
     if (d.error) { body.textContent = "Fehler: " + d.error; return; }
-    body.innerHTML = (d.groups || []).map(g => {
+    const stumm = (d.stumm || []).map(x =>
+      `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:4px 0">
+        <span>🔇 <b>${esc(x.name)}</b> ist in <b>${esc(x.raum)}</b> stummgeschaltet und antwortet dort nicht.</span>
+        <button class="btn-save" style="padding:4px 12px" data-bot="${esc(x.bot)}" data-raum="${esc(x.raum)}"
+                onclick="botRaumAn(this)">Wieder einschalten</button></div>`).join("");
+    const warnung = stumm
+      ? `<div style="border:1px solid #f0b429;background:rgba(240,180,41,.09);border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:.88rem">
+           <div style="color:#f0b429;margin-bottom:4px">⚠ Stummgeschaltet (per Funkbefehl „aus“ oder Raum-Einstellung)</div>${stumm}
+           <div class="adm-hint">Per Funk in diesem Raum wieder einschalten geht auch mit „Robert, an“.</div></div>`
+      : "";
+    body.innerHTML = warnung + (d.groups || []).map(g => {
       const rows = g.items.map(([label, value, active]) => {
         let vhtml;
         const rest = typeof value === "string" ? value.replace(/^(AN|AUS)\s*/, "") : "";
@@ -4642,6 +4614,18 @@ async function loadOverview() {
   } catch(e) {
     body.textContent = "Fehler beim Laden: " + e;
   }
+}
+
+async function botRaumAn(btn) {
+  btn.disabled = true; btn.textContent = "schalte ein …";
+  try {
+    const r = await adminFetch("/api/admin/bot/raeume", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({raum: btn.dataset.raum, bot: btn.dataset.bot, werte: {enabled: true}})});
+    const d = await r.json();
+    if (!r.ok || d.error) { btn.textContent = "Fehler: " + (d.error || r.status); btn.disabled = false; return; }
+  } catch(e) { btn.textContent = "Fehler: " + e; btn.disabled = false; return; }
+  loadOverview();
 }
 
 function adminFetch(url, opts = {}) {
@@ -6889,7 +6873,7 @@ async function spielLaden(nurStatus) {
     document.getElementById("spiel-nachrichten").checked = !!c.nachrichten;
     document.getElementById("spiel-endlos").checked = !!c.endlos;
     document.getElementById("spiel-funk-raeume").innerHTML = d.raeume.filter(n => n !== c.raum).map(n =>
-      `<label style="font-weight:normal"><input type="checkbox" value="${esc(n)}"${(c.funk_raeume || []).includes(n) ? " checked" : ""}> ${esc(n)}</label>`).join("");
+      `<label class="adm-chip"><input type="checkbox" value="${esc(n)}"${(c.funk_raeume || []).includes(n) ? " checked" : ""}> ${esc(n)}</label>`).join("");
     document.getElementById("spiel-funk-wechsel").value = c.funk_wechsel || 4;
     document.getElementById("spiel-themenwechsel").value = c.themenwechsel_nach ?? 5;
     document.getElementById("spiel-websuche").checked = c.websuche !== false;

@@ -12355,7 +12355,15 @@ class TXServer:
                 ("Benutzer", str(len(self.users)), None),
              ]},
         ]
-        return web.json_response({"groups": groups})
+        # Raeume, in denen ein KI-Funker stumm ist (z.B. per Funkbefehl, 13.11.):
+        # die Uebersicht zeigt sie mit "Wieder einschalten"
+        stumm = [{"bot": "", "name": voice.get("bot", {}).get("name") or "Robert", "raum": r}
+                 for r in self._aus_in_raeumen(voice.get("bot"))]
+        for b in voice.get("bots_weitere") or []:
+            if isinstance(b, dict) and b.get("id"):
+                stumm += [{"bot": b["id"], "name": b.get("name") or b["id"], "raum": r}
+                          for r in self._aus_in_raeumen(b)]
+        return web.json_response({"groups": groups, "stumm": stumm})
 
     async def handle_admin_server_get(self, request):
         """GET /api/admin/server — return current FRN server."""
