@@ -962,6 +962,8 @@ class TXServer:
         self._rueckblick: dict = {}
         self._rueckblick_laeuft = False
         self._rueckblick_laden()
+        self._plaene_pfad = _DATEN / "plaene.json"
+        self._plaene_laden()
         self._nachrichten_pfad = _DATEN / "nachrichten.json"
         self._nachrichten: list[dict] = []
         self._nachgang: dict[str, dict] = {}       # Raum → laufendes Gespraech mit Robert
@@ -6082,6 +6084,10 @@ class TXServer:
             self._rueckblick_speichern()
             log.info("Tagesrückblick %s%s gebaut (%d Durchsagen, %d Blöcke)",
                      datum, f" [{gruppe}]" if gruppe else "", len(zeilen), len(bloecke))
+            # Pläne aus dem Funkverkehr (Spielwiese: schon nach jedem Gespräch)
+            if self._spiel_cfg().get("raum") not in rooms:
+                await self._plaene_extrahieren(gruppe, zeilen,
+                                               datetime.strptime(datum, "%Y-%m-%d"), bot)
             return None
         except Exception as e:
             log.warning("Tagesrückblick %s%s fehlgeschlagen: %s", datum,
@@ -6541,6 +6547,174 @@ class TXServer:
             out.append(d)
         return list(dict.fromkeys(d.strftime("%Y-%m-%d") for d in out))[:2]
 
+    # ── Plaene & Verabredungen (14.11.) ─────────────────────────────────────
+    # Was sich Robert/Susi vornehmen (Grillen, Besuch, Ausflug), wird je Gruppe
+    # gemerkt und spaeter wieder aufgegriffen ("wie war der Grillabend?").
+    # Spielwiese: nach jedem Gespraech; sonst im Tagesrueckblick. Gespeichert
+    # in plaene.json, im Admin (Spielwiese-Reiter) einsehbar und loeschbar.
+    _PLAENE_SYSTEM = (
+        "Du liest eine Mitschrift von Funkgesprächen. 'Robert' und 'Susi' sind KI-Funker. "
+        "Finde konkrete Verabredungen und Vorhaben, die Robert oder Susi für heute oder später "
+        "ausgemacht haben (Grillen, Essen, Besuch, Ausflug, Einkaufen, Basteln). Keine Themen, "
+        "keine bloßen Wünsche, keine Nachrichten, nichts Erfundenes. Antworte NUR als JSON: "
+        '{"plaene":[{"text":"kurzer Satz, wer was","tag":"JJJJ-MM-TT oder leer"}]} mit höchstens '
+        "3 Einträgen (was zu EINEM Anlass gehört, ist EIN Eintrag mit allen Beteiligten), leer wenn nichts Konkretes verabredet wurde. Relative Angaben (morgen, "
+        "Samstag, am Wochenende) rechnest du anhand des genannten Datums in ein Datum um.")
+
+    def _plaene_laden(self):
+        try:
+            d = json.loads(self._plaene_pfad.read_text(encoding="utf-8"))
+            self._plaene = d if isinstance(d.get("gruppen"), dict) else {"gruppen": {}}
+        except Exception:
+            self._plaene = {"gruppen": {}}
+
+    def _plaene_speichern(self):
+        try:
+            tmp = self._plaene_pfad.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._plaene, ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.replace(self._plaene_pfad)
+        except Exception as e:
+            log.warning("Pläne nicht gespeichert: %s", e)
+
+    def _plaene_liste(self, gruppe: str) -> list:
+        return self._plaene.setdefault("gruppen", {}).setdefault(gruppe or "", [])
+
+    def _plan_aktiv(self, p: dict, heute: "datetime | None" = None) -> bool:
+        heute = (heute or datetime.now()).date()
+        if int(p.get("angesprochen") or 0) >= 2:
+            return False
+        try:
+            if p.get("tag"):
+                tag = datetime.strptime(p["tag"], "%Y-%m-%d").date()
+                return -2 <= (tag - heute).days <= 7
+        except ValueError:
+            pass
+        return (heute - datetime.fromtimestamp(float(p.get("erstellt") or 0)).date()).days <= 3
+
+    def _plan_satz(self, p: dict, heute: "datetime | None" = None) -> str:
+        heute = (heute or datetime.now()).date()
+        text = str(p.get("text") or "").strip().rstrip(".")
+        try:
+            tag = datetime.strptime(p.get("tag") or "", "%Y-%m-%d").date()
+        except ValueError:
+            return f"Ihr hattet euch vorgenommen: {text}."
+        name = f"{self._WOCHENTAGE[tag.weekday()]}, {tag:%d.%m.}"
+        if tag == heute:
+            return f"Heute steht an: {text}."
+        if tag < heute:
+            return f"Das war geplant: {text} ({name}, schon vorbei)."
+        return f"Ihr habt vor: {text} ({name})."
+
+    async def _plaene_extrahieren(self, gruppe: str, zeilen: list[str], bezug: "datetime", bot: dict):
+        """Pläne aus Gesprächszeilen ziehen und (ohne Doppelte) merken."""
+        if len(zeilen) < 4:
+            return
+        wort = f"{self._WOCHENTAGE[bezug.weekday()]}, {bezug:%d.%m.%Y}"
+        text = "\n".join(zeilen)[-6000:]
+        try:
+            roh = await self._ollama_text(
+                bot, self._PLAENE_SYSTEM,
+                f"Datum des Gesprächs: {wort}\n\nMitschrift:\n{text}\n\nJSON:",
+                num_predict=300, als_json=True)
+            daten = json.loads(roh)
+        except Exception as e:
+            log.info("Pläne [%s]: nicht ausgewertet (%s)", gruppe or "Standard", e)
+            return
+        neu = 0
+        liste = self._plaene_liste(gruppe)
+        for q in (daten.get("plaene") or [])[:3]:
+            if not isinstance(q, dict):
+                continue
+            t = str(q.get("text") or "").strip()[:200]
+            tag = str(q.get("tag") or "").strip()
+            try:
+                datetime.strptime(tag, "%Y-%m-%d")
+            except ValueError:
+                tag = ""
+            if len(t) < 8:
+                continue
+            w1 = set(re.findall(r"\w{4,}", t.lower()))
+            if any(w1 and len(w1 & set(re.findall(r"\w{4,}", x["text"].lower()))) / len(w1) >= 0.6
+                   and (x.get("tag") or "") == tag for x in liste):
+                continue
+            liste.append({"id": f"{int(time.time() * 1000)}{neu}", "text": t, "tag": tag,
+                          "erstellt": time.time(), "angesprochen": 0})
+            neu += 1
+            log.info("Plan gemerkt [%s]: %s (%s)", gruppe or "Standard", t, tag or "ohne Datum")
+        # Alte Eintraege (> 14 Tage) und Ueberlauf wegraeumen
+        liste[:] = [x for x in liste if time.time() - float(x.get("erstellt") or 0) < 14 * 86400][-30:]
+        self._plaene_speichern()
+
+    async def _plaene_aus_spiel(self, raum: str, dbg: dict):
+        try:
+            zeilen = [f"{t['sprecher']}: {t['text']}" for t in dbg.get("turns", []) if t.get("text")]
+            await self._plaene_extrahieren(self._gruppe_von(raum), zeilen,
+                                           datetime.fromtimestamp(dbg["beginn"]),
+                                           self._bot_cfg(raum=raum))
+        except Exception:
+            log.exception("Pläne aus Spielwiese")
+
+    def _plan_wahl(self, gruppe: str) -> str:
+        """Ein aktiver Plan fuer den Gespraechsstart (Zufall, ca. jedes zweite Mal)."""
+        if random.random() > 0.5:
+            return ""
+        akt = [p for p in self._plaene_liste(gruppe) if self._plan_aktiv(p)]
+        if not akt:
+            return ""
+        p = random.choice(akt)
+        p["angesprochen"] = int(p.get("angesprochen") or 0) + 1
+        self._plaene_speichern()
+        return self._plan_satz(p)
+
+    def _plaene_prompt(self, gruppe: str) -> str:
+        akt = [p for p in self._plaene_liste(gruppe) if self._plan_aktiv(p)]
+        if not akt:
+            return ""
+        return ("\n\nDeine eigenen Pläne und Verabredungen (aus euren Gesprächen): "
+                + " ".join(self._plan_satz(p) for p in akt[-4:])
+                + " Erwähn sie nur, wenn es zum Gespräch passt oder jemand danach fragt, "
+                  "nichts dazuerfinden.")
+
+    async def handle_admin_plaene(self, request):
+        """GET: Pläne je Gruppe. POST {aktion: loeschen|hinzu, gruppe, id|text,tag}."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if request.method == "POST":
+            try:
+                body = await request.json()
+                assert isinstance(body, dict)
+            except Exception:
+                return web.json_response({"error": "bad request"}, status=400)
+            g = str(body.get("gruppe") or "")
+            if g not in self._gruppen():
+                return web.json_response({"error": "unbekannte Gruppe"}, status=400)
+            liste = self._plaene_liste(g)
+            if body.get("aktion") == "loeschen":
+                liste[:] = [x for x in liste if x.get("id") != body.get("id")]
+            elif body.get("aktion") == "hinzu":
+                t = str(body.get("text") or "").strip()[:200]
+                tag = str(body.get("tag") or "").strip()
+                try:
+                    datetime.strptime(tag, "%Y-%m-%d")
+                except ValueError:
+                    tag = ""
+                if len(t) < 4:
+                    return web.json_response({"error": "Text fehlt"}, status=400)
+                liste.append({"id": f"{int(time.time() * 1000)}m", "text": t, "tag": tag,
+                              "erstellt": time.time(), "angesprochen": 0})
+            else:
+                return web.json_response({"error": "unbekannte Aktion"}, status=400)
+            self._plaene_speichern()
+        sz = self._spiel_cfg().get("raum")
+        gruppen = []
+        for g, raeume in self._gruppen().items():
+            gruppen.append({"gruppe": g, "raeume": raeume,
+                            "name": g or "Standard (übrige Räume, z. B. Kanal 74)",
+                            "plaene": [{**p, "aktiv": self._plan_aktiv(p)}
+                                       for p in self._plaene_liste(g)]})
+        return web.json_response({"gruppen": gruppen, "spielwiese": self._gruppe_von(sz)})
+
     def _rueckblick_hinweis(self, bot: dict, text: str, jetzt_ts: float | None = None) -> str:
         if not bot.get("rueckblick_enabled"):
             return ""
@@ -6601,9 +6775,12 @@ class TXServer:
         # in fast jedem Gespraech als Fuellstoff -- dort weglassen.
         _sz = getattr(self, "_spiel_zust", None)
         _rz = raum or _BOT_RAUM.get()      # _bot_reply reicht raum nicht durch
-        if tp_text and _sz and _sz.get("laeuft") and _rz and _rz == _sz.get("raum_aktiv") \
-                and _rz == self._spiel_cfg().get("raum"):
+        _in_spiel = bool(_sz and _sz.get("laeuft") and _rz and _rz == _sz.get("raum_aktiv")
+                         and _rz == self._spiel_cfg().get("raum"))
+        if tp_text and _in_spiel:
             tp_text = ""
+        if not _in_spiel:
+            system += self._plaene_prompt(bot.get("_gruppe") or "")
         if tp_text:
             system += ("\n\nTagesprogramm (unten, echte Meldungen): Bring höchstens EIN "
                        "Thema ein, wenn es passt oder Pause ist, locker in einem Satz, nichts "
@@ -8823,7 +9000,7 @@ class TXServer:
                        "wikipedia": True}
     _SPIEL_MODELL_FELD = {"ollama": "ollama_model", "mistral": "mistral_model",
                           "ollama_cloud": "ollama_cloud_model", "gemini": "gemini_model"}
-    _SPIEL_START = "Du wohnst mit {andere} im selben Haus, jeder in seiner eigenen Wohnung, und ihr funkt im {raum}, eurem eigenen Funkraum. Fang ein lockeres Gespräch mit {andere} an{thema}."
+    _SPIEL_START = "Du wohnst mit {andere} im selben Haus, jeder in seiner eigenen Wohnung. Ihr funkt miteinander, jeder mit dem Funkgerät bei sich zu Hause, zum Beispiel im Wohnzimmer, in der Küche oder im Schlafzimmer.. Fang ein lockeres Gespräch mit {andere} an{thema}."
     _SPIEL_WEITER = ("{von} unterhält sich mit dir{thema}. Antworte {von} wie in einem normalen Gespräch "
                      "zu zweit und bring etwas Neues ein: eine eigene Meinung, eine Erfahrung oder eine Frage.")
     _SPIEL_WECHSEL = ("{von} unterhält sich mit dir. Geh kurz auf das Letzte ein und bring dann "
@@ -8838,11 +9015,14 @@ class TXServer:
     _SPIEL_ENDE = " Lass das Gespräch jetzt freundlich ausklingen."
     # Anruf vorweg und richtiger Abschied (13.11.): vorher ging es ohne Anruf
     # los und hoerte einfach auf.
-    _SPIEL_RUF = ("Du wohnst mit {andere} im selben Haus, jeder in seiner eigenen Wohnung, und ihr funkt "
-                  "im {raum}, eurem eigenen Funkraum. Ruf {andere} zuerst kurz, ob {andere} überhaupt da "
+    _SPIEL_RUF = ("Du wohnst mit {andere} im selben Haus, jeder in seiner eigenen Wohnung. Ihr funkt miteinander, jeder mit dem Funkgerät bei sich zu Hause, zum Beispiel im Wohnzimmer, in der Küche oder im Schlafzimmer.. "
+                  "Ruf {andere} zuerst kurz, ob {andere} überhaupt da "
                   "ist, zum Beispiel mit dem Namen und \"bist du da?\". Noch kein Thema, nur ein, zwei kurze Sätze.")
-    _SPIEL_RUF_ANTWORT = ("{von} ruft dich im {raum}. Melde dich kurz zurück, dass du da bist und zuhörst. "
+    _SPIEL_RUF_ANTWORT = ("{von} ruft dich per Funk. Melde dich kurz zurück, dass du da bist und zuhörst. "
                           "Noch kein Thema, nur ein, zwei kurze Sätze.")
+    _SPIEL_PLAN = ("{vorspann}{plan} Sprich {andere} darauf an (bei Vergangenem: wie war es, bei Kommendem: "
+                   "was fehlt noch) und erzähl dazu locker etwas Eigenes, wie unter Nachbarn. "
+                   "Bring kein neues Thema auf.")
     _SPIEL_START_NACH_RUF = "{von} hat sich eben gemeldet. Fang jetzt das Gespräch an{thema}."
     _SPIEL_ABSCHIED = ("Das Gespräch geht zu Ende. Beantworte erst kurz, was {von} zuletzt gesagt oder "
                        "gefragt hat, und sag dann freundlich, dass du jetzt los musst oder dich wieder um "
@@ -8854,7 +9034,7 @@ class TXServer:
         r"schönen (tag|abend) noch|auf wiederh|muss (jetzt |nun )?(mal |leider |auch )*(los|schluss|weg)\b|"
         r"pass auf dich auf", re.IGNORECASE)
     _SPIEL_ABSCHIED_ANTWORT = "{von} hat sich verabschiedet. Verabschiede dich auch kurz, ein, zwei Sätze."
-    _SPIEL_START_FUNK = "Du wohnst mit {andere} im selben Haus, jeder in seiner eigenen Wohnung. Fang hier im {raum} ein lockeres Gespräch mit {andere} an{thema}."
+    _SPIEL_START_FUNK = "Du wohnst mit {andere} im selben Haus, jeder in seiner eigenen Wohnung. Fang hier über Funk ein lockeres Gespräch mit {andere} an{thema}."
     _SPIEL_EINWURF = ("{wer} hat sich eben über Funk in euer Gespräch eingeschaltet. "
                       "Geh auf {wer} ein und bezieh es in euer Gespräch ein.")
 
@@ -9140,7 +9320,7 @@ class TXServer:
 
     def _spiel_zusatz(self, i: int, n: int, andere: str, von: str, raum: str, thema: str,
                       eigen: bool = True, wechsel: bool = False, ruf: bool = False,
-                      enden: bool = False) -> str:
+                      enden: bool = False, plan: str = "") -> str:
         if ruf and i == 0:
             return self._SPIEL_RUF.format(andere=andere, raum=raum)
         if ruf and i == 1:
@@ -9154,6 +9334,11 @@ class TXServer:
         # Hintergrund nur beim Aufbringen des Themas (12.11.): sonst hielt das
         # Modell ihn in jedem Wechsel fuer neu und fragte nochmal danach.
         hg = self._SPIEL_HINTERGRUND.format(info=info) if info and (i == k or wechsel) else ""
+        if i == k and plan:
+            return self._SPIEL_PLAN.format(
+                vorspann=(f"{von} hat sich eben gemeldet. " if ruf
+                          else f"Du wohnst mit {andere} im selben Haus. "),
+                plan=plan, andere=andere)
         if i == k:
             t = f" über: {thema}" if thema else " über ein Alltagsthema deiner Wahl"
             vorlage = (self._SPIEL_START_NACH_RUF if ruf
@@ -9218,6 +9403,10 @@ class TXServer:
                    "lo": lo, "hi": hi, "ab_ab": ab_ab, "nach": nach, "ruf": ruf,
                    "auftrag_von": auftrag_von or "", "ende": "", "turns": []}
             self._spiel_dbg.appendleft(dbg)
+            plan = self._plan_wahl(self._gruppe_von(raum)) if eigen else ""
+            if plan:
+                dbg["plan"] = plan
+                log.info("[%s] Spielwiese: Plan wird aufgegriffen: %s", raum, plan)
             i = -1
             while i + 1 < n:                   # n waechst bei Einwuerfen mit
                 i += 1
@@ -9254,10 +9443,10 @@ class TXServer:
                         log.info("[%s] Spielwiese: Themenwechsel → %s", raum, thema or "(frei)")
                     zusatz = self._spiel_zusatz(i, n, andere, andere, raum, thema, eigen,
                                                 wechsel=themenwechsel, ruf=ruf,
-                                                enden=eigen and i >= ab_ab)
+                                                enden=eigen and i >= ab_ab, plan=plan)
                     art = ("Anruf" if ruf and i == 0 else "Antwort auf Anruf" if ruf and i == 1
                            else "Abschied" if i == n - 2 else "Gegengruß" if i == n - 1
-                           else "Start" if i == k0 else "Themenwechsel" if themenwechsel
+                           else "Start mit Plan" if i == k0 and plan else "Start" if i == k0 else "Themenwechsel" if themenwechsel
                            else "Weiter (Ende frei)" if eigen and i >= ab_ab else "Weiter")
                     if themenwechsel:
                         dbg["themen"].append(thema or "(frei)")
@@ -9362,6 +9551,8 @@ class TXServer:
                         f.write(json.dumps(dbg, ensure_ascii=False) + "\n")
                 except Exception as e:
                     log.debug("spiel_debug schreiben: %s", e)
+                if eigen and len(dbg["turns"]) >= 6:
+                    asyncio.create_task(self._plaene_aus_spiel(raum, dbg))
             log.info("[%s] Spielwiese: Gespräch zu Ende nach %d Wechseln (%s)",
                      raum, z["wechsel"], ende)
         return ende
@@ -13673,6 +13864,8 @@ class TXServer:
         app.router.add_get("/api/admin/status", self.handle_admin_status)
         app.router.add_get("/api/admin/debug-traces", self.handle_admin_debug_traces)
         app.router.add_get("/api/admin/spiel-debug", self.handle_admin_spiel_debug)
+        app.router.add_get("/api/admin/plaene", self.handle_admin_plaene)
+        app.router.add_post("/api/admin/plaene", self.handle_admin_plaene)
         app.router.add_post("/api/admin/debug-replay", self.handle_admin_debug_replay)
         app.router.add_get("/api/admin/speaker-id", self.handle_admin_speaker_id)
         app.router.add_post("/api/admin/speaker-id", self.handle_admin_speaker_id)

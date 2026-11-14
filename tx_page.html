@@ -1508,6 +1508,21 @@ audio {
       </div>
       <div id="spiel-t-verlauf" style="margin-top:10px;font-size:.85rem;display:none;padding:8px 10px;border:1px solid var(--border);border-radius:6px"></div>
 
+      <div class="admin-section-title" style="margin-top:22px">Pläne &amp; Verabredungen</div>
+      <div class="adm-card">
+        <div class="adm-card-sub">Was sich die KI-Funker vornehmen (Grillen, Besuch, Ausflug), wird gemerkt und später
+          wieder aufgegriffen: in der Spielwiese beim Gesprächsstart (etwa jedes zweite Mal), sonst als Hinweis im Prompt.
+          Spielwiese: nach jedem Gespräch, andere Räume: im nächtlichen Rückblick. Nach zweimal Ansprechen oder
+          einigen Tagen verfällt ein Plan.</div>
+        <div id="plaene-liste"></div>
+        <div class="adm-inline" style="margin-top:8px">
+          <label>Gruppe <select id="pl-gruppe"></select></label>
+          <input type="text" id="pl-text" placeholder="z. B. Robert und Susi grillen am Samstag" style="flex:1;min-width:200px">
+          <input type="date" id="pl-tag">
+          <button type="button" class="btn-save" style="padding:6px 14px" onclick="plaeneHinzu()">Hinzufügen</button>
+        </div>
+      </div>
+
       <div class="admin-section-title" style="margin-top:22px">Mitschrift im Raum</div>
       <div id="spiel-zeilen" style="font-size:.85rem;max-height:360px;overflow-y:auto"></div>
       <div class="admin-section-title" style="margin-top:22px">Letzte Gespräche</div>
@@ -4590,7 +4605,7 @@ function showAdminTab(name) {
     if (name === "ki")        kiLaden();
     if (name === "rooms")     loadRooms();
     if (name === "konten")    kontenLaden();
-    if (name === "spielwiese") spielLaden();
+    if (name === "spielwiese") { spielLaden(); plaeneLaden(); }
     if (name === "server")    loadServerTab();
     if (name === "autoreply") loadAutoReplyAdmin();
     if (name === "bot")       loadBotAdmin();
@@ -4604,6 +4619,35 @@ function showAdminTab(name) {
   }
   if (name !== "debug") stopDebugAutoRefresh();
   else startDebugAutoRefresh();
+}
+
+// ── Pläne & Verabredungen ──
+async function plaeneLaden(body) {
+  const box = document.getElementById("plaene-liste");
+  if (!box) return;
+  try {
+    const r = await adminFetch("/api/admin/plaene", body ? {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : undefined);
+    const d = await r.json();
+    if (d.error) { box.innerHTML = '<div class="adm-hint">' + esc(d.error) + '</div>'; return; }
+    const sel = document.getElementById("pl-gruppe"), cur = sel.value;
+    sel.innerHTML = d.gruppen.map(g => `<option value="${esc(g.gruppe)}">${esc(g.name)}</option>`).join("");
+    sel.value = d.gruppen.some(g => g.gruppe === cur) ? cur : (d.spielwiese || "");
+    box.innerHTML = d.gruppen.filter(g => g.plaene.length).map(g => `
+      <div style="margin-top:8px"><b>${esc(g.name)}</b> <span class="adm-hint">${esc((g.raeume || []).join(", "))}</span>
+      ${g.plaene.map(p => `<div style="display:flex;gap:8px;align-items:center;padding:3px 0;font-size:.85rem">
+        <span class="adm-chip ${p.aktiv ? "on" : ""}">${p.aktiv ? "aktiv" : "verfallen"}</span>
+        <span style="flex:1">${esc(p.text)} <span class="adm-hint">${p.tag ? esc(p.tag) : "ohne Datum"} · ${p.angesprochen || 0}× angesprochen</span></span>
+        <button type="button" class="btn-save" style="padding:2px 10px" onclick='plaeneLaden({aktion:"loeschen",gruppe:${JSON.stringify(g.gruppe)},id:${JSON.stringify(p.id)}})'>✕</button>
+      </div>`).join("")}</div>`).join("") || '<div class="adm-hint">Noch keine Pläne gemerkt.</div>';
+  } catch (e) { box.innerHTML = '<div class="adm-hint">Fehler: ' + esc(String(e)) + '</div>'; }
+}
+function plaeneHinzu() {
+  const t = document.getElementById("pl-text").value.trim();
+  if (t.length < 4) return;
+  plaeneLaden({aktion: "hinzu", gruppe: document.getElementById("pl-gruppe").value, text: t,
+               tag: document.getElementById("pl-tag").value});
+  document.getElementById("pl-text").value = "";
 }
 
 // ── Gesprächs-Debug ──
