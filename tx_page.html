@@ -5873,7 +5873,8 @@ async function kiLaden(d) {
       if (t.fest) return `
         <div style="display:grid;grid-template-columns:minmax(160px,1fr) 2fr;gap:8px;padding:8px 0;border-top:1px solid rgba(42,63,95,.5);opacity:.7">
           <div><b>${esc(t.name)}</b></div>
-          <div>${esc(KI_NAMEN[t.anbieter] || t.anbieter)}${t.modell ? " · " + esc(t.modell) : ""}<div class="adm-hint" style="margin:2px 0 0">${esc(t.info || "")}</div></div>
+          <div>${esc(KI_NAMEN[t.anbieter] || t.anbieter)}${t.modell ? " · " + esc(t.modell) : ""}<div class="adm-hint" style="margin:2px 0 0">${esc(t.info || "")}</div>
+            <div style="margin-top:4px">${kiTestKnopf(t.id)}</div></div>
         </div>`;
       const mitModell = t.modell !== undefined && t.id !== "tts_ausweich";
       return `
@@ -5885,9 +5886,25 @@ async function kiLaden(d) {
             ${t.ausweich_nach_s !== undefined ? `<label class="adm-hint" style="margin:0">nach <input type="number" id="ki-ns-${t.id}" value="${t.ausweich_nach_s}" min="0" max="180" style="width:64px"> s</label>` : ""}
             <button type="button" class="btn-save" style="padding:4px 10px" onclick="kiZuweisen('${t.id}')">Übernehmen</button>
           </div>
+          <div style="grid-column:2">${kiTestKnopf(t.id)}</div>
         </div>`;
     }).join("");
   } catch(e) { st.textContent = "nicht geladen: " + e; }
+}
+
+function kiTestKnopf(id) {
+  return `<button type="button" class="btn-save" style="padding:4px 10px" onclick="kiTesten('${id}')">Testen</button>
+    <span id="ki-te-${id}" class="adm-hint" style="margin:0 0 0 8px"></span>`;
+}
+
+async function kiTesten(id) {
+  const el = document.getElementById("ki-te-" + id);
+  el.textContent = "⏳ läuft …"; el.style.color = "";
+  try {
+    const d = await kiPost({testen: id});
+    el.textContent = (d.ok ? "✓ " : "✗ ") + (d.text || "");
+    el.style.color = d.ok ? "var(--green2, #4caf50)" : "#f0b429";
+  } catch(e) { el.textContent = "✗ " + e.message; el.style.color = "#f0b429"; }
 }
 
 function kiModellFolgen(id) {

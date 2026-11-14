@@ -8427,6 +8427,111 @@ class TXServer:
             return False, str(e)[:120]
         return False, "unbekannter Anbieter"
 
+    async def _test_clip(self) -> str:
+        """Ein kurzer echter Funkspruch (2-8 s) aus dem Archiv als 16-kHz-WAV im
+        Scratch-Verzeichnis. Leer, wenn keiner da ist."""
+        import sqlite3, tempfile
+        try:
+            con = sqlite3.connect("/opt/FRN/archive/frn_archive.db")
+            zeilen = con.execute("select audio_file from transmissions where audio_file!='' "
+                                 "and duration_s between 3 and 8 and length(text) > 25 and callsign not in ('Robert','Susi') "
+                                 "order by timestamp desc limit 30").fetchall()
+            con.close()
+        except Exception:
+            return ""
+        for (f,) in zeilen:
+            quelle = Path("/opt/FRN/archive/audio") / f
+            if not quelle.exists():
+                continue
+            ziel = tempfile.mkstemp(suffix=".wav", prefix="kitest-")[1]
+            pr = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-loglevel", "error", "-i", str(quelle), "-ar", "16000", "-ac", "1", ziel,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await pr.wait()
+            if pr.returncode == 0 and Path(ziel).stat().st_size > 2000:
+                return ziel
+            Path(ziel).unlink(missing_ok=True)
+        return ""
+
+    async def _ki_aufgabe_testen(self, aid: str) -> tuple[bool, str]:
+        """Echter Probelauf einer Aufgabe mit dem dort eingestellten Dienst
+        (13.11.): kurze Frage, Beispielaufnahme, Testsatz. Sendet nichts."""
+        v = self.cfg.get("voice", {})
+        b = dict(v.get("bot", {}))
+        t0 = time.time()
+        frage = [{"role": "user", "content": "Sag nur das Wort: bereit"}]
+        system = "Antworte mit genau einem Wort."
+
+        def antwort(x: str) -> tuple[bool, str]:
+            x = (x or "").strip()
+            return bool(x), (f"„{x[:60]}“ in {time.time() - t0:.1f} s" if x else "keine Antwort (Grund steht im Log: journalctl -u frn-tx-server)")
+        clip = ""
+        try:
+            if aid == "antworten":
+                an = (b.get("provider") or "ollama").strip().lower()
+                fn = {"gemini": self._llm_gemini, "mistral": self._llm_mistral,
+                      "ollama_cloud": self._llm_ollama_cloud}.get(an, self._llm_ollama)
+                return antwort(await asyncio.wait_for(fn(b, system, frage), 70))
+            if aid == "antworten_ausweich":
+                if not (b.get("mistral_api_key") or "").strip():
+                    return False, "kein Mistral-Schlüssel"
+                return antwort(await asyncio.wait_for(self._llm_mistral(b, system, frage), 70))
+            if aid == "antworten_ausweich2":
+                if not (b.get("ollama_cloud_api_key") or "").strip():
+                    return False, "kein Ollama-Cloud-Schlüssel"
+                return antwort(await asyncio.wait_for(self._llm_ollama_cloud(b, system, frage), 70))
+            if aid == "rueckblick":
+                return antwort(await asyncio.wait_for(self._llm_ollama(b, system, frage), 70))
+            if aid == "websuche":
+                x = await asyncio.wait_for(self._bot_websearch(b, "Wie hoch ist der Eiffelturm"), 30)
+                ok = bool(x) and "FEHLGESCHLAGEN" not in x
+                return ok, (f"{len(x)} Zeichen Treffer in {time.time() - t0:.1f} s" if ok else "keine Treffer")
+            if aid in ("tts", "tts_ausweich"):
+                satz = "Das ist ein Test der Sprachausgabe."
+                sprecher = v.get("xtts_speaker") or "default"
+                if aid == "tts":
+                    pcm = await asyncio.wait_for(self._get_voice_pcm(satz, "de", sprecher), 90)
+                    return len(pcm) > 4000, f"{len(pcm) / 16000:.1f} s Sprache in {time.time() - t0:.1f} s"
+                if (v.get("tts_ausweich") or "").strip().lower() == "mistral":
+                    alt = getattr(self, "_tts_ausweich_letzt", None)
+                    wav = await self._mistral_tts_wav(satz, sprecher, "Test")
+                    self._tts_ausweich_letzt = alt          # Test nicht als Einsprung zaehlen
+                    if wav:
+                        return True, f"Mistral: {len(wav) // 1000} kB Audio in {time.time() - t0:.1f} s"
+                    return False, "Mistral lieferte nichts (Schlüssel, Stimmvorlage oder Dienst)"
+                wav = await asyncio.get_running_loop().run_in_executor(None, self._piper_local_wav, satz, sprecher)
+                return bool(wav) and len(wav) > 2000, f"Piper lokal: {len(wav or b'') // 1000} kB Audio in {time.time() - t0:.1f} s"
+            if aid in ("transkription", "transkription_ausweich", "sprecher"):
+                clip = await self._test_clip()
+                if not clip:
+                    return False, "keine Beispielaufnahme im Archiv"
+                loop = asyncio.get_running_loop()
+                if aid == "transkription":
+                    import frn_transcription as ft
+                    url = ft._get_whisper_remote_url()
+                    if not url:
+                        return False, "kein Whisper-Server eingestellt (läuft lokal)"
+                    text = await loop.run_in_executor(None, ft._transcribe_remote, clip, url, "de")
+                    return bool(text), (f"„{text[:70]}“ in {time.time() - t0:.1f} s" if text else "leeres Ergebnis")
+                if aid == "transkription_ausweich":
+                    import frn_transcription as ft
+                    cfg = ft._ausweich_cfg()
+                    if not cfg:
+                        return False, "nicht eingerichtet (aus oder kein Mistral-Schlüssel)"
+                    text = await loop.run_in_executor(None, ft._transcribe_mistral, clip, "de",
+                                                      cfg["key"], cfg["modell"])
+                    return bool(text), (f"„{text[:70]}“ in {time.time() - t0:.1f} s" if text else "leeres Ergebnis (Rauschen verworfen?)")
+                emb = await asyncio.wait_for(self._speaker_embed_bytes(Path(clip).read_bytes()), 40)
+                return bool(emb), (f"Stimmprofil mit {len(emb)} Werten in {time.time() - t0:.1f} s" if emb else "kein Ergebnis")
+        except asyncio.TimeoutError:
+            return False, "keine Antwort innerhalb der Zeit"
+        except Exception as e:
+            return False, str(e)[:120]
+        finally:
+            if clip:
+                Path(clip).unlink(missing_ok=True)
+        return False, "für diese Aufgabe gibt es keinen Test"
+
     async def handle_admin_ki_dienste(self, request):
         """GET: Anbieter + Aufgaben. POST {pruefen: id} | {anbieter: id,
         schluessel} | {aufgabe: id, anbieter, modell?, ausweich_nach_s?}."""
@@ -8440,6 +8545,9 @@ class TXServer:
                 assert isinstance(body, dict)
             except Exception:
                 return web.json_response({"error": "bad request"}, status=400)
+            if body.get("testen"):
+                ok, text = await self._ki_aufgabe_testen(str(body["testen"]))
+                return web.json_response({"ok": ok, "text": text})
             if body.get("pruefen"):
                 ok, text = await self._ki_pruefen(str(body["pruefen"]))
                 return web.json_response({"ok": ok, "text": text})
@@ -9122,7 +9230,7 @@ class TXServer:
                     if not bot.get("enabled"):
                         ende = f"{name} ist aus"; break
                     themenwechsel = (i > 0 and nach > 0 and i < n - 4 and seit_thema >= 2
-                                     and (seit_thema >= nach or self._spiel_festgefahren(gesagt)))
+                                     and (seit_thema >= nach + 6 or self._spiel_festgefahren(gesagt)))
                     if themenwechsel:
                         thema = await self._spiel_thema(c)
                         await self._spiel_recherche(thema, c)
@@ -9148,11 +9256,33 @@ class TXServer:
                         such = einwurf[4]
                     await self._bot_reply(room, raum, bot, search_query=such,
                                           nachlegen=True, zusatz=zusatz)
+                    # Stumm geblieben (GPU-Box ausgelastet, leere Antwort)? Einmal
+                    # nochmal versuchen, bevor das Gespraech abbricht (14.11.)
+                    if max((t1 for _t0, t1, _x in self._bot_own_tx.get(raum, [])), default=0.0) <= vorher:
+                        log.info("[%s] Spielwiese: %s hat nichts gesagt -- zweiter Versuch", raum, name)
+                        await asyncio.sleep(4)
+                        if not z["stopp"]:
+                            await self._bot_reply(room, raum, bot, search_query=such,
+                                                  nachlegen=True, zusatz=zusatz)
                 finally:
                     _BOT_RAUM.reset(tok_r)
                     _BOT_KONTEXT.reset(tok_b)
                 nachher = max((t1 for _t0, t1, _x in self._bot_own_tx.get(raum, [])), default=0.0)
                 if nachher <= vorher:
+                    # Immer noch stumm: der andere verabschiedet sich, statt dass
+                    # das Gespraech mitten in der Frage abreisst (14.11.)
+                    if eigen and gesagt and not z["stopp"]:
+                        bid2, name2 = namen[(erster + i + 1) % 2]
+                        tok_b, tok_r = self._bot_im(bid2), self._raum_setzen(raum)
+                        try:
+                            await self._bot_reply(room, raum, self._spiel_ki(self._bot_cfg(), c),
+                                                  nachlegen=True,
+                                                  zusatz=self._SPIEL_ABSCHIED.format(von=name))
+                        except Exception as e:
+                            log.info("[%s] Spielwiese: Abschied nach Stille fehlgeschlagen: %s", raum, e)
+                        finally:
+                            _BOT_RAUM.reset(tok_r)
+                            _BOT_KONTEXT.reset(tok_b)
                     ende = f"{name} hat nichts gesagt"; break
                 gesagt.append(next((x for _t0, t1, x in self._bot_own_tx.get(raum, [])
                                     if t1 == nachher), ""))
