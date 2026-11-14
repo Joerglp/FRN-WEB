@@ -2378,6 +2378,10 @@ audio {
           <input type="date" id="rb-date" autocomplete="off">
         </div>
         <div class="form-field">
+          <label>Raum</label>
+          <select id="rb-raum" onchange="loadRobertChats()"><option value="">alle</option></select>
+        </div>
+        <div class="form-field">
           <label>Anzahl</label>
           <input type="number" id="rb-limit" value="25" autocomplete="off">
         </div>
@@ -2598,6 +2602,22 @@ audio {
       </div>
       <iframe id="status-frame" title="FRN Status"
               style="width:100%;height:75vh;border:1px solid var(--border);border-radius:8px;background:var(--bg)"></iframe>
+    </div>
+
+    <div id="admin-tab-gdebug" class="admin-tab-content">
+      <div class="admin-section-title">Gesprächs-Debug</div>
+      <div class="adm-card">
+        <div class="adm-card-title">💬 KI-Gespräche Wechsel für Wechsel</div>
+        <div class="adm-card-sub">Pro Gespräch: Thema, Grenzen, Ende und jeder Wechsel mit Art, Anweisung ans Modell,
+          gesprochenem Text und Dauer. Das laufende Gespräch steht oben. Bleibt über Neustarts erhalten (letzte 40).</div>
+        <div class="adm-inline" style="margin-top:8px">
+          <label>Raum <select id="gd-raum" onchange="gdebugLaden()"><option value="">alle</option></select></label>
+          <label class="adm-sw-line"><input type="checkbox" id="gd-auto" checked> automatisch (5 s)</label>
+          <button type="button" class="btn-save" style="padding:6px 14px" onclick="gdebugLaden()">Aktualisieren</button>
+          <span id="gd-stand" class="adm-hint"></span>
+        </div>
+      </div>
+      <div id="gd-liste"></div>
     </div>
 
     <div id="admin-tab-debug" class="admin-tab-content">
@@ -4348,10 +4368,18 @@ async function loadRobertChats() {
   const box = document.getElementById("rb-list");
   const datum = document.getElementById("rb-date").value;
   const limit = document.getElementById("rb-limit").value || 25;
+  const selR = document.getElementById("rb-raum");
   box.innerHTML = "<div style='color:var(--muted)'>lädt …</div>";
   try {
-    const r = await adminFetch(`/api/admin/bot-chats?limit=${limit}` + (datum ? `&date=${datum}` : ""));
+    const r = await adminFetch(`/api/admin/bot-chats?limit=${limit}` + (datum ? `&date=${datum}` : "")
+                               + (selR.value ? `&room=${encodeURIComponent(selR.value)}` : ""));
     const d = await r.json();
+    if (d.raeume) {
+      const cur = selR.value;
+      selR.innerHTML = '<option value="">alle</option>' +
+        d.raeume.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join("");
+      selR.value = d.raeume.includes(cur) ? cur : "";
+    }
     if (!r.ok || d.error) {
       showMsg("msg-robert", "Nicht geladen: " +
               (d.error === "unauthorized" ? "Sitzung abgelaufen — bitte neu anmelden" : (d.error || r.status)), "error");
@@ -4524,7 +4552,7 @@ const ADMIN_GROUPS = [
   {id: "zugang", icon: "👥", label: "Zugang",    tabs: [["users", "Benutzer"], ["rooms", "Räume"], ["konten", "FRN-Konten"], ["server", "FRN-Server"], ["crosslink", "Crosslink"]]},
   {id: "robert", icon: "🤖", label: "Robert",    tabs: [["bot", "KI-Funker"], ["robert", "Gespräche analysieren"], ["prompt", "Kompletter Prompt"], ["autoreply", "Namens-Antwort"], ["spielwiese", "Spielwiese"]]},
   {id: "audio",  icon: "🎙", label: "Funk & Audio", tabs: [["audio", "Transkription & Archiv"], ["sprecher", "Sprecher-Erkennung"]]},
-  {id: "system", icon: "🛠", label: "System",    tabs: [["ki", "KI-Dienste"], ["dienste", "Dienste & Geräte"], ["status", "Räume & Verbindungen"], ["debug", "Ablaufverfolgung"]]},
+  {id: "system", icon: "🛠", label: "System",    tabs: [["ki", "KI-Dienste"], ["dienste", "Dienste & Geräte"], ["status", "Räume & Verbindungen"], ["debug", "Ablaufverfolgung"], ["gdebug", "Gesprächs-Debug"]]},
 ];
 
 function adminNavBauen() {
@@ -4572,9 +4600,71 @@ function showAdminTab(name) {
     if (name === "audio")     loadAudioSettings();
     if (name === "sprecher")  loadSpeakerIdSettings();
     if (name === "debug")     { loadDebugTraces(); loadDebugModelList(); }
+    if (name === "gdebug")    gdebugLaden();
   }
   if (name !== "debug") stopDebugAutoRefresh();
   else startDebugAutoRefresh();
+}
+
+// ── Gesprächs-Debug ──
+let gdTimer = null;
+const gdOffen = new Map();
+function gdZeit(ts) { return ts ? new Date(ts * 1000).toLocaleTimeString("de-DE") : ""; }
+function gdToggle(id, jetzt) { gdOffen.set(id, !jetzt); gdebugLaden(true); }
+async function gdebugLaden(still) {
+  const box = document.getElementById("gd-liste");
+  if (!box) return;
+  const sel = document.getElementById("gd-raum");
+  try {
+    const r = await adminFetch("/api/admin/spiel-debug?raum=" + encodeURIComponent(sel.value));
+    const d = await r.json();
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">alle</option>' +
+      (d.raeume || []).map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join("");
+    sel.value = (d.raeume || []).includes(cur) ? cur : "";
+    document.getElementById("gd-stand").textContent = "Stand " + new Date().toLocaleTimeString("de-DE");
+    const gl = d.gespraeche || [];
+    if (!gl.length) { box.innerHTML = '<div class="adm-hint">Noch keine Gespräche aufgezeichnet.</div>'; }
+    else box.innerHTML = gl.map(g => {
+      const id = "g" + Math.round(g.beginn);
+      const lauf = !g.ende_ts;
+      const offen = gdOffen.has(id) ? gdOffen.get(id) : lauf;
+      const dauer = Math.round(((g.ende_ts || Date.now() / 1000) - g.beginn) / 60 * 10) / 10;
+      const ende = lauf ? '<span class="adm-chip on">läuft</span>'
+        : `<span class="adm-chip">${esc(g.ende || "")}</span>`;
+      const kopf = `<div class="adm-card-title" style="cursor:pointer" onclick="gdToggle('${id}', ${offen})">
+          ${offen ? "▾" : "▸"} ${esc(g.raum)} · ${gdZeit(g.beginn)} · ${(g.turns || []).length} Wechsel · ${dauer} Min ${ende}</div>
+        <div class="adm-card-sub">Thema: ${esc((g.themen || [g.thema]).join(" → "))}<br>
+          KI: ${esc(g.ki || "")} · Obergrenze ${g.n_max} (Modell darf ab Wechsel ${g.ab_ab} enden, Spanne ${g.lo}–${g.hi}) ·
+          Themenwechsel nach ${g.nach} (+6) ${g.ruf ? "· mit Anruf" : ""} ${g.auftrag_von ? "· Auftrag von " + esc(g.auftrag_von) : ""}
+          ${g.einwuerfe ? "· " + g.einwuerfe + " Einwurf/-würfe" : ""}</div>`;
+      let zeilen = "";
+      if (offen) zeilen = (g.turns || []).map(t => `
+        <div style="border-top:1px solid var(--border);padding:6px 0;font-size:.82rem;line-height:1.45">
+          <b>${t.i + 1}. ${esc(t.sprecher)}</b>
+          <span class="adm-chip">${esc(t.art)}</span>
+          ${t.retry ? '<span class="adm-chip">zweiter Versuch</span>' : ""}
+          ${t.abschied_erkannt ? '<span class="adm-chip">Abschied erkannt → Ende</span>' : ""}
+          ${t.stumm ? '<span class="adm-chip warn">stumm</span>' : ""}
+          <span class="adm-hint">${t.dauer_s} s · Grenze ${t.n}</span>
+          <div>${t.text ? esc(t.text) : '<i>nichts gesagt</i>'}</div>
+          <details><summary class="adm-hint" style="cursor:pointer">Anweisung ans Modell</summary>
+            <div class="adm-hint" style="white-space:pre-wrap">${esc(t.zusatz || "")}</div></details>
+        </div>`).join("");
+      return `<div class="adm-card">${kopf}${zeilen}</div>`;
+    }).join("");
+  } catch (e) {
+    if (!still) box.innerHTML = '<div class="adm-hint">Fehler: ' + esc(String(e)) + '</div>';
+  }
+  clearInterval(gdTimer);
+  gdTimer = setInterval(() => {
+    const t = document.getElementById("admin-tab-gdebug");
+    if (!t || !t.classList.contains("active") || !document.getElementById("gd-auto").checked) {
+      if (!t || !t.classList.contains("active")) { clearInterval(gdTimer); gdTimer = null; }
+      return;
+    }
+    gdebugLaden(true);
+  }, 5000);
 }
 
 // ── Übersicht (Read-only Zusammenfassung) ────────────────────────────────────

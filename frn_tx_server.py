@@ -979,6 +979,13 @@ class TXServer:
         # Senden), je mit Status (ok/warn/error/skip) + Zeitmessung, fuers
         # Debug-Panel im Admin-Bereich.
         self._debug_traces: collections.deque = collections.deque(maxlen=80)
+        self._spiel_dbg: collections.deque = collections.deque(maxlen=40)   # Gespraechs-Debug
+        try:
+            with open(self._SPIEL_DBG_DATEI, encoding="utf-8") as f:
+                for zeile in f.readlines()[-40:]:
+                    self._spiel_dbg.appendleft(json.loads(zeile))
+        except Exception:
+            pass
         self._debug_trace_by_key: dict[tuple, dict] = {}
         # Sprecher-Erkennung (Speaker-ID) per Stimm-Embedding, siehe
         # _speaker_identify/_speaker_enroll. Enrollments (Name -> Liste von
@@ -9185,6 +9192,7 @@ class TXServer:
         # Per Funk angestossen: den Auftrag selbst (kurz davor) mitnehmen
         self._spiel_hist_ab[raum] = z["beginn"] - (60.0 if auftrag_von else 0.0)
         ende = "fertig"
+        dbg = None
         try:
             if thema is None:
                 thema = await self._spiel_thema(c)
@@ -9205,6 +9213,11 @@ class TXServer:
             themen_folge = [thema or "(frei)"]
             log.info("[%s] Spielwiese: Gespräch beginnt, %d Wechsel, Thema: %s, KI: %s",
                      raum, n, thema or "(frei)", self._spiel_ki_text(c))
+            dbg = {"raum": raum, "beginn": z["beginn"], "ende_ts": None, "thema": thema or "(frei)",
+                   "themen": [thema or "(frei)"], "ki": self._spiel_ki_text(c), "n_max": n,
+                   "lo": lo, "hi": hi, "ab_ab": ab_ab, "nach": nach, "ruf": ruf,
+                   "auftrag_von": auftrag_von or "", "ende": "", "turns": []}
+            self._spiel_dbg.appendleft(dbg)
             i = -1
             while i + 1 < n:                   # n waechst bei Einwuerfen mit
                 i += 1
@@ -9223,6 +9236,7 @@ class TXServer:
                     n = min(max(n, i + (4 if eigen else 2)), i + 6, 40)
                 bid, name = namen[(erster + i) % 2]
                 _bid2, andere = namen[(erster + i + 1) % 2]
+                t_turn, retry, art, zusatz = time.time(), False, "", ""
                 vorher = max((t1 for _t0, t1, _x in self._bot_own_tx.get(raum, [])), default=0.0)
                 tok_b, tok_r = self._bot_im(bid), self._raum_setzen(raum)
                 try:
@@ -9241,6 +9255,12 @@ class TXServer:
                     zusatz = self._spiel_zusatz(i, n, andere, andere, raum, thema, eigen,
                                                 wechsel=themenwechsel, ruf=ruf,
                                                 enden=eigen and i >= ab_ab)
+                    art = ("Anruf" if ruf and i == 0 else "Antwort auf Anruf" if ruf and i == 1
+                           else "Abschied" if i == n - 2 else "Gegengruß" if i == n - 1
+                           else "Start" if i == k0 else "Themenwechsel" if themenwechsel
+                           else "Weiter (Ende frei)" if eigen and i >= ab_ab else "Weiter")
+                    if themenwechsel:
+                        dbg["themen"].append(thema or "(frei)")
                     if i == 0 and auftrag_von:
                         zusatz = (f"{auftrag_von} hat euch eben über Funk gebeten, euch zu unterhalten. "
                                   + zusatz)
@@ -9251,6 +9271,7 @@ class TXServer:
                         z["einwurf_beantwortet"] = einwurf[0]
                         z["einwurf_dran"] = True
                         zusatz = self._SPIEL_EINWURF.format(wer=einwurf[1])
+                        art = f"Einwurf von {einwurf[1]}"
                     such = ""
                     if einwurf and z.get("einwurf_dran") and len(einwurf) > 4:
                         such = einwurf[4]
@@ -9261,6 +9282,7 @@ class TXServer:
                     if max((t1 for _t0, t1, _x in self._bot_own_tx.get(raum, [])), default=0.0) <= vorher:
                         log.info("[%s] Spielwiese: %s hat nichts gesagt -- zweiter Versuch", raum, name)
                         await asyncio.sleep(4)
+                        retry = True
                         if not z["stopp"]:
                             await self._bot_reply(room, raum, bot, search_query=such,
                                                   nachlegen=True, zusatz=zusatz)
@@ -9268,6 +9290,10 @@ class TXServer:
                     _BOT_RAUM.reset(tok_r)
                     _BOT_KONTEXT.reset(tok_b)
                 nachher = max((t1 for _t0, t1, _x in self._bot_own_tx.get(raum, [])), default=0.0)
+                turn = {"i": i, "sprecher": name, "art": art, "zusatz": (zusatz or "")[:700],
+                        "text": "", "dauer_s": round(time.time() - t_turn, 1), "retry": retry,
+                        "stumm": nachher <= vorher, "n": n, "thema": thema or "(frei)"}
+                dbg["turns"].append(turn)
                 if nachher <= vorher:
                     # Immer noch stumm: der andere verabschiedet sich, statt dass
                     # das Gespraech mitten in der Frage abreisst (14.11.)
@@ -9286,11 +9312,14 @@ class TXServer:
                     ende = f"{name} hat nichts gesagt"; break
                 gesagt.append(next((x for _t0, t1, x in self._bot_own_tx.get(raum, [])
                                     if t1 == nachher), ""))
+                turn["text"] = gesagt[-1]
                 seit_thema += 1
                 # Hat sich einer erkennbar verabschiedet, ist der Gegengruss dran
                 if (eigen and k0 <= i < n - 2 and i >= k0 + 2 and gesagt[-1]
                         and self._SPIEL_ABSCHIED_RE.search(gesagt[-1])):
                     n = i + 2
+                    turn["abschied_erkannt"] = True
+                    turn["n"] = n
                 z["wechsel"] = i + 1
                 z["einwurf_dran"] = False
                 # Warten, solange jemand sendet; ein Einwurf braucht danach
@@ -9324,6 +9353,15 @@ class TXServer:
                                  "wechsel": z["wechsel"], "ende": ende
                                  + (f", {z['einwuerfe']} Einwurf/-würfe" if z.get("einwuerfe") else "")})
             del z["verlauf"][:-20]
+            if dbg is not None:
+                dbg["ende"] = ende
+                dbg["ende_ts"] = time.time()
+                dbg["einwuerfe"] = z.get("einwuerfe", 0)
+                try:
+                    with open(self._SPIEL_DBG_DATEI, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(dbg, ensure_ascii=False) + "\n")
+                except Exception as e:
+                    log.debug("spiel_debug schreiben: %s", e)
             log.info("[%s] Spielwiese: Gespräch zu Ende nach %d Wechseln (%s)",
                      raum, z["wechsel"], ende)
         return ende
@@ -10739,6 +10777,7 @@ class TXServer:
             return web.json_response({"error": "archive not available"}, status=503)
         q     = request.rel_url.query
         datum = (q.get("date") or "").strip()
+        raumf = (q.get("room") or "").strip()      # Raum-Filter (14.11.)
         limit = int(self._begrenzt("bot_chats", "limit", q.get("limit", 50) or 50))
         name  = (self._bot_cfg().get("name") or "Robert")
         # Alle KI-Funker (seit 2026-10-14 auch Susi), nicht nur Robert
@@ -10750,15 +10789,17 @@ class TXServer:
             conn = sqlite3.connect(str(_archive.DB_PATH))
             conn.row_factory = sqlite3.Row
             platz = ",".join("?" * len(namen))
+            rf = " AND room=?" if raumf else ""
+            ra = (raumf,) if raumf else ()
             if datum:
                 rows = conn.execute(
                     f"SELECT * FROM transmissions WHERE callsign IN ({platz}) "
-                    "AND date(timestamp,'unixepoch','localtime')=? "
-                    "ORDER BY timestamp DESC LIMIT ?", (*namen, datum, limit)).fetchall()
+                    f"AND date(timestamp,'unixepoch','localtime')=?{rf} "
+                    "ORDER BY timestamp DESC LIMIT ?", (*namen, datum, *ra, limit)).fetchall()
             else:
                 rows = conn.execute(
-                    f"SELECT * FROM transmissions WHERE callsign IN ({platz}) "
-                    "ORDER BY timestamp DESC LIMIT ?", (*namen, limit)).fetchall()
+                    f"SELECT * FROM transmissions WHERE callsign IN ({platz}){rf} "
+                    "ORDER BY timestamp DESC LIMIT ?", (*namen, *ra, limit)).fetchall()
             eintraege = [dict(r) for r in rows]
             # Antworten aus dem Protokoll ergaenzen: sie fehlen im Archiv immer
             # dann, wenn Roberts Sendung mit der eines anderen in EINEM
@@ -10766,6 +10807,8 @@ class TXServer:
             # _bot_protokoll. Die passende Aufnahme wird ueber die Ueberlappung
             # mit dem Sendefenster gesucht, damit Anhoeren/Pruefen weiter geht.
             for e in self._bot_protokoll_lesen(datum, limit):
+                if raumf and e["room"] != raumf:
+                    continue
                 if any(abs(x["timestamp"] - e["ts"]) < 5 and x["room"] == e["room"]
                        for x in eintraege):
                     continue        # steht schon als Archiv-Eintrag drin
@@ -10808,7 +10851,8 @@ class TXServer:
         except Exception as e:
             log.warning("Robert-Gespräche nicht geladen: %s", e)
             return web.json_response({"error": str(e)[:200]}, status=500)
-        return web.json_response({"name": name, "chats": chats})
+        raeume = sorted({r.name for r in self.rooms.values()} | {c["room"] for c in chats})
+        return web.json_response({"name": name, "chats": chats, "raeume": raeume})
 
     async def handle_admin_bot_prompt(self, request):
         """GET /api/admin/bot-prompt?bot=<id>&room=<raum> -- der komplette
@@ -12305,6 +12349,23 @@ class TXServer:
             })
         return web.json_response({"traces": traces, "bot_namen": list(self._bot_namen())})
 
+    _SPIEL_DBG_DATEI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spiel_debug.jsonl")
+
+    async def handle_admin_spiel_debug(self, request):
+        """GET /api/admin/spiel-debug — Gespraechs-Debug: die letzten Spielwiesen-
+        Gespraeche Wechsel fuer Wechsel (Art, Anweisung, Text, Dauer), neueste
+        zuerst; laufendes Gespraech zuerst. ?raum=... filtert."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        raum = request.query.get("raum", "")
+        gespraeche = [g for g in self._spiel_dbg if not raum or g.get("raum") == raum]
+        return web.json_response({
+            "gespraeche": gespraeche[:40],
+            "raeume": sorted({g.get("raum", "") for g in self._spiel_dbg}),
+            "laeuft": bool(self._spiel_zust.get("laeuft")),
+        })
+
     async def handle_admin_debug_audio(self, request):
         """GET /api/admin/debug-audio/{name} — spielt die WAV-Aufnahme zu
         einem "Aufnahme"-Schritt im Debug-Panel ab. Name wird auf den reinen
@@ -13611,6 +13672,7 @@ class TXServer:
 
         app.router.add_get("/api/admin/status", self.handle_admin_status)
         app.router.add_get("/api/admin/debug-traces", self.handle_admin_debug_traces)
+        app.router.add_get("/api/admin/spiel-debug", self.handle_admin_spiel_debug)
         app.router.add_post("/api/admin/debug-replay", self.handle_admin_debug_replay)
         app.router.add_get("/api/admin/speaker-id", self.handle_admin_speaker_id)
         app.router.add_post("/api/admin/speaker-id", self.handle_admin_speaker_id)
