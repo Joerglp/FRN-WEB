@@ -37,3 +37,5 @@ frn_konten.xml
 config/icecast.xml
 stream-*.env
 sicherung/
+spiel_debug.jsonl
+plaene.json
