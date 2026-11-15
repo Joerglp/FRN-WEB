@@ -7269,11 +7269,14 @@ class TXServer:
         st = []
         if ((bot.get("ausweich_provider") or "").strip().lower() == "mistral"
                 and (bot.get("mistral_api_key") or "").strip()):
-            st.append(("Mistral", bot.get("mistral_model") or "mistral-large-4", self._llm_mistral))
+            st.append(("Mistral", bot.get("mistral_model") or "ministral-14b-latest", self._llm_mistral))
         if ((bot.get("ausweich2_provider") or "").strip().lower() == "ollama_cloud"
                 and (bot.get("ollama_cloud_api_key") or "").strip()
                 and time.time() >= self._cloud_gesperrt_bis):
             st.append(("Ollama Cloud", bot.get("ollama_cloud_model") or "beam", self._llm_ollama_cloud))
+        if ((bot.get("ausweich2_provider") or "").strip().lower() == "gemini"
+                and (bot.get("gemini_api_key") or "").strip()):
+            st.append(("Gemini", bot.get("gemini_model") or "gemini-flash-lite-latest", self._llm_gemini))
         return st
 
     async def _llm_ollama_cloud(self, bot: dict, system: str, messages: list,
@@ -7332,7 +7335,7 @@ class TXServer:
         vorher nach -- abschalten geht nicht, nur reasoning_effort low; der
         Denkteil kommt als eigener Inhaltsblock und wird hier weggelassen."""
         key = (bot.get("mistral_api_key") or "").strip()
-        model = (bot.get("mistral_model") or "mistral-large-4").strip()
+        model = (bot.get("mistral_model") or "ministral-14b-latest").strip()
         messages = list(messages)
         if not messages or messages[-1].get("role") == "assistant":
             # Mistral verlangt user/tool als letzte Rolle (HTTP 400, 10.11.:
@@ -8035,7 +8038,7 @@ class TXServer:
                 bot["mistral_reasoning_effort"] = body["mistral_reasoning_effort"]
             if body.get("ausweich_provider") in ("", "mistral"):
                 bot["ausweich_provider"] = body["ausweich_provider"]
-            if body.get("ausweich2_provider") in ("", "ollama_cloud"):
+            if body.get("ausweich2_provider") in ("", "ollama_cloud", "gemini"):
                 bot["ausweich2_provider"] = body["ausweich2_provider"]
             if isinstance(body.get("ollama_cloud_model"), str) and body["ollama_cloud_model"].strip():
                 bot["ollama_cloud_model"] = body["ollama_cloud_model"].strip()
@@ -8209,7 +8212,7 @@ class TXServer:
         for geheim in ("mistral_api_key", "openrouter_api_key", "ollama_cloud_api_key"):
             if geheim in out:
                 out[geheim] = self._TOKEN_MASK if bot.get(geheim) else ""
-        out.setdefault("mistral_model", "mistral-large-4")
+        out.setdefault("mistral_model", "ministral-14b-latest")
         out.setdefault("mistral_reasoning_effort", "low")
         out.setdefault("ausweich_provider", "")
         out.setdefault("ausweich_nach_s", 15)
@@ -8505,7 +8508,7 @@ class TXServer:
         maske = lambda k: self._TOKEN_MASK if (b.get(k) or "").strip() else ""
         prov = (b.get("provider") or "ollama").strip().lower()
         modell = {"ollama": b.get("ollama_model"), "gemini": b.get("gemini_model"),
-                  "mistral": b.get("mistral_model") or "mistral-large-4"}.get(prov, "")
+                  "mistral": b.get("mistral_model") or "ministral-14b-latest"}.get(prov, "")
         aw_l = self._ausweich_letzt
         try:
             import frn_transcription as _ft
@@ -8532,18 +8535,20 @@ class TXServer:
                 {"id": "antworten", "name": "Antworten Robert & Susi", "anbieter": prov, "modell": modell,
                  "optionen": ["ollama", "mistral", "gemini"],
                  "modelle": {"ollama": b.get("ollama_model") or "", "gemini": b.get("gemini_model") or "",
-                             "mistral": b.get("mistral_model") or "mistral-large-4"},
+                             "mistral": b.get("mistral_model") or "ministral-14b-latest"},
                  "info": "auch Begrüßung und Mitschreiber"},
                 {"id": "antworten_ausweich", "name": "Ausweich für Antworten",
                  "anbieter": (b.get("ausweich_provider") or "aus").strip().lower() or "aus",
-                 "modell": b.get("mistral_model") or "mistral-large-4",
+                 "modell": b.get("mistral_model") or "ministral-14b-latest",
                  "ausweich_nach_s": float(b.get("ausweich_nach_s", 20) or 0),
                  "optionen": ["aus", "mistral"], "zuletzt": zeit(aw_l),
                  "info": "springt ein bei Box-Fehler oder nach der Wartezeit (0 = nur bei Fehler)"},
                 {"id": "antworten_ausweich2", "name": "Zweiter Ausweich für Antworten",
                  "anbieter": (b.get("ausweich2_provider") or "aus").strip().lower() or "aus",
-                 "modell": b.get("ollama_cloud_model") or "beam",
-                 "optionen": ["aus", "ollama_cloud"],
+                 "modell": ((b.get("gemini_model") or "gemini-flash-lite-latest")
+                            if (b.get("ausweich2_provider") or "").strip().lower() == "gemini"
+                            else (b.get("ollama_cloud_model") or "beam")),
+                 "optionen": ["aus", "gemini", "ollama_cloud"],
                  "info": "wenn auch der erste Ausweich nichts liefert (oder keiner eingestellt ist)"},
                 {"id": "transkription", "name": "Transkription (Whisper)", "anbieter": "box",
                  "modell": w.get("model") or "", "fest": True, "info": w.get("remote_url") or "lokal"},
@@ -8660,6 +8665,10 @@ class TXServer:
                 if not (b.get("mistral_api_key") or "").strip():
                     return False, "kein Mistral-Schlüssel"
                 return antwort(await asyncio.wait_for(self._llm_mistral(b, system, frage), 70))
+            if aid == "antworten_ausweich2" and (b.get("ausweich2_provider") or "").strip().lower() == "gemini":
+                if not (b.get("gemini_api_key") or "").strip():
+                    return False, "kein Gemini-Schlüssel"
+                return antwort(await asyncio.wait_for(self._llm_gemini(b, system, frage), 70))
             if aid == "antworten_ausweich2":
                 if not (b.get("ollama_cloud_api_key") or "").strip():
                     return False, "kein Ollama-Cloud-Schlüssel"
@@ -8768,12 +8777,12 @@ class TXServer:
                         if "ausweich_nach_s" in body:
                             bb["ausweich_nach_s"] = self._begrenzt("bot", "ausweich_nach_s",
                                                                   body["ausweich_nach_s"])
-                elif a == "antworten_ausweich2" and an in ("aus", "ollama_cloud"):
+                elif a == "antworten_ausweich2" and an in ("aus", "ollama_cloud", "gemini"):
                     def aenderung(v: dict) -> None:
                         bb = v.setdefault("bot", {})
                         bb["ausweich2_provider"] = "" if an == "aus" else an
                         if modell:
-                            bb["ollama_cloud_model"] = modell
+                            bb["gemini_model" if an == "gemini" else "ollama_cloud_model"] = modell
                 elif a == "transkription_ausweich" and an in ("aus", "mistral"):
                     def aenderung(v: dict) -> None:
                         pass
@@ -9029,6 +9038,9 @@ class TXServer:
                        "etwas kümmerst, und verabschiede dich. Bring kein neues Thema auf.")
     _SPIEL_ENDEN = (" Führ das Gespräch weiter, solange es euch beiden Spaß macht. Wenn es für dich "
                     "natürlich zu Ende geht, verabschiede dich jetzt von {von}.")
+    _SPIEL_ENDEN_STARK = ("{von} spricht mit dir. Ihr redet schon eine Weile. Geh kurz auf das Letzte ein, "
+                          "stell KEINE neue Frage mehr und bring kein neues Thema. Komm zum Schluss: "
+                          "verabschiede dich von {von}, etwa weil du noch etwas zu erledigen hast.")
     _SPIEL_ABSCHIED_RE = re.compile(
         r"tsch(ü|u)ss|tschau|\bciao\b|mach'?s gut|machs gut|bis (später|bald|dann|gleich|morgen|zum nächsten)|"
         r"schönen (tag|abend) noch|auf wiederh|muss (jetzt |nun )?(mal |leider |auch )*(los|schluss|weg)\b|"
@@ -9056,7 +9068,7 @@ class TXServer:
     def _spiel_ki_text(self, c: dict) -> str:
         b = self._spiel_ki({**self._BOT_DEFAULTS, **self.cfg.get("voice", {}).get("bot", {})}, c)
         an = (b.get("provider") or "ollama").strip().lower()
-        std = {"mistral": "mistral-large-4", "ollama_cloud": "beam",
+        std = {"mistral": "ministral-14b-latest", "ollama_cloud": "beam",
                "gemini": "gemini-flash-lite-latest"}.get(an, "")
         name = {"ollama": "GPU-Box", "mistral": "Mistral", "ollama_cloud": "Ollama Cloud",
                 "gemini": "Gemini"}.get(an, an)
@@ -9320,7 +9332,7 @@ class TXServer:
 
     def _spiel_zusatz(self, i: int, n: int, andere: str, von: str, raum: str, thema: str,
                       eigen: bool = True, wechsel: bool = False, ruf: bool = False,
-                      enden: bool = False, plan: str = "") -> str:
+                      enden: bool = False, plan: str = "", enden_ab: int = 8) -> str:
         if ruf and i == 0:
             return self._SPIEL_RUF.format(andere=andere, raum=raum)
         if ruf and i == 1:
@@ -9350,6 +9362,11 @@ class TXServer:
         else:
             z = self._SPIEL_WEITER.format(von=von, thema=f" über: {thema}" if thema else "") + hg
             if enden:
+                # Ab ein paar Wechseln nach dem ersten Angebot oefter ein klarer Schluss
+                # (mit Zufall, damit die Laenge schwankt); der weiche Hinweis allein
+                # wurde nie genommen (15.11.: alle Gespraeche bis zur Obergrenze).
+                if i >= enden_ab + 4 and random.random() < 0.4:
+                    return self._SPIEL_ENDEN_STARK.format(von=von)
                 z += self._SPIEL_ENDEN.format(von=von)
         return z
 
@@ -9443,7 +9460,7 @@ class TXServer:
                         log.info("[%s] Spielwiese: Themenwechsel → %s", raum, thema or "(frei)")
                     zusatz = self._spiel_zusatz(i, n, andere, andere, raum, thema, eigen,
                                                 wechsel=themenwechsel, ruf=ruf,
-                                                enden=eigen and i >= ab_ab, plan=plan)
+                                                enden=eigen and i >= ab_ab, plan=plan, enden_ab=ab_ab)
                     art = ("Anruf" if ruf and i == 0 else "Antwort auf Anruf" if ruf and i == 1
                            else "Abschied" if i == n - 2 else "Gegengruß" if i == n - 1
                            else "Start mit Plan" if i == k0 and plan else "Start" if i == k0 else "Themenwechsel" if themenwechsel
@@ -11144,7 +11161,7 @@ class TXServer:
     _REPLAY_MODELL_FELD = {"ollama": "ollama_model", "gemini": "gemini_model",
                            "mistral": "mistral_model", "ollama_cloud": "ollama_cloud_model"}
     # Fest, weil im Gratis-Zugang nur diese Chat-Modelle Anfragen erlauben
-    _MISTRAL_REPLAY_MODELLE = ("mistral-large-4", "ministral-14b-latest", "ministral-8b-latest")
+    _MISTRAL_REPLAY_MODELLE = ("ministral-14b-latest", "ministral-14b-latest", "ministral-8b-latest")
 
     async def _bot_replay_archiv(self, eintrag, rows, model, provider):
         name = self._bot_cfg().get("name") or "Robert"
@@ -12608,7 +12625,7 @@ class TXServer:
                 ("Stimme",           voice.get("xtts_speaker") or "—", None),
                 ("Stimmung (nur Piper)", bot.get("speaker") or "—", None),
                 ("KI-Modell",        (bot.get("gemini_model") if gemini
-                                      else (bot.get("mistral_model") or "mistral-large-4")
+                                      else (bot.get("mistral_model") or "ministral-14b-latest")
                                       if (bot.get("provider") or "").strip().lower() == "mistral"
                                       else bot.get("ollama_model")), None),
                 ("KI-Server",        "Gemini" if gemini else "Mistral"

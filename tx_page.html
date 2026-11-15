@@ -1488,7 +1488,7 @@ audio {
               <option value="gemini">Google Gemini</option>
             </select></div>
           <div class="form-field"><label>Modell <small>leer = Standard des Anbieters</small></label>
-            <input type="text" id="spiel-modell" list="spiel-modelle" placeholder="z. B. mistral-large-4">
+            <input type="text" id="spiel-modell" list="spiel-modelle" placeholder="z. B. ministral-14b-latest">
             <datalist id="spiel-modelle"></datalist></div>
         </div>
         <div class="adm-hint" id="spiel-ki-info"></div>
@@ -2142,6 +2142,7 @@ audio {
             <label>Zweiter Ausweich, wenn auch der erste nichts liefert</label>
             <select id="bot-ausweich2" onchange="updateBotProvider()" autocomplete="off">
               <option value="">aus</option>
+              <option value="gemini">Google Gemini (Schlüssel und Modell oben)</option>
               <option value="ollama_cloud">Ollama Cloud (Modell und Schlüssel unten)</option>
             </select>
           </div>
@@ -2213,9 +2214,9 @@ audio {
         <div class="form-grid" style="margin-top:8px">
           <div class="form-field" style="flex:2">
             <label>Mistral-Modell</label>
-            <input type="text" id="bot-mistral-model" list="mistral-model-list" placeholder="mistral-large-4" autocomplete="off">
+            <input type="text" id="bot-mistral-model" list="mistral-model-list" placeholder="ministral-14b-latest" autocomplete="off">
             <datalist id="mistral-model-list">
-              <option value="mistral-large-4"><option value="ministral-14b-latest"><option value="ministral-8b-latest">
+              <option value="ministral-14b-latest"><option value="ministral-8b-latest">
             </datalist>
           </div>
           <div class="form-field" style="flex:0 0 160px">
@@ -2232,7 +2233,7 @@ audio {
           </div>
         </div>
         <div class="form-field" style="margin-top:2px;font-size:.72rem;color:var(--muted);line-height:1.4">
-          Im Gratis-Zugang gehen nur mistral-large-4 und die Ministral-Modelle, etwa eine Anfrage pro Sekunde.
+          Im Gratis-Zugang gehen nur die Ministral-Modelle (mistral-large ist nicht im Tarif), etwa eine Anfrage pro Sekunde.
           Large 4 denkt vor jeder Antwort nach, das lässt sich nicht abschalten. Die Felder gelten auch für den Ausweich.
         </div>
       </div>
@@ -5214,7 +5215,7 @@ async function testAutoReply() {
 function updateBotProvider() {
   const p = document.getElementById("bot-provider").value;
   document.querySelectorAll(".prov-ollama").forEach(e => e.style.display = p === "ollama" ? "" : "none");
-  document.querySelectorAll(".prov-gemini").forEach(e => e.style.display = p === "gemini" ? "" : "none");
+  document.querySelectorAll(".prov-gemini").forEach(e => e.style.display = (p === "gemini" || (p === "ollama" && document.getElementById("bot-ausweich2").value === "gemini")) ? "" : "none");
   // Mistral-Felder auch zeigen, wenn Mistral nur als Ausweich dient
   const aw = document.getElementById("bot-ausweich").value === "mistral";
   document.querySelectorAll(".prov-mistral").forEach(e => e.style.display = (p === "mistral" || (p === "ollama" && aw)) ? "" : "none");
@@ -5299,7 +5300,7 @@ async function loadBotAdmin() {
     loadBotsWeitere();
     document.getElementById("bot-gemini-model").value = d.gemini_model || "";
     document.getElementById("bot-gemini-key").value   = d.gemini_api_key || "";
-    document.getElementById("bot-mistral-model").value  = d.mistral_model || "mistral-large-4";
+    document.getElementById("bot-mistral-model").value  = d.mistral_model || "ministral-14b-latest";
     document.getElementById("bot-mistral-effort").value = d.mistral_reasoning_effort || "low";
     document.getElementById("bot-mistral-key").value    = d.mistral_api_key || "";
     document.getElementById("bot-ausweich").value       = d.ausweich_provider || "";
