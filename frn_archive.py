@@ -595,13 +595,33 @@ def update_callsign(entry_id: int, callsign: str) -> bool:
         return cur.rowcount > 0
 
 
+def _kontroll_urteil_merken(conn, entry_id: int, haupt: str, k: dict, getauscht: bool,
+                            dauer: float | None) -> str:
+    """Zaehler fuers Auswerten des Kontroll-Laufs (16.11.): welcher der beiden
+    Whisper-Laeufe hat gestimmt? Gemerkt wird, was der Admin am Ende als Haupttext
+    stehen laesst (Tausch) oder ausdruecklich bestaetigt. Je Eintrag zaehlt das letzte
+    Urteil. lauf: 'lauf1' = unveraenderter erster Lauf, 'lauf2' = Kontroll-Lauf."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS kontroll_urteil (
+        entry_id INTEGER PRIMARY KEY, ts REAL, richtig TEXT,
+        lp_lauf1 REAL, lp_lauf2 REAL, text_lauf1 TEXT, text_lauf2 TEXT, dauer_s REAL)""")
+    lp_haupt, lp_alt = k.get("lp"), k.get("lp_k")
+    if getauscht:      # Haupttext ist der Kontroll-Lauf
+        richtig, t1, t2, l1, l2 = "lauf2", k.get("text", ""), haupt, lp_alt, lp_haupt
+    else:
+        richtig, t1, t2, l1, l2 = "lauf1", haupt, k.get("text", ""), lp_haupt, lp_alt
+    conn.execute("INSERT OR REPLACE INTO kontroll_urteil VALUES (?,?,?,?,?,?,?,?)",
+                 (entry_id, time.time(), richtig, l1, l2, t1, t2, dauer))
+    return richtig
+
+
 def swap_kontrolle(entry_id: int) -> str | None:
     """Tauscht Haupttext und Kontroll-Text eines Eintrags (beide logprobs
     wandern mit), so dass ein zweiter Tausch alles wiederherstellt. Gibt den
-    neuen Haupttext zurueck, None wenn Eintrag oder Kontroll-Text fehlt."""
+    neuen Haupttext zurueck, None wenn Eintrag oder Kontroll-Text fehlt.
+    Das Ergebnis des Tauschs wird als Urteil gezaehlt (siehe oben)."""
     with _get_conn() as conn:
         row = conn.execute(
-            "SELECT text, kontrolle FROM transmissions WHERE id = ?", (entry_id,)
+            "SELECT text, kontrolle, duration_s FROM transmissions WHERE id = ?", (entry_id,)
         ).fetchone()
         if not row or not row["kontrolle"]:
             return None
@@ -613,11 +633,35 @@ def swap_kontrolle(entry_id: int) -> str | None:
             return None
         neu = {"text": row["text"], "lp": k.get("lp_k"), "lp_k": k.get("lp"),
                "getauscht": not k.get("getauscht", False)}
+        # neuer Haupttext = k["text"]; neu["text"] ist der alte Haupttext
+        neu["urteil"] = _kontroll_urteil_merken(
+            conn, entry_id, k["text"], neu, neu["getauscht"], row["duration_s"])
         conn.execute(
             "UPDATE transmissions SET text = ?, kontrolle = ? WHERE id = ?",
             (k["text"], json.dumps(neu, ensure_ascii=False), entry_id)
         )
         return k["text"]
+
+
+def bestaetige_kontrolle(entry_id: int) -> bool:
+    """Admin sagt: der jetzige Haupttext stimmt (kein Tausch). Zaehlt als Urteil."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT text, kontrolle, duration_s FROM transmissions WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if not row or not row["kontrolle"]:
+            return False
+        try:
+            k = json.loads(row["kontrolle"])
+        except ValueError:
+            return False
+        if not isinstance(k, dict) or not k.get("text"):
+            return False
+        k["urteil"] = _kontroll_urteil_merken(
+            conn, entry_id, row["text"], k, bool(k.get("getauscht", False)), row["duration_s"])
+        conn.execute("UPDATE transmissions SET kontrolle = ? WHERE id = ?",
+                     (json.dumps(k, ensure_ascii=False), entry_id))
+        return True
 
 
 def delete_entry(entry_id: int) -> bool:

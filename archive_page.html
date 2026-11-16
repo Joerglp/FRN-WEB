@@ -893,9 +893,25 @@ function kontrollZeile(e) {
       background:transparent;border:1px solid var(--border);color:var(--text-dim);
       font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:.06em;
       padding:1px 7px;cursor:pointer;border-radius:2px;text-transform:uppercase;margin-left:4px"
-      title="Diesen Text zum Haupttext machen (nochmal klicken tauscht zurück)">&#8644; übernehmen</button>` : '';
+      title="Diesen Text zum Haupttext machen (nochmal klicken tauscht zurück)">&#8644; übernehmen</button>`
+      + (k.urteil ? ` <span style="color:var(--ok,#6c6);font-size:11px" title="Urteil gemerkt: ${k.urteil === 'lauf2' ? 'Kontroll-Lauf stimmt' : '1. Lauf stimmt'}">&#10003; geprüft</span>`
+        : ` <button onclick="kontrolleOk(${e.id}, this)" style="
+      background:transparent;border:1px solid var(--border);color:var(--text-dim);
+      font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:.06em;
+      padding:1px 7px;cursor:pointer;border-radius:2px;text-transform:uppercase;margin-left:4px"
+      title="Der Haupttext oben stimmt (wird für die Auswertung des Kontroll-Laufs gezählt)">&#10003; Haupttext stimmt</button>`) : '';
   return `<div class="msg-kontrolle" data-entry="${e.id}" style="font-size:12px;color:var(--text-dim);margin-top:3px"
        title="${esc(tip)}">${k.getauscht ? '1. Lauf' : 'Kontrolle'}: <span class="k-text">${esc(k.text)}</span>${knopf}</div>`;
+}
+
+async function kontrolleOk(entryId, btn) {
+  btn.disabled = true;
+  try {
+    const r = await adminFetch(`/api/admin/archive/${entryId}/kontrolle-ok`, { method: 'POST' });
+    const d = await r.json();
+    if (d.error) { alert('Fehler: ' + d.error); btn.disabled = false; return; }
+    btn.outerHTML = '<span style="color:var(--ok,#6c6);font-size:11px">&#10003; geprüft</span>';
+  } catch (e) { alert('Fehler: ' + e); btn.disabled = false; }
 }
 
 async function kontrolleTauschen(entryId, btn) {
@@ -912,6 +928,8 @@ async function kontrolleTauschen(entryId, btn) {
       zeile.querySelector('.k-text').textContent = alt;
       const lbl = zeile.firstChild;
       lbl.textContent = lbl.textContent.startsWith('Kontrolle') ? '1. Lauf: ' : 'Kontrolle: ';
+      const ok = zeile.querySelector('button[onclick^="kontrolleOk"]');
+      if (ok) ok.outerHTML = '<span style="color:var(--ok,#6c6);font-size:11px">&#10003; geprüft</span>';
     }
   } catch (e) {
     alert('Fehler: ' + e);

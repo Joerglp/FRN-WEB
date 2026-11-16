@@ -10194,6 +10194,24 @@ class TXServer:
         log.info("Archiv #%d: Kontroll-Text übernommen", entry_id)
         return web.json_response({"ok": True, "text": text})
 
+    async def handle_admin_archive_kontrolle_ok(self, request):
+        """POST /api/admin/archive/{id}/kontrolle-ok -- der jetzige Haupttext stimmt
+        (zaehlt fuer die Auswertung des Kontroll-Laufs, 16.11.)."""
+        _, err = await self._require_admin(request)
+        if err:
+            return err
+        if not _ARCHIVE_AVAILABLE:
+            return web.json_response({"error": "archive not available"}, status=503)
+        try:
+            entry_id = int(request.match_info.get("id", ""))
+        except ValueError:
+            return web.json_response({"error": "ungültige id"}, status=400)
+        ok = await asyncio.get_running_loop().run_in_executor(
+            None, _archive.bestaetige_kontrolle, entry_id)
+        if not ok:
+            return web.json_response({"error": "kein Kontroll-Text vorhanden"}, status=404)
+        return web.json_response({"ok": True})
+
     async def _archive_entry_wav(self, entry_id: int):
         """Laedt einen Archiv-Eintrag und konvertiert dessen Opus-Audio in
         eine temporaere WAV-Datei (Aufrufer muss sie selbst loeschen).
@@ -13965,6 +13983,7 @@ class TXServer:
         app.router.add_post("/api/admin/archive/{id}/enroll", self.handle_admin_archive_enroll)
         app.router.add_post("/api/admin/archive/{id}/callsign", self.handle_admin_archive_callsign)
         app.router.add_post("/api/admin/archive/{id}/kontrolle", self.handle_admin_archive_kontrolle)
+        app.router.add_post("/api/admin/archive/{id}/kontrolle-ok", self.handle_admin_archive_kontrolle_ok)
         app.router.add_get ("/api/admin/archive/{id}/split-suggest", self.handle_admin_archive_split_suggest)
         app.router.add_post("/api/admin/archive/{id}/split", self.handle_admin_archive_split)
         app.router.add_post("/api/admin/archive/{id}/merge", self.handle_admin_archive_merge)
