@@ -12,6 +12,7 @@ import os
 import shlex
 import sqlite3
 import subprocess
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -279,6 +280,17 @@ def add_entry_sync(
 
 # ── Abfrage-API ───────────────────────────────────────────────────────────────
 
+def _such_klausel(search: str, clauses: list, params: list) -> None:
+    """Freitext (Text/Rufzeichen) oder Eintrags-IDs: "#41588 #41565 id:40026" (16.11.)."""
+    ids = re.findall(r"(?:#|id:)(\d+)", search, re.IGNORECASE)
+    if ids and not re.sub(r"(?:#|id:)\d+|[\s,;]+", "", search, flags=re.IGNORECASE):
+        clauses.append("id IN (" + ",".join("?" for _ in ids) + ")")
+        params.extend(int(i) for i in ids)
+    else:
+        clauses.append("(text LIKE ? OR callsign LIKE ?)")
+        params.extend([f"%{search}%", f"%{search}%"])
+
+
 def query_entries(
     limit: int = 50,
     offset: int = 0,
@@ -300,8 +312,7 @@ def query_entries(
         clauses.append("room NOT IN (" + ",".join("?" for _ in ohne_raeume) + ")")
         params.extend(ohne_raeume)
     if search:
-        clauses.append("(text LIKE ? OR callsign LIKE ?)")
-        params.extend([f"%{search}%", f"%{search}%"])
+        _such_klausel(search, clauses, params)
     if namen:
         clauses.append("(" + " OR ".join("text LIKE ?" for _ in namen) + ")")
         params.extend(f"%{n}%" for n in namen)
@@ -399,8 +410,7 @@ def query_chat_messages(
         clauses.append("room NOT IN (" + ",".join("?" for _ in ohne_raeume) + ")")
         params.extend(ohne_raeume)
     if search:
-        clauses.append("(text LIKE ? OR callsign LIKE ?)")
-        params.extend([f"%{search}%", f"%{search}%"])
+        _such_klausel(search, clauses, params)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     count_params = params[:]
     params.extend([limit, offset])

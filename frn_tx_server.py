@@ -7088,6 +7088,73 @@ class TXServer:
                 text = rest
         return text
 
+    _PRAESENZ_RE = re.compile(
+        r"\b(da|heute|schon|gehört|gehoert|gesehen|gemeldet|qrv|kanal|morgen|noch nicht|wieder|"
+        r"unterwegs|funkt|dabei|gewesen|on air|auf dem band|aufm band)\b", re.IGNORECASE)
+
+    def _praesenz_hinweis(self, bot: dict, hist: list, room_name: str) -> str:
+        """Frage "War X heute schon da?" (16.11.): ohne Daten raet das Modell.
+        Haengt den echten Stand aus dem Archiv (Stimmerkennung, nur sichere
+        Treffer) an, mit dem Hinweis, dass er nicht lueckenlos ist."""
+        try:
+            if not room_name or room_name == self._spiel_cfg().get("raum"):
+                return ""
+            menschen = [e for e in hist[-4:] if not str(e[1]).endswith("(du)")]
+            if not menschen:
+                return ""
+            text = " ".join(str(e[2]) for e in menschen[-2:])
+            if not self._PRAESENZ_RE.search(text):
+                return ""
+            namen = {str(m.get("name") or "").strip() for m in (bot.get("memory") or []) if isinstance(m, dict)}
+            try:
+                en = json.load(open(Path(__file__).with_name("speaker_enrollments.json"))).get("enrollments")
+                namen |= set(en if isinstance(en, dict) else [str(x.get("name", "")) if isinstance(x, dict) else str(x) for x in (en or [])])
+            except Exception:
+                pass
+            eigene = {str(bot.get("name") or "Robert").lower(), "susi", "robert"}
+            erwaehnt = [n for n in sorted(namen) if len(n) >= 3 and n.lower() not in eigene
+                        and re.search(rf"\b{re.escape(n)}(s|n)?\b", text, re.IGNORECASE)]
+            if not erwaehnt:
+                return ""
+            import sqlite3
+            from frn_archive import DB_PATH
+            t0 = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+            con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+            try:
+                rows = con.execute(
+                    "SELECT timestamp, room, sprecher FROM transmissions WHERE timestamp >= ? AND sprecher LIKE '{%' "
+                    "AND room != ? ORDER BY timestamp",
+                    (t0, self._spiel_cfg().get("raum") or "")).fetchall()
+            finally:
+                con.close()
+            erk: dict[str, list] = {}
+            offen = 0
+            for ts, rm, sp in rows:
+                try:
+                    d = json.loads(sp)
+                except Exception:
+                    continue
+                if d.get("ergebnis") == "treffer" and d.get("name"):
+                    erk.setdefault(d["name"], []).append(ts)
+                else:
+                    offen += 1
+            teile = []
+            for n in erwaehnt[:3]:
+                l = erk.get(n)
+                if l:
+                    teile.append(f"{n}: heute {len(l)}x an der Stimme erkannt, erstmals "
+                                 f"{datetime.fromtimestamp(l[0]):%H:%M}, zuletzt {datetime.fromtimestamp(l[-1]):%H:%M} Uhr.")
+                else:
+                    teile.append(f"{n}: heute bisher NICHT an der Stimme erkannt. {offen} Aussendungen heute "
+                                 f"liessen sich keiner Stimme sicher zuordnen -- er kann also trotzdem schon "
+                                 f"dagewesen sein.")
+            return ("Archiv-Stand zu der Frage (aus der Stimmerkennung, nicht lueckenlos): " + " ".join(teile) +
+                    " Antworte auf dieser Grundlage, sag kurz ehrlich, dass du es nach dem Archiv "
+                    "weisst bzw. nicht sicher weisst, und erfinde nichts.")
+        except Exception as e:
+            log.warning("Praesenz-Hinweis: %s", e)
+            return ""
+
     async def _bot_ollama(self, bot: dict, hist: list, with_raw: bool = False,
                           search_query: str = "", room_name: str = "",
                           trace_ts: float | None = None,
@@ -7121,6 +7188,9 @@ class TXServer:
             # Modell nicht, dass es nachgeschaut hat, und improvisiert
             # (2026-09-14: erfundener Wetterbericht nach 0 Treffern).
             search_context = "(SUCHE FEHLGESCHLAGEN: kein Ergebnis, die Suchdienste sind gerade nicht erreichbar. Du hast also KEINE aktuellen Infos dazu. Sag ehrlich und kurz, dass du das gerade nicht nachschauen kannst. Erfinde auf KEINEN Fall Wetter, Nachrichten oder Ergebnisse.)"
+        _pz = self._praesenz_hinweis(bot, hist, room_name)
+        if _pz:
+            zusatz = (zusatz + " " if zusatz else "") + _pz
         system, messages = self._bot_build_prompt(bot, hist, search_context,
                                                   anker_key=room_name or None,
                                                   jetzt_ts=jetzt_ts, zusatz=zusatz)
