@@ -665,6 +665,10 @@ audio {
   font-family: 'Share Tech Mono', monospace; font-size: 0.78em;
   color: var(--accent2); margin-bottom: 8px;
 }
+.dbg-sprecher { display:inline-block; padding:1px 8px; border-radius:10px; font-weight:bold; margin-left:8px; cursor:default; }
+.dbg-sprecher.erkannt   { background: rgba(76,175,80,0.18);  color: var(--green); }
+.dbg-sprecher.bot       { background: rgba(79,195,247,0.18); color: var(--accent2); }
+.dbg-sprecher.unbekannt { background: rgba(255,167,38,0.18); color: var(--orange); }
 .dbg-trace-head .dbg-total { color: var(--muted); }
 .dbg-steps { display: flex; flex-wrap: wrap; gap: 6px; }
 .dbg-step {
@@ -6587,8 +6591,9 @@ function populateDebugRoomFilter(traces) {
   const cur = sel.value;
   const rooms = [...new Set(traces.map(t => t.room))].sort();
   sel.innerHTML = '<option value="">alle</option>' +
+    (window._dbgKiRaum ? '<option value="__ohne_ki">alle ohne KI-Raum</option><option value="__nur_ki">nur KI-Raum</option>' : '') +
     rooms.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join("");
-  sel.value = rooms.includes(cur) ? cur : "";
+  sel.value = (rooms.includes(cur) || (window._dbgKiRaum && cur.startsWith("__"))) ? cur : "";
 }
 let dbgModels = [];
 async function loadDebugModelList() {
@@ -6912,15 +6917,23 @@ async function loadDebugTraces() {
     }
     const data = await r.json();
     let traces = data.traces || [];
+    window._dbgKiRaum = data.ki_raum || "";
     populateDebugRoomFilter(traces);
     const roomFilter = document.getElementById("dbg-room-filter").value;
-    if (roomFilter) traces = traces.filter(t => t.room === roomFilter);
+    if (roomFilter === "__ohne_ki") traces = traces.filter(t => t.room !== window._dbgKiRaum);
+    else if (roomFilter === "__nur_ki") traces = traces.filter(t => t.room === window._dbgKiRaum);
+    else if (roomFilter) traces = traces.filter(t => t.room === roomFilter);
     document.getElementById("dbg-last-refresh").textContent =
       "zuletzt aktualisiert: " + new Date().toLocaleTimeString("de-DE");
     if (!traces.length) {
       box.innerHTML = `<div style="color:var(--muted);font-size:0.85em">Noch keine Durchsagen aufgezeichnet.</div>`;
       return;
     }
+    const sprBadge = sp => {
+      if (!sp) return "";
+      const sym = sp.status === "erkannt" ? "✓ " : sp.status === "bot" ? "🤖 " : "? ";
+      return `<span class="dbg-sprecher ${esc(sp.status)}" title="${esc(sp.detail || "")}">${sym}${esc(sp.name)}</span>`;
+    };
     box.innerHTML = traces.map(tr => {
       const steps = (tr.steps || []).map((s, i) => {
         const cls = "dbg-" + (s.status || "skip");
@@ -6968,7 +6981,7 @@ async function loadDebugTraces() {
       return `<div class="dbg-trace${staleCls}">
                 <div class="dbg-trace-head">
                   <span>${esc(tr.room)} · ${esc(t.abs)}
-                        <span class="dbg-age${ageCls}">(${esc(t.rel)})</span></span>
+                        <span class="dbg-age${ageCls}">(${esc(t.rel)})</span>${sprBadge(tr.sprecher)}</span>
                   <span class="dbg-total">${totalTxt}</span>
                 </div>
                 <div class="dbg-steps">${steps}</div>

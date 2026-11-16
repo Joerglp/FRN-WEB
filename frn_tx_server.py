@@ -1047,6 +1047,14 @@ class TXServer:
                 self._debug_trace_by_key.pop(next(iter(self._debug_trace_by_key)), None)
         return tr
 
+    def debug_trace_sprecher(self, room: str, ts: float, name: str, status: str, detail: str = ""):
+        """Sprecher der Durchsage fuers Abzeichen im Ablauf. status: erkannt |
+        bot | unbekannt | aus."""
+        try:
+            self._debug_trace_get(room, ts)["sprecher"] = {"name": name, "status": status, "detail": detail}
+        except Exception as e:
+            log.debug("debug_trace_sprecher: %s", e)
+
     def debug_trace_step(self, room: str, ts: float, name: str, status: str,
                          duration_s: float | None = None, detail: str = "",
                          final: bool = False, audio: str = ""):
@@ -1564,7 +1572,8 @@ class TXServer:
         vcfg = self.cfg.get("voice", {})
         if not vcfg.get("enabled", False):
             raise RuntimeError("Voice-Funktion ist deaktiviert")
-        text = self._aussprache(text)
+        if lang == "de":
+            text = self._aussprache(text)
         if force_xtts:
             url = (vcfg.get("xtts_url") or "").strip()
         else:
@@ -1573,7 +1582,7 @@ class TXServer:
             url = (vcfg.get("remote_url") or "").strip()
         if not url:
             raise RuntimeError("Voice-Funktion ist deaktiviert")
-        if self._xtts_ist_aktiv(force_xtts):
+        if lang == "de" and self._xtts_ist_aktiv(force_xtts):
             text = self._xtts_text(text)
         payload = {"text": text, "language": lang, "speaker": speaker or "default"}
         # Stimme der GPU-Box (2026-09-23): der Dienst dort kann seit heute
@@ -1592,6 +1601,8 @@ class TXServer:
                         raise RuntimeError(f"TTS-Dienst {resp.status}: {body[:120]}")
                     wav_bytes = await resp.read()
         except Exception as e:
+            if lang != "de":
+                raise   # Mistral/Piper-Rueckfall sprechen nur Deutsch
             # GPU-Box weg -> zuerst Mistral Voxtral mit geklonter Stimme
             # (03.11., voice.tts_ausweich = "mistral", Vorlage in
             # stimmen_ref/<Sprecher>.wav), dann lokales Piper statt Schweigen
@@ -1880,7 +1891,8 @@ class TXServer:
         timeout = aiohttp.ClientTimeout(total=120, sock_read=20)
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             async with sess.post(basis + "/tts_stream",
-                                 json={"text": self._xtts_text(self._aussprache(text)), "language": lang,
+                                 json={"text": (self._xtts_text(self._aussprache(text)) if lang == "de" else text),
+                                       "language": lang,
                                        "speaker": speaker}) as resp:
                 if resp.status != 200:
                     raise RuntimeError(f"tts_stream HTTP {resp.status}: {(await resp.text())[:120]}")
@@ -1907,7 +1919,8 @@ class TXServer:
                         yield (y * 32767.0).astype("<i2").tobytes()
 
     async def _auto_send_voice_stream(self, room, text: str, speaker: str,
-                                      url: str, on_tx_start=None, abbruch=None) -> bool | None:
+                                      url: str, on_tx_start=None, abbruch=None,
+                                      lang: str = "de") -> bool | None:
         """Stueckweise senden. None = Stream kam gar nicht zustande (Aufrufer
         faellt auf den Ganz-Weg zurueck); True/False wie _auto_send_voice."""
         vcfg = self.cfg.get("voice", {})
@@ -1917,7 +1930,7 @@ class TXServer:
 
         async def holen():
             try:
-                async for stueck in self._xtts_stream_8k(text, vcfg.get("language", "de"), speaker, url):
+                async for stueck in self._xtts_stream_8k(text, lang, speaker, url):
                     puffer.extend(stueck)
                     neu.set()
             except Exception as e:
@@ -2050,15 +2063,20 @@ class TXServer:
             # neutral ...) kennt XTTS nicht -- die gehoert zu Piper.
             speaker = ((self._bot_cfg().get("xtts_speaker") if _BOT_KONTEXT.get() else "")
                        or vcfg.get("xtts_speaker") or "aaron_dreschner").strip()
+        # Sprachmodus (16.11.): spricht der Raum gerade eine andere Sprache,
+        # nur ueber XTTS (andere Wege/Rueckfaelle sind deutsch).
+        lang = self._sprache_aktiv(getattr(room, "name", "")) or vcfg.get("language", "de")
+        if lang != "de" and not xtts:
+            lang = "de"
         if xtts and vcfg.get("xtts_stream", True):
             url = (vcfg.get("xtts_url") if force_xtts else vcfg.get("remote_url")) or vcfg.get("xtts_url") or ""
             ergebnis = await self._auto_send_voice_stream(room, text, speaker, url.strip(),
                                                           on_tx_start=on_tx_start,
-                                                          abbruch=abbruch)
+                                                          abbruch=abbruch, lang=lang)
             if ergebnis is not None:
                 return ergebnis
         try:
-            pcm  = await self._get_voice_pcm(text, vcfg.get("language", "de"),
+            pcm  = await self._get_voice_pcm(text, lang,
                                              speaker, force_xtts=force_xtts)
         except Exception as e:
             log.warning("[%s] Auto-Senden: TTS fehlgeschlagen: %s", room.name, e)
@@ -3392,12 +3410,16 @@ class TXServer:
             if dur:
                 eigen = self._bot_own_recording(room, ts, dur)
                 if eigen:
-                    return self._bot_sender_name(eigen[0])
+                    _bn = self._bot_sender_name(eigen[0])
+                    self.debug_trace_sprecher(room, ts, _bn, "bot")
+                    return _bn
             elif self._bot_is_own(room, text, ts):
                 t0 = next((a for a, b, _x in self._bot_own_tx.get(room, [])
                            if a - 3.0 <= ts <= b + 3.0), None)
-                return self._bot_sender_name(t0) if t0 is not None else \
+                _bn = self._bot_sender_name(t0) if t0 is not None else \
                     (self._bot_cfg().get("name") or "Robert")
+                self.debug_trace_sprecher(room, ts, _bn, "bot")
+                return _bn
         if not callsign and wav_path and self._speaker_id_cfg().get("enabled"):
             _t0 = time.time()
             try:
@@ -3409,10 +3431,17 @@ class TXServer:
             if identified:
                 self.debug_trace_step(room, ts, "Sprecher-ID", "ok", _sdt,
                                       f"{identified} (Ähnlichkeit {sim:.2f}, Schwelle {threshold:.2f})")
+                self.debug_trace_sprecher(room, ts, identified, "erkannt",
+                                          f"Ähnlichkeit {sim:.2f}, Schwelle {threshold:.2f}")
                 return identified
             self.debug_trace_step(room, ts, "Sprecher-ID", "skip", _sdt,
                                   f"kein Treffer (beste Ähnlichkeit {sim:.2f}, Schwelle {threshold:.2f})"
                                   if sim else "kein Enrollment/Embedding verfügbar")
+            self.debug_trace_sprecher(room, ts, "unbekannt", "unbekannt",
+                                      f"beste Ähnlichkeit {sim:.2f}, Schwelle {threshold:.2f}" if sim
+                                      else "kein Embedding")
+        elif callsign and not quelle:
+            self.debug_trace_sprecher(room, ts, callsign, "erkannt", "Rufzeichen vom Sender")
         return callsign
 
     # Kurze, alltagssprachlich mehrdeutige Kommandowörter brauchen ein enges
@@ -3436,6 +3465,122 @@ class TXServer:
         "\U0000FE0F"             # Variationsselektor
         "\U0000200D"             # Zero-Width-Joiner (verbindet Emoji-Sequenzen)
         "]+", flags=re.UNICODE)
+
+    # ── Sprachmodus (16.11.2026) ────────────────────────────────────────────
+    # "Robert, sprich Englisch": der Raum wechselt fuer ein paar Minuten die
+    # Sprache (Prompt-Hinweis, XTTS-Sprache, Whisper-Sprache). Beide Bots
+    # sprechen dann dieselbe Sprache. Zurueck mit "sprich wieder Deutsch" oder
+    # nach voice.sprach_dauer_min (Standard 15) ohne neuen Sprachwunsch bzw.
+    # ohne Antwort in der Sprache.
+    # code: (XTTS-Kuerzel, Whisper-Kuerzel, Name fuer den Prompt, Wortformen)
+    _SPRACHEN = {
+        "en": ("en", "Englisch", "englisch|english|englische"),
+        "es": ("es", "Spanisch", "spanisch|spanische"),
+        "fr": ("fr", "Französisch", "französisch|franzoesisch|französische|franzosisch"),
+        "it": ("it", "Italienisch", "italienisch|italienische"),
+        "pt": ("pt", "Portugiesisch", "portugiesisch|portugiesische"),
+        "pl": ("pl", "Polnisch", "polnisch|polnische"),
+        "tr": ("tr", "Türkisch", "türkisch|tuerkisch|türkische"),
+        "ru": ("ru", "Russisch", "russisch|russische"),
+        "nl": ("nl", "Niederländisch", "niederländisch|niederlaendisch|holländisch|hollaendisch|holländische|niederländische"),
+        "cs": ("cs", "Tschechisch", "tschechisch|tschechische"),
+        "ar": ("ar", "Arabisch", "arabisch|arabische"),
+        "zh-cn": ("zh", "Chinesisch", "chinesisch|chinesische"),
+        "ja": ("ja", "Japanisch", "japanisch|japanische"),
+        "hu": ("hu", "Ungarisch", "ungarisch|ungarische"),
+        "ko": ("ko", "Koreanisch", "koreanisch|koreanische"),
+        "hi": ("hi", "Hindi", "hindi"),
+    }
+    _SPRACH_VERB_RE = re.compile(
+        r"\b(sprich|sprech|sprecht|sprechen|spricht|rede|redet|reden|antworte|antwortet|"
+        r"antworten|sag|sagt|funk|funkt|funken|unterhalte|unterhaltet|unterhalten|plaudert|"
+        r"plaudere|schwätz|quatscht|quatsch|wechsel|wechselt|schalte|schaltet|mach|macht|"
+        r"übersetz|uebersetz|lass|lasst|kannst|könnt|koennt|kann)\w*\b|\b(auf|in)\s+\w+isch\b")
+
+    def _sprach_cfg(self) -> dict:
+        v = self.cfg.get("voice", {})
+        return {"an": bool(v.get("sprachmodus", True)),
+                "min": float(v.get("sprach_dauer_min", 15) or 15)}
+
+    def _sprache_aktiv(self, room_name: str) -> str:
+        """XTTS-Kuerzel der gerade gesprochenen Fremdsprache im Raum, sonst ''."""
+        z = getattr(self, "_sprach_zust", {}).get(room_name)
+        if z and time.time() < z[1]:
+            return z[0]
+        return ""
+
+    def _sprache_setzen(self, room_name: str, code: str):
+        if not hasattr(self, "_sprach_zust"):
+            self._sprach_zust = {}
+        if code:
+            bis = time.time() + self._sprach_cfg()["min"] * 60
+            self._sprach_zust[room_name] = (code, bis)
+        else:
+            self._sprach_zust.pop(room_name, None)
+        # Whisper hoert raumuebergreifend in der zuletzt gewuenschten Sprache
+        # (es gibt nur eine Transkriptions-Warteschlange)
+        aktiv = [(c, b) for c, b in self._sprach_zust.values() if time.time() < b]
+        try:
+            import frn_transcription as _ft
+            if aktiv:
+                c, b = max(aktiv, key=lambda x: x[1])
+                _ft.sprache_fremd_setzen(self._SPRACHEN[c][0], b)
+            else:
+                _ft.sprache_fremd_setzen("", 0)
+        except Exception as e:
+            log.debug("Whisper-Sprachmodus: %s", e)
+
+    def _sprach_befehl_pruefen(self, room_name: str, name: str, low: str):
+        """Erkennt "Robert, sprich Englisch" / "sprecht wieder Deutsch" und
+        setzt den Sprachmodus des Raums. Der Bot antwortet danach ganz normal
+        (der Prompt-Hinweis sorgt fuer die neue Sprache)."""
+        if not self._sprach_cfg()["an"] or not low:
+            return
+        namen = {(name or "robert").lower()}
+        namen |= {str(b.get("name") or "").lower() for b in (self.cfg.get("voice", {}).get("bots_weitere") or []) if isinstance(b, dict)}
+        namen |= {str(self.cfg.get("voice", {}).get("bot", {}).get("name") or "robert").lower()}
+        if not any(re.search(rf"\b{re.escape(n)}\b", low) for n in namen if n) \
+                and not re.search(r"\b(ihr|ihr beiden|beide)\b", low):
+            return
+        if not self._SPRACH_VERB_RE.search(low):
+            return
+        # "Robert spricht gut Englisch" ist kein Wunsch: ein Imperativ bzw.
+        # eine Bitte ("sprich", "kannst du", "mal") muss dabei sein.
+        bitte = re.search(r"\b(sprich|sprecht|sprech|rede|redet|antworte|antwortet|funk|funkt|"
+                          r"unterhaltet|unterhalte|plaudert|quatscht|wechsel|wechselt|"
+                          r"kannst du|könnt ihr|koennt ihr|kannst|könnt|koennt|lass|lasst|"
+                          r"mal)\b", low)
+        if not bitte:
+            return
+        if re.search(r"\b(wieder |zurück auf |zurueck auf |auf |in )?deutsch\b", low) \
+                and not self._finde_sprache(low):
+            if self._sprache_aktiv(room_name):
+                log.info("[%s] Sprachmodus aus (Funkbefehl)", room_name)
+                self._sprache_setzen(room_name, "")
+            return
+        code = self._finde_sprache(low)
+        if code:
+            log.info("[%s] Sprachmodus: %s (Funkbefehl)", room_name, self._SPRACHEN[code][1])
+            self._sprache_setzen(room_name, code)
+
+    def _finde_sprache(self, low: str) -> str:
+        for code, (_w, _n, formen) in self._SPRACHEN.items():
+            if re.search(rf"\b(?:{formen})\b", low):
+                return code
+        return ""
+
+    def _sprach_hinweis(self, room_name: str) -> str:
+        code = self._sprache_aktiv(room_name)
+        if not code:
+            return ""
+        n = self._SPRACHEN[code][1]
+        # Aktiv gesprochen: Frist verlaengern (Gespraech laeuft noch)
+        self._sprache_setzen(room_name, code)
+        return (f"Sprachmodus: Antworte ab jetzt ausschliesslich auf {n}, kein deutsches Wort, "
+                f"auch nicht bei Namen oder Gruessen. Wenn die Funker dich gerade erst darum "
+                f"gebeten haben, bestaetige es kurz in dieser Sprache. Wuenscht jemand "
+                f"\"wieder Deutsch\", sprich Deutsch. Dein Text wird in dieser Sprache "
+                f"vorgelesen: Zahlen und Abkuerzungen ausschreiben.")
 
     def _bot_command(self, bot: dict, name: str, low: str) -> str | None:
         """Erkennt Sprach-Steuerbefehle: '<Name> aus' → 'off', '<Name> start'
@@ -3793,6 +3938,7 @@ class TXServer:
         bot  = self._bot_cfg()
         name = bot.get("name") or "Robert"
         hist = self._room_hist.setdefault(room_name, [])
+        self._sprach_befehl_pruefen(room_name, name, low)
         # Sprachsteuerung: greift AUCH bei deaktiviertem Bot (sonst kein Wecken).
         # No-Op (schon im Zielzustand) fällt durch zur normalen Antwort-Logik.
         cmd = self._bot_command(bot, name, low)
@@ -3937,7 +4083,7 @@ class TXServer:
         # es ein klar erkennbarer Anruf ist -- nicht wegen "lange Stille, also
         # ist bestimmt jemand gemeint". Das erzeugte die "Ist da wer?"-
         # Antworten auf Rauschfetzen.
-        if self._is_gibberish(text) and not name_or_call:
+        if self._is_gibberish(text) and not name_or_call and not self._sprache_aktiv(room_name):
             self.debug_trace_step(room_name, ts, "Bot-Trigger", "skip",
                                   detail="Kauderwelsch ohne Namensnennung -- keine Antwort",
                                   final=True)
@@ -7191,6 +7337,9 @@ class TXServer:
         _pz = self._praesenz_hinweis(bot, hist, room_name)
         if _pz:
             zusatz = (zusatz + " " if zusatz else "") + _pz
+        _sh = self._sprach_hinweis(room_name)
+        if _sh:
+            zusatz = (zusatz + " " if zusatz else "") + _sh
         system, messages = self._bot_build_prompt(bot, hist, search_context,
                                                   anker_key=room_name or None,
                                                   jetzt_ts=jetzt_ts, zusatz=zusatz)
@@ -12642,8 +12791,10 @@ class TXServer:
                 "steps":    tr["steps"],
                 "replayable": bool(tr.get("hist")),
                 "namen":    tr.get("namen", []),
+                "sprecher": tr.get("sprecher"),
             })
-        return web.json_response({"traces": traces, "bot_namen": list(self._bot_namen())})
+        return web.json_response({"traces": traces, "bot_namen": list(self._bot_namen()),
+                                 "ki_raum": self._spiel_cfg().get("raum") or ""})
 
     _SPIEL_DBG_DATEI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spiel_debug.jsonl")
 

@@ -686,11 +686,45 @@ async def transcribe_wav(wav_path: str, model_size: str = "medium",
     der Dienst sie mitliefert (aeltere Fassungen tun das nicht -- dann bleibt
     das Dict leer und der Aufrufer faellt auf den Kontroll-Lauf zurueck).
     """
+    # Sprachmodus (16.11.2026): Hat jemand Robert/Susi gebeten, in einer anderen
+    # Sprache zu sprechen, hoert Whisper zuerst in DIESER Sprache. Der Dienst
+    # auf der GPU-Box kennt kein "auto" (HTTP 500), deshalb: wird der Text
+    # leer oder unsicher (Funker antwortet doch auf Deutsch), laeuft der
+    # Standard-Lauf noch dazu, und der bessere Text gewinnt.
+    fremd = _SPRACHE_FREMD[0] if time.time() < _SPRACHE_FREMD[1] else ""
+    if fremd and fremd != language:
+        mw1 = {} if messwerte is None else messwerte
+        async with _whisper_lock:
+            loop = asyncio.get_running_loop()
+            t1 = await loop.run_in_executor(None, _transcribe_sync, wav_path, model_size, fremd, mw1)
+            lp1 = mw1.get("avg_logprob")
+            if t1.strip() and lp1 is not None and lp1 >= -0.9:
+                return t1
+            mw2: dict = {}
+            t2 = await loop.run_in_executor(None, _transcribe_sync, wav_path, model_size, language, mw2)
+            lp2 = mw2.get("avg_logprob")
+            log.info("Sprachmodus %s: Lauf %s lp=%s, Standard-Lauf lp=%s", fremd,
+                     "leer" if not t1.strip() else "unsicher", lp1, lp2)
+            if t2.strip() and (not t1.strip() or lp2 is None or lp1 is None or lp2 > lp1):
+                if messwerte is not None:
+                    messwerte.clear(); messwerte.update(mw2)
+                return t2
+            return t1
     async with _whisper_lock:           # nie zwei Inferenzen gleichzeitig
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None, _transcribe_sync, wav_path, model_size, language, messwerte
         )
+
+
+# [Sprache, gilt bis (Unix-Zeit)] -- vom tx-Server gesetzt (Sprachmodus)
+_SPRACHE_FREMD: list = ["", 0.0]
+
+
+def sprache_fremd_setzen(code: str, bis: float) -> None:
+    """Whisper-Sprache fuer den Sprachmodus setzen (code leer = aus)."""
+    _SPRACHE_FREMD[0] = (code or "").strip().lower()
+    _SPRACHE_FREMD[1] = float(bis) if code else 0.0
 
 
 # ── MQTT-Publisher ────────────────────────────────────────────────────────────
