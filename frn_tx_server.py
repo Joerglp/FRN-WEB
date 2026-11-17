@@ -7363,6 +7363,39 @@ class TXServer:
             raw = await self._llm_mit_ausweich(llm_bot, system, messages,
                                                room_name=room_name, trace_ts=trace_ts,
                                                force_model=force_model)
+        # Ausweich auf Gemini (17.11.): Mistral/Ollama Cloud als Hauptanbieter
+        # (z.B. Spielwiese) hatten keinen Ausweich -- bei 429 oder Leerantwort
+        # brach das Gespraech nach 2 Wechseln ab ("hat nichts gesagt").
+        if (not raw and provider in ("mistral", "ollama_cloud")
+                and (bot.get("gemini_api_key") or "").strip()):
+            _t1 = time.time()
+            if room_name and trace_ts is not None:
+                self._debug_trace_get(room_name, trace_ts).pop("llm_fehler", None)
+            raw = await self._llm_gemini(bot, system, messages, room_name, trace_ts)
+            _dt1 = time.time() - _t1
+            log.warning("KI-Funker: %s ohne Antwort -- Gemini %s (%.1fs)", provider,
+                        "antwortet" if raw else "auch ohne Antwort", _dt1)
+            self._ausweich_letzt = (time.time(), f"{provider} ohne Antwort -> Gemini", round(_dt1, 1), bool(raw))
+            if room_name and trace_ts is not None:
+                self.debug_trace_step(room_name, trace_ts, "Ausweich-Modell",
+                                      "ok" if raw else "error", _dt1,
+                                      f"{provider} ohne Antwort -- Gemini "
+                                      f"{bot.get('gemini_model') or 'gemini-flash-lite-latest'}"
+                                      + ("" if raw else ": keine Antwort"))
+        # ... und danach auf die eigene GPU-Box (gemma4), falls auch Gemini nichts liefert
+        if not raw and provider in ("mistral", "ollama_cloud", "gemini") and (bot.get("ollama_url") or bot.get("ollama_model")):
+            _t2 = time.time()
+            if room_name and trace_ts is not None:
+                self._debug_trace_get(room_name, trace_ts).pop("llm_fehler", None)
+            raw = await self._llm_ollama(bot, system, messages, room_name=room_name, trace_ts=trace_ts)
+            _dt2 = time.time() - _t2
+            log.warning("KI-Funker: %s und Gemini ohne Antwort -- GPU-Box %s (%.1fs)", provider,
+                        "antwortet" if raw else "auch ohne Antwort", _dt2)
+            if room_name and trace_ts is not None:
+                self.debug_trace_step(room_name, trace_ts, "Ausweich-Modell",
+                                      "ok" if raw else "error", _dt2,
+                                      f"{provider} ohne Antwort -- GPU-Box {bot.get('ollama_model') or ''}"
+                                      + ("" if raw else ": keine Antwort"))
         _lldt = time.time() - _t0
         log.info("KI-Funker LLM (%s): %.1fs", provider, _lldt)
         if room_name:
@@ -7567,7 +7600,22 @@ class TXServer:
         effort = (bot.get("mistral_reasoning_effort") or "low").strip()
         if effort:
             body["reasoning_effort"] = effort
-        for versuch in range(2):
+        for versuch in range(3):
+            # Mindestabstand zwischen Mistral-Anfragen (17.11.): das Freikontingent
+            # erlaubt kaum eine Anfrage pro Sekunde, in der Spielwiese kamen
+            # dadurch 429er. voice.bot.mistral_min_abstand_s, Standard 2,5 s.
+            try:
+                _abst = float(bot.get("mistral_min_abstand_s", 2.5))
+            except (TypeError, ValueError):
+                _abst = 2.5
+            if not hasattr(self, "_mistral_sperre"):
+                self._mistral_sperre = asyncio.Lock()
+                self._mistral_letzt = 0.0
+            async with self._mistral_sperre:
+                _warte = self._mistral_letzt + _abst - time.time()
+                if _warte > 0:
+                    await asyncio.sleep(_warte)
+                self._mistral_letzt = time.time()
             try:
                 timeout = aiohttp.ClientTimeout(total=45)
                 async with aiohttp.ClientSession(timeout=timeout) as sess:
@@ -7589,8 +7637,8 @@ class TXServer:
             if status == 400 and "reasoning_effort" in fehler and "reasoning_effort" in body:
                 body.pop("reasoning_effort")      # Modell ohne Denk-Stufen
                 continue
-            if status == 429 and versuch == 0:
-                await asyncio.sleep(1.5)          # Freikontingent: <1 Anfrage/s
+            if status == 429 and versuch < 2:
+                await asyncio.sleep(3.0)          # Freikontingent: <1 Anfrage/s
                 continue
             log.warning("KI-Funker Mistral HTTP %d: %s", status, fehler)
             self._llm_fehler_merken(room_name, trace_ts, f"Mistral HTTP {status}: {fehler}")
