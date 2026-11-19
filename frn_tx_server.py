@@ -7428,7 +7428,19 @@ class TXServer:
             cleaned = self._EMOJI_RE.sub("", cleaned)
             # Regieanweisungen "*Setzt sich neben ihn.*" raus (10.11., Spielwiese):
             # wuerden sonst vorgelesen; einzelne Sternchen ebenso.
-            cleaned = re.sub(r"\*[^*\n]{1,300}\*", " ", cleaned).replace("*", "")
+            # Betonung "*Funk*" (Mistral macht das oft) bleibt als Wort stehen
+            # (18.11.: wurde mit geloescht, im Satz fehlten Woerter); nur
+            # mehrwortige/satzartige Stellen und typische Verben ("*lacht*")
+            # gelten als Regieanweisung.
+            def _stern(m):
+                inh = m.group(1).strip()
+                if (len(inh.split()) <= 2 and not re.search(r"[.!?,…:;]", inh)
+                        and not re.match(r"(lach|kicher|seufz|grins|zwinker|räusper|schmunzel|lächel|"
+                                         r"nick|schweig|gähn|stöhn|hüstel|pfeif|umarm|küss|winkt|wink)",
+                                         inh.lower())):
+                    return inh
+                return " "
+            cleaned = re.sub(r"\*([^*\n]{1,300})\*", _stern, cleaned).replace("*", "")
             # "am Start" ist per Persona verboten, das Modell setzt es aber
             # trotzdem gern (2026-09-30: bei "wer ist noch QRV" jedes Mal) --
             # "bin am Start" -> "bin dabei" passt grammatisch immer.
@@ -7600,22 +7612,24 @@ class TXServer:
         effort = (bot.get("mistral_reasoning_effort") or "low").strip()
         if effort:
             body["reasoning_effort"] = effort
-        for versuch in range(3):
-            # Mindestabstand zwischen Mistral-Anfragen (17.11.): das Freikontingent
-            # erlaubt kaum eine Anfrage pro Sekunde, in der Spielwiese kamen
-            # dadurch 429er. voice.bot.mistral_min_abstand_s, Standard 2,5 s.
+        for versuch in range(2):
+            # Limit des Gratis-Tarifs (18.11., aus den Antwortkoepfen): 2 Anfragen
+            # pro Minute fuer den ganzen Schluessel. Ist es voll, gar nicht erst
+            # fragen (kein 429, keine Wartezeit) -- der Aufrufer weicht auf Gemini/
+            # GPU-Box aus. voice.bot.mistral_max_pro_min (Standard 2).
             try:
-                _abst = float(bot.get("mistral_min_abstand_s", 2.5))
+                _max = int(bot.get("mistral_max_pro_min", 2) or 0)
             except (TypeError, ValueError):
-                _abst = 2.5
-            if not hasattr(self, "_mistral_sperre"):
-                self._mistral_sperre = asyncio.Lock()
-                self._mistral_letzt = 0.0
-            async with self._mistral_sperre:
-                _warte = self._mistral_letzt + _abst - time.time()
-                if _warte > 0:
-                    await asyncio.sleep(_warte)
-                self._mistral_letzt = time.time()
+                _max = 2
+            if not hasattr(self, "_mistral_zeiten"):
+                self._mistral_zeiten = []
+            _jetzt = time.time()
+            self._mistral_zeiten = [t for t in self._mistral_zeiten if _jetzt - t < 61.0]
+            if _max > 0 and len(self._mistral_zeiten) >= _max:
+                log.info("KI-Funker: Mistral-Minutenlimit (%d) ausgeschoepft -- Ausweich", _max)
+                self._llm_fehler_merken(room_name, trace_ts, "Mistral: Minutenlimit ausgeschöpft")
+                return ""
+            self._mistral_zeiten.append(_jetzt)
             try:
                 timeout = aiohttp.ClientTimeout(total=45)
                 async with aiohttp.ClientSession(timeout=timeout) as sess:
@@ -7637,9 +7651,9 @@ class TXServer:
             if status == 400 and "reasoning_effort" in fehler and "reasoning_effort" in body:
                 body.pop("reasoning_effort")      # Modell ohne Denk-Stufen
                 continue
-            if status == 429 and versuch < 2:
-                await asyncio.sleep(3.0)          # Freikontingent: <1 Anfrage/s
-                continue
+            if status == 429:
+                # Mistral zaehlt anders als wir: die naechsten 60 s als voll merken
+                self._mistral_zeiten = [time.time()] * max(1, int(bot.get("mistral_max_pro_min", 2) or 2))
             log.warning("KI-Funker Mistral HTTP %d: %s", status, fehler)
             self._llm_fehler_merken(room_name, trace_ts, f"Mistral HTTP {status}: {fehler}")
             return ""
@@ -9281,7 +9295,8 @@ class TXServer:
                      "zu zweit und bring etwas Neues ein: eine eigene Meinung, eine Erfahrung oder eine Frage.")
     _SPIEL_WECHSEL = ("{von} unterhält sich mit dir. Geh kurz auf das Letzte ein und bring dann "
                       "ein neues Thema auf{thema}.")
-    _SPIEL_HINTERGRUND = " Hintergrund dazu: {info}"
+    _SPIEL_HINTERGRUND = (" Hintergrund dazu: {info} Bleib bei diesen Angaben, erfinde nichts dazu "
+                          "und rede über genannte Personen nicht abfällig.")
     # Floskeln, an denen man ein festgefahrenes Gespraech erkennt (11.11.)
     _SPIEL_FLOSKEL_RE = re.compile(
         r"zeit (einfach |so richtig )?(gemeinsam )?genie|seele baumeln|richtige einstellung|"
