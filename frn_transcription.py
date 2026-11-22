@@ -1065,6 +1065,51 @@ class TranscriptionPipeline:
                             dbg(room, ts, "Whisper", "retry", _wdt,
                                 f"leer bei {_dur_s:.1f}s, Wiederholung {empty_tries}/{EMPTY_RETRIES}")
                         continue
+                    # Zweitlauf bei aussortiertem Text (22.11.2026): Meldet Whisper
+                    # "Halluzination"/"Prompt-Echo" ("Die Sendung wurde vom NDR
+                    # live untertitelt"), hat es meist nur nichts Sicheres
+                    # gehoert -- manchmal ging so Gesprochenes verloren. Zwei
+                    # Laeufe mit leicht anderem Tempo (0.94 / 1.06): Nur wenn
+                    # BEIDE Text liefern (avg_logprob >= -1.0) und sich zu
+                    # >= 60 % gleichen, war wirklich etwas zu hoeren. Test an
+                    # echten Fehlern: bei Rauschen kamen zwei voellig
+                    # verschiedene Saetze -- die werden so nicht angenommen.
+                    if (not text.strip() and remote_url and _dur_s >= 2.0
+                            and messwerte.get("verworfen_grund") in ("halluzination", "prompt_echo")):
+                        _alt = (messwerte.get("verworfen_text") or "")[:50]
+                        _erg = []
+                        for _tp in (0.94, 1.06):
+                            _var = await _tempo_variante(wav_path, tempo=_tp)
+                            if not _var:
+                                break
+                            _mw2: dict = {}
+                            try:
+                                _t2 = await asyncio.wait_for(
+                                    transcribe_wav(_var, model_size, language, _mw2), timeout=120.0)
+                            except Exception as _e2:
+                                log.debug("Tempo-Zweitlauf %.2f fehlgeschlagen: %r", _tp, _e2)
+                                _t2 = ""
+                            finally:
+                                _unlink(_var)
+                            _lp2 = _mw2.get("avg_logprob")
+                            if not (_t2.strip() and _lp2 is not None and _lp2 >= -1.0):
+                                break
+                            _erg.append((_t2.strip(), _mw2))
+                        if len(_erg) == 2:
+                            _aehn = difflib.SequenceMatcher(
+                                None, _erg[0][0].lower(), _erg[1][0].lower(), autojunk=False).ratio()
+                            if _aehn >= 0.6:
+                                _best = max(_erg, key=lambda e: e[1].get("avg_logprob", -9))
+                                log.info("[%s] Zweitlauf rettet Aufnahme (Uebereinstimmung %.0f%%): %.80s | vorher verworfen: %s",
+                                         room, 100 * _aehn, _best[0], _alt)
+                                if dbg:
+                                    dbg(room, ts, "Whisper", "retry", None,
+                                        f"Zweitlauf Tempo, {100 * _aehn:.0f}% gleich: {_best[0][:150]}")
+                                text = _best[0]
+                                messwerte.clear(); messwerte.update(_best[1])
+                            else:
+                                log.info("[%s] Zweitlauf uneinig (%.0f%%) -- bleibt verworfen: %.50s | %.50s",
+                                         room, 100 * _aehn, _erg[0][0], _erg[1][0])
                     log.info("[%s] Whisper: %.1fs", room, _wdt)
                     if dbg:
                         dbg(room, ts, "Whisper", "ok", _wdt, text[:200])
