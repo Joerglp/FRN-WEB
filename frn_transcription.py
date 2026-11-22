@@ -677,9 +677,32 @@ def _transcribe_sync(wav_path: str, model_size: str, language: str,
     return _transcribe_local(wav_path, model_size, language)
 
 
+# Typische Whisper-Hoerfehler fuer den Bot-Namen (22.11.2026: Peter sagte
+# "Robert", Whisper schrieb "Rupert", Robert reagierte beleidigt). Es gibt im
+# Funkkanal kein Rupert/Ruprecht, die Korrektur ist daher unkritisch.
+_NAME_FIX_RE = _re.compile(r"\b(?:Rupert|Ruppert|Ruprecht|Rupprecht|Rubert|Rudbert)\b")
+
+
+def _name_fix(text: str) -> str:
+    return _NAME_FIX_RE.sub("Robert", text) if text else text
+
+
 async def transcribe_wav(wav_path: str, model_size: str = "medium",
                          language: str = "de",
                          messwerte: dict | None = None) -> str:
+    """Whisper-Lauf plus Namenskorrektur (Rupert -> Robert)."""
+    text = await _transcribe_wav_roh(wav_path, model_size, language, messwerte)
+    if language.startswith("de"):
+        neu = _name_fix(text)
+        if neu != text:
+            log.info("Namenskorrektur: %.80s -> %.80s", text, neu)
+        return neu
+    return text
+
+
+async def _transcribe_wav_roh(wav_path: str, model_size: str = "medium",
+                              language: str = "de",
+                              messwerte: dict | None = None) -> str:
     """Transkribiert eine WAV-Datei via faster-whisper (CPU, non-blocking).
 
     In messwerte legt der Remote-Weg avg_logprob und no_speech_prob ab, sofern
